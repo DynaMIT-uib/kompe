@@ -9,7 +9,20 @@ permissions:
   contents: read
 
 jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/check_release_tag.py "${GITHUB_REF_NAME}"
+
+  quality:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: [validate-tag, quality]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

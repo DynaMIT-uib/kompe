@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Operators, meshes, projections, and expansions on spherical surfaces"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {file = "LICENSE"}
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     {name = "Kompe Developers"},
     {name = "Karl M. Laundal"},
@@ -18,10 +19,34 @@ dependencies = [
     "packaging",
     "scipy>=1.11",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+keywords = [
+    "cubed sphere",
+    "geophysics",
+    "SECS",
+    "spherical harmonics",
+]
+
+[project.urls]
+Homepage = "https://github.com/DynaMIT-uib/kompe"
+Documentation = "https://github.com/DynaMIT-uib/kompe#readme"
+Issues = "https://github.com/DynaMIT-uib/kompe/issues"
+Repository = "https://github.com/DynaMIT-uib/kompe.git"
 
 [project.optional-dependencies]
 jax = ["jax>=0.4.26"]
-test = ["pytest>=8", "ruff>=0.9"]
+test = ["pytest>=8", "pytest-cov>=5", "ruff==0.16.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

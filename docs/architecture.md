@@ -12,8 +12,10 @@ belong to those consumers or to explicitly named compatibility modules.
 - `SurfaceOperators` adds closed-surface gradient, Helmholtz, Laplacian, and
   gauge-aware Poisson capabilities.
 - `SECSBasis` is a `SphericalBasis` with scalar-potential, surface-current,
-  and magnetic-field synthesis. Its Green functions are distributional, so it
-  does not pretend to have a square coefficient-space Laplacian.
+  and magnetic-field synthesis. Its required `current_type` gives one
+  coefficient vector an explicit curl-free or divergence-free meaning. Its
+  Green functions are distributional, so it does not pretend to have a square
+  coefficient-space Laplacian.
 - `Grid` stores arbitrary evaluation points and does not imply
   cells or topology.
 - `StructuredSurfaceMesh` describes cell-centred structured surface geometry.
@@ -62,6 +64,13 @@ operations, and least-squares factorization. Consumers import those objects
 directly, ensuring there is only one implementation and one class identity.
 Persistent caches are accepted through the small `get_or_create` protocol and
 remain consumer-owned.
+
+JAX is an optional execution backend, not an import-time policy. Merely
+importing Kompe does not import JAX or enable 64-bit values. Explicit JAX
+arrays select JAX for compatible operations, and callers can select the global
+default with `set_backend("jax")`. NumPy/SciPy remain the reference path;
+SciPy-only sparse formats may stay on that path when no equivalent JAX
+operation exists.
 
 ## Component frames
 

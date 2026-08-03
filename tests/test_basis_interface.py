@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from scipy.sparse import csr_matrix
 
+import kompe
 from kompe import (
     BasisView,
     GlobalCSBasis,
@@ -42,6 +43,7 @@ def test_public_sphere_package_is_canonical():
     assert GlobalCSBasis is ConcreteCSBasis
     assert SHBasis is ConcreteSHBasis
     assert SphericalBasis is CoreBasis
+    assert isinstance(kompe.__version__, str)
 
 
 def test_concrete_bases_implement_basis_interface():
@@ -86,6 +88,8 @@ def test_solid_harmonics_are_separate_from_surface_bases():
 
 def test_public_basis_constructors_reject_invalid_resolution():
     """Basis primitives enforce their own representation invariants."""
+    with pytest.raises(TypeError, match="required positional argument"):
+        GlobalCSBasis()
     with pytest.raises(ValueError, match="positive"):
         GlobalCSBasis(0)
     with pytest.raises(ValueError, match="between zero and Nmax"):
@@ -696,6 +700,24 @@ def test_csbasis_mean_free_projection_is_area_weighted_and_operator_preserving()
     )
 
 
+def test_csbasis_cache_controls_do_not_change_numerical_results():
+    """CS caches are bounded, observable, and safely clearable."""
+    basis = GlobalCSBasis(4)
+    grid = Grid(theta=basis.arr_theta + 0.01, phi=basis.arr_phi)
+    expected = basis.get_scalar_evaluation_matrix(grid)
+
+    populated = basis.cache_info()
+    assert populated["surface_matrices"] == 1
+    assert populated["surface_matrices"] <= populated["surface_max_size"]
+
+    basis.clear_cache(shared_remaps=True)
+    cleared = basis.cache_info()
+    assert cleared["surface_matrices"] == 0
+    assert cleared["remap_operators"]["size"] == 0
+    assert cleared["shared_remap_matrices"]["size"] == 0
+    np.testing.assert_allclose(basis.get_scalar_evaluation_matrix(grid), expected)
+
+
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_csbasis_mean_free_projection_preserves_jax_arrays():
     """CS gauge projection preserves backend arrays."""
@@ -708,7 +730,10 @@ def test_csbasis_mean_free_projection_preserves_jax_arrays():
         projected = cs_basis.project_scalar_mean_free(values)
 
         assert "jax" in type(projected).__module__
-        np.testing.assert_allclose(to_numpy(cs_basis.scalar_mean(projected)), 0.0, atol=1e-14)
+        numpy_values = to_numpy(values)
+        scale = max(1.0, float(np.max(np.abs(numpy_values))))
+        tolerance = 16 * np.finfo(numpy_values.dtype).eps * scale
+        np.testing.assert_allclose(to_numpy(cs_basis.scalar_mean(projected)), 0.0, atol=tolerance)
     finally:
         set_backend(previous_backend)
 
@@ -917,9 +942,9 @@ def test_surface_operator_subclass_must_implement_evaluate_on_grid():
 
     class IncompleteSurfaceOperators(SurfaceOperators):
         kind = "incomplete"
-        index_names = ["i"]
+        index_names = ("i",)
         index_length = 1
-        index_arrays = [[0]]
+        index_arrays = ((0,),)
 
     with pytest.raises(TypeError):
         IncompleteSurfaceOperators()

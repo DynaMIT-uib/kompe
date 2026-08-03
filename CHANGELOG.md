@@ -14,3 +14,9 @@ public interfaces with an accompanying migration note.
 - Add the versioned `RegionalCSGridSpec` interchange format.
 - Provide backend-neutral linear maps and least-squares machinery, with
   optional JAX support.
+- Load JAX lazily without changing process-wide precision configuration.
+- Use analysis terminology for coefficient fitting and reserve projection
+  objects for coordinate charts.
+- Require explicit global-CS resolution and SECS current-system mode.
+- Add bounded cache controls, release gates, provenance, benchmarks, and
+  standalone transform coverage.

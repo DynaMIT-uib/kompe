@@ -17,7 +17,11 @@ from kompe.secs import magnetic_field_matrices, surface_current_matrices
 
 @pytest.fixture
 def secs_basis():
-    return SECSBasis(lat=[65.0, 70.0, 73.0], lon=[5.0, 18.0, 32.0])
+    return SECSBasis(
+        lat=[65.0, 70.0, 73.0],
+        lon=[5.0, 18.0, 32.0],
+        current_type="divergence_free",
+    )
 
 
 @pytest.fixture
@@ -45,11 +49,42 @@ def test_secs_accepts_regional_grid_for_poles_and_evaluation():
         3,
         radius=6371.2,
     )
-    basis = SECSBasis(poles=regional)
+    basis = SECSBasis(poles=regional, current_type="curl_free")
     matrix = basis.evaluate_on_grid(regional)
 
     assert basis.index_length == regional.size
     assert matrix.shape == (regional.size, regional.size)
+
+
+def test_secs_scalar_synthesis_has_explicit_physical_mode(evaluation_grid):
+    poles = Grid(lat=[65.0, 70.0], lon=[5.0, 18.0])
+    curl_free = SECSBasis(poles=poles, current_type="curl_free")
+    divergence_free = SECSBasis(poles=poles, current_type="divergence_free")
+
+    expected_potential = surface_current_matrices(
+        evaluation_grid.lat,
+        evaluation_grid.lon,
+        poles.lat,
+        poles.lon,
+        current_type="potential",
+        constant=curl_free.constant,
+        RI=curl_free.radius,
+    )
+    expected_stream_function = surface_current_matrices(
+        evaluation_grid.lat,
+        evaluation_grid.lon,
+        poles.lat,
+        poles.lon,
+        current_type="scalar",
+        constant=divergence_free.constant,
+        RI=divergence_free.radius,
+    )
+
+    np.testing.assert_allclose(curl_free.evaluate_on_grid(evaluation_grid), expected_potential)
+    np.testing.assert_allclose(
+        divergence_free.evaluate_on_grid(evaluation_grid), expected_stream_function
+    )
+    assert curl_free.signature != divergence_free.signature
 
 
 @pytest.mark.parametrize("current_type", ["curl_free", "divergence_free"])
@@ -87,6 +122,22 @@ def test_two_component_secs_helmholtz_operator_matches_tensor(secs_basis, evalua
         operator @ coefficients.reshape(-1),
         np.tensordot(matrix, coefficients, axes=2).reshape(-1),
     )
+
+
+def test_chunked_secs_current_operator_matches_dense_forward_and_adjoint(
+    secs_basis, evaluation_grid
+):
+    dense = secs_basis.get_surface_current_operator(evaluation_grid)
+    chunked = secs_basis.get_surface_current_operator(evaluation_grid, chunk_size=2)
+    coefficients = np.array([0.4, -1.2, 0.7])
+    values = np.linspace(-1.0, 1.0, 2 * evaluation_grid.size)
+    coefficient_block = np.column_stack([coefficients, -2.0 * coefficients])
+    value_block = np.column_stack([values, 0.5 * values])
+
+    np.testing.assert_allclose(chunked @ coefficients, dense @ coefficients)
+    np.testing.assert_allclose(chunked.rmatvec(values), dense.rmatvec(values))
+    np.testing.assert_allclose(chunked.matmat(coefficient_block), dense.matmat(coefficient_block))
+    np.testing.assert_allclose(chunked.rmatmat(value_block), dense.rmatmat(value_block))
 
 
 @pytest.mark.parametrize("current_type", ["curl_free", "divergence_free"])

@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Mon Apr 17 11:57:56 2023
-
-@author: aohma
-"""
+"""Plot regional cubed-sphere data on an existing Matplotlib axis."""
 
 import numpy as np
 
@@ -77,7 +71,7 @@ class RegionalCSPlot:
         self.ax.set_ylim((self.grid.eta_min, self.grid.eta_max))
 
         # Select gridtype
-        if "gridtype" in kwargs.keys():
+        if "gridtype" in kwargs:
             gridtype = kwargs.pop("gridtype")
             if gridtype not in ["geo", "km", "cs"]:
                 print(
@@ -88,7 +82,7 @@ class RegionalCSPlot:
             gridtype = None
 
         # Longitude or local time
-        if "lt" in kwargs.keys():
+        if "lt" in kwargs:
             lt = bool(kwargs.pop("lt"))
             print("'lt' not implemented yet.")
         else:
@@ -97,26 +91,26 @@ class RegionalCSPlot:
         # Add grid
         if gridtype is not None:
             # Set default grid linewidth
-            if "linewidth" not in kwargs.keys():
+            if "linewidth" not in kwargs:
                 kwargs["linewidth"] = 0.5
 
             # Set default grid color
-            if "color" not in kwargs.keys():
+            if "color" not in kwargs:
                 kwargs["color"] = "lightgrey"
 
             # Set latitudinal grid resolution
-            if "lat_levels" in kwargs.keys():
+            if "lat_levels" in kwargs:
                 lat_levels = kwargs.pop("lat_levels")
-            elif "lat_res" in kwargs.keys():
+            elif "lat_res" in kwargs:
                 lat_res = kwargs.pop("lat_res")
                 lat_levels = np.arange(-90, 90, lat_res)[1:]
             else:  # Default resolution is 10 degrees
                 lat_levels = np.arange(-90, 90, 10)[1:]
 
             # Set longitidinal grid resolution
-            if "lon_levels" in kwargs.keys():
+            if "lon_levels" in kwargs:
                 lon_levels = kwargs.pop("lon_levels")
-            elif "lon_res" in kwargs.keys():
+            elif "lon_res" in kwargs:
                 lon_res = kwargs.pop("lon_levels")
                 if lt:
                     lon_levels = np.arange(0, 24, lon_res)
@@ -129,7 +123,7 @@ class RegionalCSPlot:
                     lon_levels = np.r_[0:360:30]
 
             # Set grid resolution in 'km' grid
-            if "km_levels" in kwargs.keys():
+            if "km_levels" in kwargs:
                 km_levels = kwargs.pop("km_levels")
             else:  # Default res depends on cs grid size
                 km_levels = np.round(
@@ -619,7 +613,7 @@ class RegionalCSPlot:
 
         """
 
-        if "color" not in kwargs.keys():
+        if "color" not in kwargs:
             kwargs["color"] = "black"
 
         for cl in self.grid.projection.get_projected_coastlines(resolution=resolution):

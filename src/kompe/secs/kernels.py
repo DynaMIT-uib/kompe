@@ -181,7 +181,9 @@ def surface_current_matrices(
     elif current_type in ["potential", "scalar"]:
         enu_vec = 1
     else:
-        raise Exception('type must be "divergence_free", "curl_free", "potential", or "sclar"')
+        raise ValueError(
+            'current_type must be "divergence_free", "curl_free", "potential", or "scalar"'
+        )
 
     # get the scalar part of Amm's divergence-free SECS:
     theta = np.arccos(clip_dot_product(np.einsum("ij,kj->ik", ecef_r_secs, ecef_r_data)))
@@ -639,10 +641,10 @@ def inclined_field_magnetic_field_matrices(
 
 
 __all__ = [
+    "angular_distance",
     "clip_dot_product",
+    "current_wedge_magnetic_field_matrix",
     "inclined_field_magnetic_field_matrices",
     "magnetic_field_matrices",
     "surface_current_matrices",
-    "angular_distance",
-    "current_wedge_magnetic_field_matrix",
 ]

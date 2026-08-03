@@ -7,6 +7,7 @@ imported from its owning package:
 
 ```python
 import kompe
+
 basis = kompe.GlobalCSBasis(N=16)
 ```
 
@@ -15,6 +16,13 @@ The sole retained PynaMIT spelling is
 general `pynamit.math` facade and no general spherical re-export surface.
 `KOMPE_USE_JAX` and `KOMPE_LEAST_SQUARES_SOLVER` are the only numerical
 environment settings.
+
+Historical `SphericalTransform.project_scalar` and `project_helmholtz` calls
+become `analyze_scalar_samples` and `analyze_helmholtz_samples`; the
+`projection_basis` argument becomes `analysis_basis`. This keeps coordinate
+projections distinct from coefficient analysis. The short evaluator matrix
+spellings (`G`, `G_th`, and related names) are not part of Kompe's API; use the
+descriptive synthesis properties.
 
 ## Lompe
 
@@ -79,4 +87,6 @@ the same square coefficient-space Laplacian and mean-free Poisson semantics as
 SH or global CS would make the interface less honest. It is nevertheless a
 first-class representation with signatures, scalar synthesis, canonical
 surface-current operators, two-component Helmholtz synthesis, and magnetic
-field synthesis.
+field synthesis. Construction requires `current_type="curl_free"` or
+`current_type="divergence_free"`; this prevents a scalar coefficient vector
+from silently changing physical interpretation.

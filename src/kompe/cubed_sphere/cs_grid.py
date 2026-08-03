@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import scipy.sparse as sp
@@ -136,14 +137,6 @@ class GlobalCSMesh(StructuredSurfaceMesh):
         """Return face and grid-line indices for a mesh resolution."""
         return np.meshgrid(np.arange(6), np.arange(N + 1), np.arange(N + 1), indexing="ij")
 
-    @classmethod
-    def from_basis(cls, basis, N=None):
-        """Build a mesh at a basis resolution (compatibility factory)."""
-        resolution = getattr(basis, "N", None) if N is None else N
-        if resolution is None:
-            raise ValueError("A basis resolution or explicit N is required.")
-        return cls(resolution)
-
     @staticmethod
     def spherical_triangle_area(a, b, c):
         """Return oriented unit-sphere triangle area magnitude."""
@@ -184,12 +177,46 @@ class GlobalCSMesh(StructuredSurfaceMesh):
 class CSGridRemapper:
     """Build and cache remaps between CS-compatible grids."""
 
-    _shared_remap_matrix_cache = OrderedDict()
-    _shared_remap_matrix_cache_size = 8
+    _shared_remap_matrix_cache: ClassVar[OrderedDict] = OrderedDict()
+    _shared_remap_matrix_cache_size: ClassVar[int] = 8
+    _operator_cache_size: ClassVar[int] = 16
 
     def __init__(self, basis, operator_cache=None):
         self.basis = basis
-        self.operator_cache = {} if operator_cache is None else operator_cache
+        self.operator_cache = OrderedDict() if operator_cache is None else operator_cache
+
+    @classmethod
+    def clear_shared_cache(cls):
+        """Clear process-wide CS remapping matrices."""
+        cls._shared_remap_matrix_cache.clear()
+
+    @classmethod
+    def shared_cache_info(cls):
+        """Return process-wide remapping cache occupancy and limit."""
+        return {
+            "size": len(cls._shared_remap_matrix_cache),
+            "max_size": cls._shared_remap_matrix_cache_size,
+        }
+
+    def clear_cache(self):
+        """Clear operators owned by this remapper instance."""
+        self.operator_cache.clear()
+
+    def cache_info(self):
+        """Return instance operator-cache occupancy and limit."""
+        return {"size": len(self.operator_cache), "max_size": self._operator_cache_size}
+
+    def _store_operator(self, key, operator):
+        """Store one operator while enforcing the per-basis cache limit."""
+        self.operator_cache[key] = operator
+        move_to_end = getattr(self.operator_cache, "move_to_end", None)
+        if callable(move_to_end):
+            move_to_end(key)
+        while len(self.operator_cache) > self._operator_cache_size:
+            try:
+                self.operator_cache.popitem(last=False)
+            except TypeError:
+                self.operator_cache.popitem()
 
     @staticmethod
     def grid_theta_phi(grid):
@@ -367,8 +394,11 @@ class CSGridRemapper:
             matrix = self._cached_remap_matrix(
                 matrix_key, lambda: self.build_scalar_grid_remap_matrix(source_grid, target_grid)
             )
-            self.operator_cache[key] = as_linear_map(
-                matrix, input_shape=(source_grid.size,), output_shape=(target_grid.size,)
+            self._store_operator(
+                key,
+                as_linear_map(
+                    matrix, input_shape=(source_grid.size,), output_shape=(target_grid.size,)
+                ),
             )
         return self.operator_cache[key]
 
@@ -385,8 +415,13 @@ class CSGridRemapper:
                 matrix_key,
                 lambda: self.build_tangential_grid_remap_matrix(source_grid, target_grid),
             )
-            self.operator_cache[key] = as_linear_map(
-                matrix, input_shape=(2, source_grid.size), output_shape=(2, target_grid.size)
+            self._store_operator(
+                key,
+                as_linear_map(
+                    matrix,
+                    input_shape=(2, source_grid.size),
+                    output_shape=(2, target_grid.size),
+                ),
             )
         return self.operator_cache[key]
 

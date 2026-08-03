@@ -95,25 +95,23 @@ class GlobalCSBasis(SurfaceOperators):
 
     _surface_cache_size = 16
 
-    def __init__(self, N=None):
+    def __init__(self, N):
         """Initialize the cubed sphere basis.
 
-        If N is provided, initializes arrays for a grid with N×N cells
-        on each cube face. The native coefficients live at the 6×N×N
-        cell centers.
+        Initialize arrays for a grid with N×N cells on each cube face.
+        The native coefficients live at the 6×N×N cell centers.
 
         Parameters
         ----------
-        N : int, optional
-            Number of grid cells per cube edge. Must be even if
-            provided.
+        N : int
+            Number of grid cells per cube edge. Must be even.
 
         Raises
         ------
         TypeError
-            If N is provided but is not an integer.
+            If N is not an integer.
         ValueError
-            If N is provided but is not an even number.
+            If N is not a positive even number.
         """
         self._kind = "CS"
         self._index_names = None
@@ -122,37 +120,64 @@ class GlobalCSBasis(SurfaceOperators):
         self._derivative_bundle = None
         self._laplacian_cache = {}
         self._laplacian_sparse_cache = {}
-        self._remap_operator_cache = {}
+        self._remap_operator_cache = OrderedDict()
         self._grid_remapper = CSGridRemapper(self, self._remap_operator_cache)
         self._finite_differences = CSFiniteDifferences(self)
         self._surface_matrix_cache = OrderedDict()
         self._surface_operator_cache = OrderedDict()
 
-        if N is not None:
-            if isinstance(N, bool) or not isinstance(N, (int, np.integer)):
-                raise TypeError("N must be an integer")
-            if N <= 0:
-                raise ValueError("Cubed sphere grid dimension must be positive")
-            if N % 2 != 0:
-                raise ValueError("Cubed sphere grid dimension must be even")
+        if isinstance(N, bool) or not isinstance(N, (int, np.integer)):
+            raise TypeError("N must be an integer")
+        if N <= 0:
+            raise ValueError("Cubed sphere grid dimension must be positive")
+        if N % 2 != 0:
+            raise ValueError("Cubed sphere grid dimension must be even")
 
-            self.N = int(N)
-            self.mesh = GlobalCSMesh(self.N)
-            self.grid_geometry = self.mesh
-            self.arr_xi = self.mesh.arr_xi
-            self.arr_eta = self.mesh.arr_eta
-            self.arr_block = self.mesh.arr_block
-            self.arr_theta = self.mesh.arr_theta
-            self.arr_phi = self.mesh.arr_phi
-            self.g = self.mesh.metric_tensor
-            self.sqrt_detg = self.mesh.sqrt_detg
-            self.unit_area = self.mesh.unit_area
+        self.N = int(N)
+        self.mesh = GlobalCSMesh(self.N)
+        self.grid_geometry = self.mesh
+        self.arr_xi = self.mesh.arr_xi
+        self.arr_eta = self.mesh.arr_eta
+        self.arr_block = self.mesh.arr_block
+        self.arr_theta = self.mesh.arr_theta
+        self.arr_phi = self.mesh.arr_phi
+        self.g = self.mesh.metric_tensor
+        self.sqrt_detg = self.mesh.sqrt_detg
+        self.unit_area = self.mesh.unit_area
 
-            self.index_names = ("theta", "phi")
-            self.index_length = self.mesh.index_length
-            self.index_arrays = (self.arr_theta, self.arr_phi)
+        self.index_names = ("theta", "phi")
+        self.index_length = self.mesh.index_length
+        self.index_arrays = (self.arr_theta, self.arr_phi)
 
-            self.validate_metadata()
+        self.validate_metadata()
+
+    def clear_cache(self, *, shared_remaps=False):
+        """Clear derived operators and matrices owned by this basis.
+
+        Set ``shared_remaps`` to also clear the bounded process-wide cache of
+        geometry-only interpolation matrices.
+        """
+        self._derivative_bundle = None
+        self._laplacian_cache.clear()
+        self._laplacian_sparse_cache.clear()
+        self._surface_matrix_cache.clear()
+        self._surface_operator_cache.clear()
+        self._grid_remapper.clear_cache()
+        if shared_remaps:
+            self._grid_remapper.clear_shared_cache()
+
+    def cache_info(self):
+        """Return cache occupancy without exposing mutable cache objects."""
+        return {
+            "derivatives_built": self._derivative_bundle is not None,
+            "laplacian_matrices": len(self._laplacian_cache),
+            "sparse_laplacian_matrices": len(self._laplacian_sparse_cache),
+            "surface_matrices": len(self._surface_matrix_cache),
+            "surface_operators": len(self._surface_operator_cache),
+            "surface_max_size": self._surface_cache_size,
+            "remap_operators": self._grid_remapper.cache_info(),
+            "shared_remap_matrices": self._grid_remapper.shared_cache_info(),
+        }
 
     @property
     def kind(self):
@@ -195,8 +220,6 @@ class GlobalCSBasis(SurfaceOperators):
     def native_grid(self):
         """Return the native CS cell centers as a ``Grid``."""
         if not hasattr(self, "_native_grid"):
-            if not hasattr(self, "arr_theta") or not hasattr(self, "arr_phi"):
-                raise ValueError("GlobalCSBasis native_grid requires an initialized grid.")
             from kompe.grid import Grid
 
             self._native_grid = Grid(
@@ -279,8 +302,6 @@ class GlobalCSBasis(SurfaceOperators):
     @property
     def scalar_mean_weights(self):
         """Return area-normalized weights for scalar surface means."""
-        if not hasattr(self, "unit_area"):
-            raise ValueError("GlobalCSBasis scalar mean weights require an initialized grid.")
         weights = np.asarray(self.unit_area, dtype=float)
         total_area = float(np.sum(weights))
         if total_area <= 0.0:
