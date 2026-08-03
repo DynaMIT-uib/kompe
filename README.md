@@ -1,0 +1,97 @@
+# Kompe
+
+**KOMPE — Kit for Operators, Meshes, Projections, and Expansions**
+
+`kompe` provides regional and global numerical methods for spherical geometry
+and fields. Its name comes from the round Norwegian potato dumpling and
+deliberately complements the `lompe` package it serves.
+
+The four terms in the name describe separate architectural roles:
+
+- **projections** parameterize continuous spherical geometry and transform
+  coordinates and vector components;
+- **meshes** discretize that geometry into structured cells with areas,
+  boundaries, and implicit neighbourhood topology;
+- **expansions** represent fields through bases and coefficients;
+- **operators** act between field, sample, and coefficient spaces.
+
+The public implementations include:
+
+- spherical-harmonic (`SHBasis`), Spherical Elementary Current System
+  (`SECSBasis`), and global cubed-sphere (`GlobalCSBasis`) expansions;
+- regional cubed-sphere projections (`RegionalCSProjection`);
+- regional and global structured cubed-sphere meshes (`RegionalCSGrid` and
+  `GlobalCSMesh`);
+- scalar, tangential, magnetic-field, analysis, synthesis, differential, and
+  transfer operators;
+- backend-neutral `LinearMap` objects and least-squares solvers.
+
+The package depends only on NumPy, SciPy, and Packaging. JAX support is
+optional. It never imports PynaMIT, Lompe, or secsy; those libraries are
+consumers or compatibility facades.
+
+## Dependency direction
+
+```text
+                 kompe
+              /      |      \
+         PynaMIT    Lompe    secsy compatibility API
+```
+
+PynaMIT imports Kompe directly and retains only its historical
+`BasisEvaluator` spelling. The legacy secsy function names and class spellings
+remain in secsy rather than becoming aliases in Kompe. Lompe consumes the
+canonical regional grid directly and translates historical serialized grids
+at its own package boundary.
+
+## Geometry and representation boundaries
+
+`Grid` is an arbitrary set of
+evaluation or observation points; it does not claim cells or topology.
+`StructuredSurfaceMesh` is the distinct contract implemented by the regional
+CS grid and the native `GlobalCSMesh` exposed as `GlobalCSBasis.mesh`.
+`RegionalCSGrid` owns geometry; its cached `operators` object owns gradient,
+divergence, surface-metric, and interpolation operations. A versioned
+`RegionalCSGridSpec` is the stable interchange format for saved grids and
+consumer translation layers.
+
+An expansion does not have to use a mesh. SH and SECS expansions are analytic
+or kernel-based, while the global CS expansion is supported by its native
+mesh. Analysis and synthesis are operators associated with expansions rather
+than alternate names for coefficient fitting. In the four-part architecture,
+Projection objects are geometric coordinate charts and their vector/Jacobian
+transformations; coefficient fitting is called analysis.
+
+## Conventions
+
+All public coordinate and component conventions are explicit:
+
+- geographic latitude/longitude and canonical `theta`/`phi` are degrees;
+- regional grids also expose explicit `theta_rad`/`phi_rad` arrays;
+- cubed-sphere `xi`/`eta` are radians;
+- radii are unit-agnostic but must be mutually consistent;
+- surface-operator components are `(theta, phi)` (south, east);
+- SECS kernels return `(east, north[, radial])`.
+
+Regional grids are bounded patches. They share geometry and operator
+capabilities with closed-sphere representations, but do not claim
+closed-surface Helmholtz or mean-free Poisson semantics.
+
+## Quick start
+
+```python
+from kompe import RegionalCSGrid, RegionalCSProjection
+
+projection = RegionalCSProjection((20.0, 70.0), orientation=0.0)
+grid = RegionalCSGrid(projection, 1800.0, 1400.0, 18, 14, radius=6371.2)
+
+east_gradient, north_gradient = grid.operators.gradient_matrices(sparse=True)
+divergence = grid.operators.divergence_matrix(sparse=True)
+
+metadata = grid.to_spec().to_mapping()
+restored = RegionalCSGrid.from_spec(metadata)
+assert restored.signature == grid.signature
+```
+
+Install the numerical core with `pip install kompe`. JAX acceleration is an
+optional extra: `pip install "kompe[jax]"`.
