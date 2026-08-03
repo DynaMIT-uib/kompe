@@ -14,38 +14,55 @@ import types
 from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import wraps
+from importlib.util import find_spec
+from threading import RLock
 from typing import Any
 
 import numpy as _np
 
-JAX_AVAILABLE = False
+JAX_AVAILABLE = find_spec("jax") is not None
 _jax_namespace: types.ModuleType | None = None
 _jax_array_type: tuple[type, ...] = ()
 _jax_device_put = None
 _jax_jit = None
 _jax_vmap = None
+_jax_import_lock = RLock()
 
-try:  # pragma: no cover - we fall back gracefully when JAX is absent
-    import jax
-    import jax.numpy as _jnp
-    from jax import jit as _jax_jit  # type: ignore[assignment]
-    from jax import vmap as _jax_vmap  # type: ignore[assignment]
 
-    _jax_namespace = _jnp
-    _jax_device_put = jax.device_put
+def _load_jax() -> types.ModuleType:
+    """Import JAX on first use without changing process-wide configuration."""
+    global _jax_array_type, _jax_device_put, _jax_jit, _jax_namespace, _jax_vmap
 
-    from jax import Array as _JaxArray  # type: ignore[attr-defined]
+    if not JAX_AVAILABLE:
+        raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
+    if _jax_namespace is not None:
+        return _jax_namespace
 
-    _jax_array_type = (_JaxArray,)
+    with _jax_import_lock:
+        if _jax_namespace is not None:
+            return _jax_namespace
+        try:
+            import jax
+            import jax.numpy as jnp
+            from jax import Array as JaxArray
+        except ImportError as exc:  # pragma: no cover - broken optional install
+            raise RuntimeError("JAX is installed but could not be imported.") from exc
 
-    JAX_AVAILABLE = True
+        _jax_namespace = jnp
+        _jax_device_put = jax.device_put
+        _jax_jit = jax.jit
+        _jax_vmap = jax.vmap
+        _jax_array_type = (JaxArray,)
+        return _jax_namespace
 
-    try:  # pragma: no cover - configuration helper
-        jax.config.update("jax_enable_x64", True)
-    except Exception:
-        pass
-except Exception:  # pragma: no cover - JAX is optional
-    _jax_namespace = None
+
+def _is_jax_array(array: Any) -> bool:
+    """Recognize JAX values without importing JAX for NumPy-only callers."""
+    array_module = type(array).__module__.split(".", maxsplit=1)[0]
+    if array_module not in {"jax", "jaxlib"}:
+        return False
+    _load_jax()
+    return isinstance(array, _jax_array_type)
 
 
 def _env_flag(value: str | None) -> bool:
@@ -63,6 +80,8 @@ def use_jax(flag: bool | None = None) -> bool:
     if flag is not None:
         if flag and not JAX_AVAILABLE:
             raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
+        if flag:
+            _load_jax()
         _USE_JAX = bool(flag)
     return bool(_USE_JAX and JAX_AVAILABLE)
 
@@ -112,20 +131,19 @@ def get_array_module(*arrays: Any) -> types.ModuleType:
 
     Explicit JAX inputs take precedence over the global backend setting.
     """
-    if arrays and JAX_AVAILABLE:
+    if arrays:
         for array in arrays:
-            if isinstance(array, _jax_array_type):
-                return _jax_namespace  # type: ignore[return-value]
-    return _jax_namespace if use_jax() else _np  # type: ignore[return-value]
+            if _is_jax_array(array):
+                return _load_jax()
+    return _load_jax() if use_jax() else _np
 
 
 def to_jax(array: Any) -> Any:
     """Convert ``array`` to a JAX device array when JAX is enabled."""
     if not use_jax():
         return array
-    if JAX_AVAILABLE and _jax_device_put is not None:
-        return _jax_device_put(array)
-    return array
+    _load_jax()
+    return _jax_device_put(array)
 
 
 def block_until_ready(array: Any) -> Any:
@@ -162,7 +180,7 @@ def block_after_jax_linalg(array: Any) -> Any:
 
 def to_numpy(array: Any) -> Any:
     """Convert ``array`` to a NumPy ``ndarray``."""
-    if JAX_AVAILABLE and isinstance(array, _jax_array_type):
+    if _is_jax_array(array):
         block_until_ready(array)
         return _np.asarray(array)
     return _np.asarray(array)
@@ -191,6 +209,7 @@ def jit(func=None, *jit_args, **jit_kwargs):
 
     def decorator(fn):
         if use_jax():
+            _load_jax()
             return _jax_jit(fn, *jit_args, **jit_kwargs)
         return fn
 
@@ -203,6 +222,7 @@ def vmap(func=None, *vmap_args, **vmap_kwargs):
     """Wrap ``jax.vmap`` and require the JAX backend."""
     if not (JAX_AVAILABLE and use_jax()):
         raise RuntimeError("JAX vmap requested but the JAX backend is not enabled.")
+    _load_jax()
 
     if func is None:
         return lambda fn: _jax_vmap(fn, *vmap_args, **vmap_kwargs)
@@ -229,16 +249,16 @@ xp = _ArrayModuleProxy()
 
 __all__ = [
     "JAX_AVAILABLE",
-    "xp",
-    "use_jax",
-    "set_backend",
+    "asarray",
     "backend_context",
-    "get_array_module",
-    "to_jax",
     "block_after_jax_linalg",
     "block_until_ready",
-    "to_numpy",
-    "asarray",
+    "get_array_module",
     "jit",
+    "set_backend",
+    "to_jax",
+    "to_numpy",
+    "use_jax",
     "vmap",
+    "xp",
 ]

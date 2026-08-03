@@ -174,25 +174,21 @@ class SphericalRepresentation(ABC):
     @abstractmethod
     def kind(self):
         """Short identifier for the representation."""
-        pass
 
     @property
     @abstractmethod
     def index_names(self):
         """Names of indices used in the representation."""
-        pass
 
     @property
     @abstractmethod
     def index_length(self):
         """Total number of stored scalar values."""
-        pass
 
     @property
     @abstractmethod
     def index_arrays(self):
         """Arrays of indices used in the representation."""
-        pass
 
     def validate_metadata(self) -> None:
         """Validate initialized representation metadata."""
@@ -221,7 +217,6 @@ class ScalarSynthesis(SphericalBasis):
     @abstractmethod
     def evaluate_on_grid(self, grid, derivative=None):
         """Evaluate basis functions or supported derivatives on ``grid``."""
-        pass
 
     def evaluate_on_grid_uncached(self, grid, derivative=None):
         """Evaluate without optional persistent materialization."""
@@ -256,7 +251,6 @@ class SurfaceOperators(ScalarSynthesis):
     @abstractmethod
     def laplacian(self, r=1.0):
         """Return the scalar surface Laplacian operator."""
-        pass
 
     def get_surface_gradient_matrix(self, grid):
         """Return ``[d_theta, sin(theta)^-1 d_phi]`` on a surface."""

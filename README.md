@@ -27,8 +27,9 @@ The public implementations include:
 - backend-neutral `LinearMap` objects and least-squares solvers.
 
 The package depends only on NumPy, SciPy, and Packaging. JAX support is
-optional. It never imports PynaMIT, Lompe, or secsy; those libraries are
-consumers or compatibility facades.
+optional and loaded only when requested; Kompe does not change JAX's global
+precision configuration. It never imports PynaMIT, Lompe, or secsy; those
+libraries are consumers or compatibility facades.
 
 ## Dependency direction
 
@@ -94,4 +95,11 @@ assert restored.signature == grid.signature
 ```
 
 Install the numerical core with `pip install kompe`. JAX acceleration is an
-optional extra: `pip install "kompe[jax]"`.
+optional extra: `pip install "kompe[jax]"`. Select it with
+`KOMPE_USE_JAX=1` or `kompe.math.set_backend("jax")`. Applications that need
+64-bit JAX arithmetic should set `JAX_ENABLE_X64=1` before importing JAX.
+
+The public API, coordinate conventions, release policy, and consumer migration
+are documented in [`docs/`](docs/). Kompe is currently an alpha API: releases
+follow semantic versioning, but breaking corrections may occur before 1.0 and
+will be recorded in the changelog.

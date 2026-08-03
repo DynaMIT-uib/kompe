@@ -1365,7 +1365,9 @@ def as_linear_map(
                 return _linear_map_from_jax_sparse(
                     BCOO.from_scipy_sparse(op), input_shape=input_shape, output_shape=output_shape
                 )
-            except Exception:
+            except (TypeError, ValueError, NotImplementedError):
+                # Some SciPy sparse formats are unsupported by JAX. Preserve
+                # them as SciPy-backed maps instead of failing conversion.
                 pass
         return _linear_map_from_scipy_sparse(
             op, input_shape=input_shape, output_shape=output_shape

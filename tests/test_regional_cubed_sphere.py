@@ -71,6 +71,11 @@ def test_regional_grid_has_canonical_units_metadata_and_roundtrip():
     np.testing.assert_allclose(restored.lon, grid.lon)
     np.testing.assert_allclose(restored.lat, grid.lat)
 
+    with pytest.raises(ValueError, match="read-only"):
+        grid.lon.flat[0] = 0.0
+    with pytest.raises(ValueError, match="read-only"):
+        grid.projection.orientation[0] = 0.0
+
 
 def test_regional_grid_requires_explicit_radius_and_shifts_only_width_axis():
     projection = RegionalCSProjection((20.0, 70.0), 0.0)
@@ -89,6 +94,24 @@ def test_regional_grid_requires_explicit_radius_and_shifts_only_width_axis():
     )
     np.testing.assert_allclose(shifted.eta_mesh, baseline.eta_mesh)
     np.testing.assert_allclose(shifted.xi_mesh, baseline.xi_mesh - 100.0 / 6371.2)
+
+
+def test_regional_grid_rejects_nonuniform_edges_and_invalid_stencils():
+    projection = RegionalCSProjection((20.0, 70.0), 0.0)
+    with pytest.raises(ValueError, match="uniformly spaced"):
+        RegionalCSGrid(
+            projection,
+            1000.0,
+            800.0,
+            3,
+            3,
+            radius=6371.2,
+            edges=([-0.2, -0.1, 0.2], [-0.2, 0.0, 0.2]),
+        )
+
+    grid = RegionalCSGrid(projection, 1000.0, 800.0, 3, 3, radius=6371.2)
+    with pytest.raises(ValueError, match="at least"):
+        grid.operators.gradient_matrices(stencil_size=2)
 
 
 def test_regional_scalar_interpolation_preserves_shape_and_complex_values():
@@ -123,6 +146,31 @@ def test_regional_operator_matrices_are_sparse_by_default():
     assert sparse.issparse(east)
     assert sparse.issparse(north)
     assert sparse.issparse(divergence)
+
+
+def test_regional_grid_owns_topology_while_operator_object_owns_numerics():
+    grid = RegionalCSGrid(
+        RegionalCSProjection((20.0, 70.0), 23.0),
+        1800.0,
+        1400.0,
+        18,
+        14,
+        radius=6371.2,
+    )
+    eta_index = np.array([0, 1, -1])
+    xi_index = np.array([0, 2, -1])
+    flat = grid.flat_index(eta_index, xi_index)
+    actual_eta, actual_xi = grid.unravel_index(flat)
+
+    np.testing.assert_array_equal(actual_eta, eta_index % grid.NL)
+    np.testing.assert_array_equal(actual_xi, xi_index % grid.NW)
+    for former_grid_method in (
+        "_gradient_matrices",
+        "_divergence_matrix",
+        "_surface_geometry",
+        "_interpolate_scalar",
+    ):
+        assert not hasattr(grid, former_grid_method)
 
 
 def test_embedded_metric_matches_cell_area_formula():

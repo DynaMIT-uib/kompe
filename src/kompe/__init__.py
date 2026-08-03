@@ -1,5 +1,7 @@
 """Spherical representations and transforms."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from kompe.constants import EARTH_RADIUS_M, MU0
 from kompe.core import (
     BasisView,
@@ -30,15 +32,20 @@ from kompe.spherical_harmonics.sh_basis import SHBasis
 from kompe.spherical_harmonics.solid_harmonics import SolidHarmonics
 from kompe.spherical_transform import SphericalTransform
 
+try:
+    __version__ = version("kompe")
+except PackageNotFoundError:  # pragma: no cover - only an uninstalled source tree
+    __version__ = "0+unknown"
+
 __all__ = [
-    "BasisView",
     "EARTH_RADIUS_M",
-    "Grid",
-    "GlobalCSBasis",
-    "GlobalCSMesh",
     "MU0",
     "REGIONAL_CS_GRID_SCHEMA",
     "REGIONAL_CS_GRID_SCHEMA_VERSION",
+    "BasisView",
+    "GlobalCSBasis",
+    "GlobalCSMesh",
+    "Grid",
     "RegionalCSGrid",
     "RegionalCSGridSpec",
     "RegionalCSOperators",
@@ -50,8 +57,9 @@ __all__ = [
     "SphericalBasis",
     "SphericalRepresentation",
     "SphericalTransform",
-    "SurfaceOperators",
     "StructuredSurfaceMesh",
+    "SurfaceOperators",
+    "__version__",
     "basis_kind",
     "is_basis_kind",
     "is_cs_basis",

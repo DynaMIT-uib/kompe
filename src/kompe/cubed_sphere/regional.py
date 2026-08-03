@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 import numpy as np
-from scipy import sparse
+from scipy import sparse as scipy_sparse
 
 from kompe.core import SphericalRepresentation
 from kompe.cubed_sphere import cs_coordinates
@@ -70,8 +70,15 @@ class RegionalCSProjection:
             if 2-element array-like: The elements denote the eastward and northward components
             of a vector that is aligned with the xi axis.
         """
-        self.position = np.array(position)
-        self.orientation = np.array(orientation)
+        self.position = np.asarray(position, dtype=float)
+        if self.position.shape != (2,) or not np.isfinite(self.position).all():
+            raise ValueError("position must contain finite longitude and latitude values")
+        if not -90.0 <= self.position[1] <= 90.0:
+            raise ValueError("position latitude must be between -90 and 90 degrees")
+
+        self.orientation = np.asarray(orientation, dtype=float)
+        if not np.isfinite(self.orientation).all():
+            raise ValueError("orientation must contain finite values")
 
         if self.orientation.size == 2:  # interpreted as a east, north component:
             orientation_norm = np.linalg.norm(self.orientation)
@@ -80,10 +87,10 @@ class RegionalCSProjection:
             if not np.isclose(orientation_norm, 1.0, rtol=0.0, atol=1e-15):
                 self.orientation = self.orientation / orientation_norm
         else:  # interpreted as scalar
-            assert self.orientation.size == 1, (
-                "orientation must be either scalar or have 2 elements"
-            )
-            self.orientation = np.array([np.cos(orientation * d2r), np.sin(orientation * d2r)])
+            if self.orientation.size != 1:
+                raise ValueError("orientation must be either scalar or have 2 elements")
+            angle = float(self.orientation.reshape(-1)[0])
+            self.orientation = np.array([np.cos(angle * d2r), np.sin(angle * d2r)])
         v = np.array([self.orientation[0], self.orientation[1], 0]).reshape((1, 3))
 
         self.lon0, self.lat0 = position
@@ -108,6 +115,18 @@ class RegionalCSProjection:
             (self.x, self.y, self.z)
         )  # rotation matrix from GEO to rotated coords (ECEF)
         self.R_local2geo = self.R_geo2local.T  # inverse
+        for name in (
+            "position",
+            "orientation",
+            "x",
+            "y",
+            "z",
+            "R_geo2local",
+            "R_local2geo",
+        ):
+            values = np.array(getattr(self, name), copy=True)
+            values.setflags(write=False)
+            setattr(self, name, values)
 
     @property
     def signature(self):
@@ -576,10 +595,10 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         self.width = float(width)
         self.length_resolution = length_resolution
         self.width_resolution = width_resolution
-        self.edges = edges
+        self.edges = RegionalCSGridSpec._edges(edges)
 
         # make xi and eta arrays for the grid cell boundaries:
-        if edges is None:
+        if self.edges is None:
             if isinstance(length_resolution, int):
                 xi_edge = (
                     np.linspace(
@@ -608,7 +627,12 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
                     )
                 ]
         else:
-            xi_edge, eta_edge = edges
+            xi_edge, eta_edge = (np.asarray(axis) for axis in self.edges)
+
+        for name, axis in (("xi", xi_edge), ("eta", eta_edge)):
+            spacing = np.diff(axis)
+            if not np.allclose(spacing, spacing[0], rtol=1e-12, atol=1e-15):
+                raise ValueError(f"{name} edges must be uniformly spaced")
 
         # outer grid limits in xi and eta coords:
         self.xi_min, self.xi_max = xi_edge.min(), xi_edge.max()
@@ -669,6 +693,32 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
                 }
             ),
         )
+        for name in (
+            "xi_mesh",
+            "eta_mesh",
+            "lon_mesh",
+            "lat_mesh",
+            "xi",
+            "eta",
+            "lon",
+            "lat",
+            "local_lon",
+            "local_lat",
+            "theta",
+            "phi",
+            "theta_rad",
+            "phi_rad",
+            "X",
+            "Y",
+            "delta",
+            "C",
+            "D",
+            "A",
+            "area_weights",
+        ):
+            values = np.array(getattr(self, name), copy=True)
+            values.setflags(write=False)
+            setattr(self, name, values)
         self.validate_metadata()
         self.validate_mesh_metadata()
 
@@ -756,41 +806,33 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
             + f"Extent: ~{th0:.1f} x {th1:.1f} degrees central angle"
         )
 
-    def _index(self, i, j):
-        """
-        Calculate the 1D index that corresponds to the grid index i, j
+    def flat_index(self, eta_index, xi_index):
+        """Return flattened indices for structured cell indices.
 
         Parameters
         ----------
-        i: array-like (int)
-            row index(es)
-        j: array-like (int)
-            columns index(es)
+        eta_index: array-like of int
+            Row indices along the eta axis. Negative indices wrap.
+        xi_index: array-like of int
+            Column indices along the xi axis. Negative indices wrap.
 
         Returns
         -------
         1D array of ints which denote the index(es) of i, j in a flattened version
         of a 2D array of shape (self.NL, self.NW)
         """
-        i = np.array(i) % self.NL  # wrap negative indices to other end
-        j = np.array(j) % self.NW
+        i = np.asarray(eta_index) % self.NL
+        j = np.asarray(xi_index) % self.NW
 
-        try:
-            return np.ravel_multi_index((i, j), (self.NL, self.NW)).flatten()
-        except Exception:
-            print("invalid index?", i, j, self.NL, self.NW)
+        return np.ravel_multi_index((i, j), (self.NL, self.NW)).flatten()
 
-    def _index2d(self, index1d):
-        """
-        Calculate 2d indices from the input 1D index.
-        Inverse of _index() function.
-
-        Added 2021-11-02 by JPR
+    def unravel_index(self, flat_index):
+        """Return eta and xi indices for flattened cell indices.
 
         Parammeters
         -----------
-        index1d: array-like (int) of length N of 1d indices to be represented
-            by the 2D ij indices
+        flat_index: array-like of int
+            Flattened cell indices.
 
         Returns
         -------
@@ -798,10 +840,7 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         Same length (N) as input parameter.
 
         """
-        i = index1d // self.shape[1]
-        j = index1d % self.shape[1]
-
-        return i, j
+        return np.unravel_index(flat_index, self.mesh_shape)
 
     def count(self, lon, lat, **kwargs):
         """
@@ -829,7 +868,7 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         xi, eta = self.projection.geo2cube(lon, lat)
 
         xi_edges, eta_edges = self.xi_mesh[0, :], self.eta_mesh[:, 0]
-        count, xi_, eta_ = np.histogram2d(xi, eta, (xi_edges, eta_edges), **kwargs)
+        count, _, _ = np.histogram2d(xi, eta, (xi_edges, eta_edges), **kwargs)
 
         return count.T  # transpose because xi should be horizontal and eta vertical
 
@@ -895,7 +934,7 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         """
         lat, lon = np.array(lat), np.array(lon)
         if lon.shape != lat.shape:
-            raise Exception("RegionalCSGrid.ingrid: lon and lat must have same shape")
+            raise ValueError("RegionalCSGrid.ingrid: lon and lat must have same shape")
         shape = lon.shape
         lon, lat = lon.flatten(), lat.flatten()
 
@@ -940,309 +979,13 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
                 i = i - self.NL - 1
                 yield (x[:, i], y[:, i])
 
-    def _gradient_matrices(self, S=1, return_dxi_deta=False, return_sparse=False):
-        """
-        Calculate the matrix that produces the derivative in the
-        eastward and northward directions of a scalar field
-        defined on self
-
-        set return_dxi_deta to True to return the matrices that
-        differentiate in cubed sphere coordinates instead of geo
-
-        Parameters
-        ----------
-        S: int, optional
-            Stencil size. Default is 1, in which case derivatives will be calculated
-            with a 3-point stencil. With S = 2, a 5-point stencil will be used. etc.
-        return_dxi_deta: bool, optional
-            Set to True if you want matrices that differentiate in the xi / eta
-            directions instead of east /  north
-        return_sparse: bool, optional
-            Set to True if you want scipy.sparse matrices instead of dense numpy arrays
-        """
-        dxi = self.dxi
-        det = self.deta
-        N = self.NL
-        M = self.NW
-
-        D_xi = {"rows": [], "cols": [], "elements": []}
-        D_et = {"rows": [], "cols": [], "elements": []}
-
-        # index arrays (0 to N, M)
-        i_arr = np.arange(N)
-        j_arr = np.arange(M)
-
-        # meshgrid versions:
-        ii, jj = np.meshgrid(i_arr, j_arr, indexing="xy")
-
-        # inner grid points:
-        points = np.r_[-S : S + 1 : 1]
-        coefficients = diffutils.stencil(points, order=1)
-        i_dx, j_dx = ii[:, S:-S], jj[:, S:-S]
-        i_dy, j_dy = ii.T[:, S:-S], jj.T[:, S:-S]
-
-        for ll in range(len(points)):
-            D_et["rows"].append(self._index(i_dx, j_dx))
-            D_et["cols"].append(self._index(i_dx + points[ll], j_dx))
-            D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
-
-            D_xi["rows"].append(self._index(i_dy, j_dy))
-            D_xi["cols"].append(self._index(i_dy, j_dy + points[ll]))
-            D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
-
-        # boundaries
-        for kk in np.arange(0, S)[::-1]:
-            # LEFT
-            points = np.r_[-kk : S + 1 : 1]
-            coefficients = diffutils.stencil(points, order=1)
-            i_dx, j_dx = ii[:, kk], jj[:, kk]
-            i_dy, j_dy = ii.T[:, kk], jj.T[:, kk]
-
-            for ll in range(len(points)):
-                D_et["rows"].append(self._index(i_dx, j_dx))
-                D_et["cols"].append(self._index(i_dx + points[ll], j_dx))
-                D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
-
-                D_xi["rows"].append(self._index(i_dy, j_dy))
-                D_xi["cols"].append(self._index(i_dy, j_dy + points[ll]))
-                D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
-
-            # RIGHT
-            points = np.r_[-S : kk + 1 : 1]
-            coefficients = diffutils.stencil(points, order=1)
-            i_dx, j_dx = ii[:, -(kk + 1)], jj[:, -(kk + 1)]
-            i_dy, j_dy = ii.T[:, -(kk + 1)], jj.T[:, -(kk + 1)]
-
-            for ll in range(len(points)):
-                D_et["rows"].append(self._index(i_dx, j_dx))
-                D_et["cols"].append(self._index(i_dx + points[ll], j_dx))
-                D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
-
-                D_xi["rows"].append(self._index(i_dy, j_dy))
-                D_xi["cols"].append(self._index(i_dy, j_dy + points[ll]))
-                D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
-
-        D_xi = {key: np.hstack(D_xi[key]) for key in D_xi.keys()}
-        D_et = {key: np.hstack(D_et[key]) for key in D_et.keys()}
-
-        D_xi = sparse.csc_matrix(
-            (D_xi["elements"], (D_xi["rows"], D_xi["cols"])), shape=(N * M, N * M)
-        )
-        D_et = sparse.csc_matrix(
-            (D_et["elements"], (D_et["rows"], D_et["cols"])), shape=(N * M, N * M)
-        )
-
-        if return_dxi_deta:
-            if return_sparse:
-                return D_xi, D_et
-            else:
-                return np.array(D_xi.todense()), np.array(D_et.todense())
-
-        # A scalar gradient is a covector.  Convert its coordinate partials
-        # through the exact dual basis of the embedded cubed-sphere surface.
-        # This remains well-defined at the projection centre and avoids the
-        # 0/0 terms in the historical Ronchi-equation implementation.
-        east_coeff, north_coeff, _ = self._surface_geometry()
-        Le = sparse.diags(east_coeff[:, 0]) @ D_xi + sparse.diags(east_coeff[:, 1]) @ D_et
-        Ln = sparse.diags(north_coeff[:, 0]) @ D_xi + sparse.diags(north_coeff[:, 1]) @ D_et
-        if return_sparse:
-            return Le, Ln
-        else:
-            return np.array(Le.todense()), np.array(Ln.todense())
-
-    def _divergence_matrix(self, S=1, return_sparse=False):
-        """
-        Calculate the matrix that produces the divergence of a vector field
-
-        The returned 2N x N matrix operates on a 1D array that represents a
-        vector field. The array must be of length 2N, where N is the number
-        of grid cells. The first N elements are the eastward components and
-        the last N are the northward components.
-
-        Note - this code is based on equations (12) and (23) of Ronchi. The
-        'matrification' is explained in my regional data analysis document;
-        it is not super easy to understand it from the code alone.
-
-        Parameters
-        ----------
-        S: int, optional
-            Stencil size. Default is 1, in which case derivatives will be calculated
-            with a 3-point stencil. With S = 2, a 5-point stencil will be used. etc.
-        return_sparse: bool, optional
-            Set to True if you want scipy.sparse matrices instead of dense numpy arrays
-        """
-        D_xi, D_eta = self._gradient_matrices(S=S, return_dxi_deta=True, return_sparse=True)
-        east_coeff, north_coeff, sqrt_g = self._surface_geometry()
-
-        # In curvilinear coordinates,
-        # div(V) = 1/sqrt(g) * partial_a(sqrt(g) V^a).
-        # The dual-basis coefficients convert geographic east/north vector
-        # components into the contravariant components V^xi and V^eta.
-        inv_sqrt_g = sparse.diags(1 / sqrt_g)
-        east = inv_sqrt_g @ (
-            D_xi @ sparse.diags(sqrt_g * east_coeff[:, 0])
-            + D_eta @ sparse.diags(sqrt_g * east_coeff[:, 1])
-        )
-        north = inv_sqrt_g @ (
-            D_xi @ sparse.diags(sqrt_g * north_coeff[:, 0])
-            + D_eta @ sparse.diags(sqrt_g * north_coeff[:, 1])
-        )
-        result = sparse.hstack((east, north), format="csc")
-        return result if return_sparse else result.toarray()
-
-    def _surface_geometry(self):
-        """Return geographic dual-basis coefficients and ``sqrt(det(g))``.
-
-        The returned east and north arrays have columns for the xi and eta
-        contravariant directions.  They serve both scalar-gradient and vector-
-        divergence operators, keeping those two constructions geometrically
-        consistent.
-        """
-        xi = self.xi.reshape(-1)
-        eta = self.eta.reshape(-1)
-
-        # Columns 0 and 1 of the inverse coordinate transform are the physical
-        # tangent vectors d(position)/dxi and d(position)/deta in local ECEF.
-        jacobian_local = cs_vectors.pc(xi, eta, r=self.radius, block=4, inverse=True)[:, :, :2]
-        jacobian_geo = np.einsum("ij,njk->nik", self.projection.R_local2geo, jacobian_local)
-        metric = np.einsum("nki,nkj->nij", jacobian_geo, jacobian_geo)
-        dual_basis = np.einsum("nki,nij->nkj", jacobian_geo, np.linalg.inv(metric))
-
-        lon = np.deg2rad(self.lon.reshape(-1))
-        lat = np.deg2rad(self.lat.reshape(-1))
-        east = np.column_stack((-np.sin(lon), np.cos(lon), np.zeros_like(lon)))
-        north = np.column_stack(
-            (
-                -np.sin(lat) * np.cos(lon),
-                -np.sin(lat) * np.sin(lon),
-                np.cos(lat),
-            )
-        )
-        east_coeff = np.einsum("nk,nkj->nj", east, dual_basis)
-        north_coeff = np.einsum("nk,nkj->nj", north, dual_basis)
-        sqrt_g = np.sqrt(np.linalg.det(metric))
-        return east_coeff, north_coeff, sqrt_g
-
-    def _interpolate_scalar(self, lon, lat, scalar_field):
-        """
-        Interpolate values of a cell-centred scalar field at the requested
-        longitude/latitude locations. Bilinear interpolation uses only the
-        nearest four values and therefore requires memory proportional to the
-        number of evaluation points, not the product of grid and point counts.
-
-        Parameters
-        ----------
-        lon: array
-            array of longitudes [degrees] - must have same shape as lat_
-        lat: array
-            array of latitudes [degrees] - must have same shape as lon_
-        scalar_field: array
-            2D array (or flattened) of the scalar field as defined on the CS grid
-            (dimensions must match)
-
-        Returns
-        -------
-        Interpolated values of the 2D scalar field at the desired input (lon, lat)
-        locations.
-        """
-        lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
-
-        # Remove points outside grid
-        inside = self.ingrid(lon, lat)
-        lon_ = lon[inside]
-        lat_ = lat[inside]
-
-        # Get i,j index of each evaluation location, as a float
-        binnumber = self.bin_index(lon_, lat_)
-        i = binnumber[0].flatten()
-        j = binnumber[1].flatten()
-        xi_obs, eta_obs = self.projection.geo2cube(lon_.flatten(), lat_.flatten())
-        xi_grid = self.xi[i, j]
-        eta_grid = self.eta[i, j]
-        i_frac = (eta_obs - eta_grid) / self.deta
-        j_frac = (xi_obs - xi_grid) / self.dxi
-        i = i + i_frac
-        j = j + j_frac
-
-        # Handle issue with machine precission causing points to end up in wrong place
-        # using floor/ceil if specifying to evaluate very close to the grid loations
-        # used in the interpolation
-        close_i = np.isclose(np.round(i), i, atol=1e-14)
-        i[close_i] = np.round(i)[close_i] + 1e-14
-        close_j = np.isclose(np.round(j), j, atol=1e-14)
-        j[close_j] = np.round(j)[close_j] + 1e-14
-
-        # Handle input points falling within the perimiter cells, but outside the
-        # boundary determined by the center location in the perimiter cells. For those
-        # input points an extrapolation will be performed based on the bilinear
-        # interpolation scheme (just evaluated outside the "box" of the 4 points).
-        small_i = i <= 0  # due to ingrid it must also be > -0.5
-        i[small_i] = 0.00001
-        small_j = j <= 0  # due to ingrid it must also be > -0.5
-        j[small_j] = 0.00001
-        large_i = i >= self.shape[0] - 1  # due to ingrid it must also be > -0.5
-        i[large_i] = self.shape[0] - 1 - 0.00001
-        large_j = j >= self.shape[1] - 1  # due to ingrid it must also be > -0.5
-        j[large_j] = self.shape[1] - 1 - 0.00001
-
-        # Indices of the four nodes surrounding each observation/evaluation location
-        ifloor = np.floor(i).astype(int)
-        iceil = np.ceil(i).astype(int)
-        jfloor = np.floor(j).astype(int)
-        jceil = np.ceil(j).astype(int)
-
-        # CS coordinates and 1D indices of these points
-        xi1 = self.xi[ifloor, jfloor]
-        eta1 = self.eta[ifloor, jfloor]
-        ij1 = np.ravel_multi_index((ifloor, jfloor), (self.NL, self.NW)).flatten()
-        # xi2 = grid.xi[iceil,jfloor] # We dont need all 4 the xi-eta coords. since their
-        # coordinates will be the pairwise similar
-        eta2 = self.eta[iceil, jfloor]
-        ij2 = np.ravel_multi_index((iceil, jfloor), (self.NL, self.NW)).flatten()
-        # xi3 = grid.xi[iceil,jceil]
-        # eta3 = grid.eta[iceil,jceil]
-        ij3 = np.ravel_multi_index((iceil, jceil), (self.NL, self.NW)).flatten()
-        xi4 = self.xi[ifloor, jceil]
-        # eta4 = grid.eta[ifloor,jceil]
-        ij4 = np.ravel_multi_index((ifloor, jceil), (self.NL, self.NW)).flatten()
-
-        # CS coordinates of observations/evaluation locations
-        xi_obs, eta_obs = self.projection.geo2cube(lon_.flatten(), lat_.flatten())
-        # Bilinear interpolation: https://en.wikipedia.org/wiki/Bilinear_interpolation
-        w1 = (xi4 - xi_obs) * (eta2 - eta_obs) / ((xi4 - xi1) * (eta2 - eta1))  # w11
-        w2 = (xi4 - xi_obs) * (eta_obs - eta1) / ((xi4 - xi1) * (eta2 - eta1))  # w12
-        w3 = (xi_obs - xi1) * (eta_obs - eta1) / ((xi4 - xi1) * (eta2 - eta1))  # w22
-        w4 = (xi_obs - xi1) * (eta2 - eta_obs) / ((xi4 - xi1) * (eta2 - eta1))  # w21
-
-        scalar_values = np.asarray(scalar_field).reshape(-1)
-        if scalar_values.size != self.size:
-            raise ValueError(
-                f"scalar_field must contain {self.size} grid values; got {scalar_values.size}"
-            )
-        interpolated_ = (
-            w1 * scalar_values[ij1]
-            + w2 * scalar_values[ij2]
-            + w3 * scalar_values[ij3]
-            + w4 * scalar_values[ij4]
-        )
-
-        # Insert nans and ensure to return an array with same shape as input
-        interpolated = np.full(
-            lat.size,
-            np.nan,
-            dtype=np.result_type(interpolated_, float),
-        )
-        interpolated[inside.flatten()] = interpolated_
-
-        return interpolated.reshape(lat.shape)
-
 
 class RegionalCSOperators:
     """Numerical operators associated with one regional cubed-sphere grid.
 
-    The operator object is deliberately separate from the grid geometry. It
-    keeps discretization choices explicit while sharing the grid's coordinate
-    data and exact geometry identity.
+    The grid owns coordinates, cells, and topology. This object owns the
+    discretization choices and constructs interpolation and differential
+    operators against that immutable geometry.
     """
 
     def __init__(self, grid):
@@ -1262,24 +1005,320 @@ class RegionalCSOperators:
         cube_coordinates=False,
         sparse=True,
     ):
-        """Return scalar-gradient matrices for the grid cell centres."""
-        return self.grid._gradient_matrices(
-            S=stencil_size,
-            return_dxi_deta=cube_coordinates,
-            return_sparse=sparse,
+        """
+        Calculate the matrix that produces the derivative in the
+        eastward and northward directions of a scalar field
+        defined on self
+
+        set return_dxi_deta to True to return the matrices that
+        differentiate in cubed sphere coordinates instead of geo
+
+        Parameters
+        ----------
+        stencil_size: int, optional
+            Stencil size. Default is 1, in which case derivatives will be calculated
+            with a 3-point stencil. With S = 2, a 5-point stencil will be used. etc.
+        cube_coordinates: bool, optional
+            Set to True if you want matrices that differentiate in the xi / eta
+            directions instead of east /  north
+        sparse: bool, optional
+            Set to True if you want scipy.sparse matrices instead of dense numpy arrays
+        """
+        grid = self.grid
+        if isinstance(stencil_size, bool) or not isinstance(stencil_size, (int, np.integer)):
+            raise TypeError("stencil_size must be an integer")
+        S = int(stencil_size)
+        if S < 1:
+            raise ValueError("stencil_size must be positive")
+        if min(grid.mesh_shape) < 2 * S + 1:
+            raise ValueError(
+                "stencil_size requires at least 2*stencil_size+1 cells along each axis"
+            )
+        dxi = grid.dxi
+        det = grid.deta
+        N = grid.NL
+        M = grid.NW
+
+        D_xi = {"rows": [], "cols": [], "elements": []}
+        D_et = {"rows": [], "cols": [], "elements": []}
+
+        # index arrays (0 to N, M)
+        i_arr = np.arange(N)
+        j_arr = np.arange(M)
+
+        # meshgrid versions:
+        ii, jj = np.meshgrid(i_arr, j_arr, indexing="xy")
+
+        # inner grid points:
+        points = np.r_[-S : S + 1 : 1]
+        coefficients = diffutils.stencil(points, order=1)
+        i_dx, j_dx = ii[:, S:-S], jj[:, S:-S]
+        i_dy, j_dy = ii.T[:, S:-S], jj.T[:, S:-S]
+
+        for ll in range(len(points)):
+            D_et["rows"].append(grid.flat_index(i_dx, j_dx))
+            D_et["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
+            D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
+
+            D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
+            D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
+            D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
+
+        # boundaries
+        for kk in np.arange(0, S)[::-1]:
+            # LEFT
+            points = np.r_[-kk : S + 1 : 1]
+            coefficients = diffutils.stencil(points, order=1)
+            i_dx, j_dx = ii[:, kk], jj[:, kk]
+            i_dy, j_dy = ii.T[:, kk], jj.T[:, kk]
+
+            for ll in range(len(points)):
+                D_et["rows"].append(grid.flat_index(i_dx, j_dx))
+                D_et["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
+                D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
+
+                D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
+                D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
+                D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
+
+            # RIGHT
+            points = np.r_[-S : kk + 1 : 1]
+            coefficients = diffutils.stencil(points, order=1)
+            i_dx, j_dx = ii[:, -(kk + 1)], jj[:, -(kk + 1)]
+            i_dy, j_dy = ii.T[:, -(kk + 1)], jj.T[:, -(kk + 1)]
+
+            for ll in range(len(points)):
+                D_et["rows"].append(grid.flat_index(i_dx, j_dx))
+                D_et["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
+                D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
+
+                D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
+                D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
+                D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
+
+        D_xi = {key: np.hstack(D_xi[key]) for key in D_xi}
+        D_et = {key: np.hstack(D_et[key]) for key in D_et}
+
+        D_xi = scipy_sparse.csc_matrix(
+            (D_xi["elements"], (D_xi["rows"], D_xi["cols"])), shape=(N * M, N * M)
+        )
+        D_et = scipy_sparse.csc_matrix(
+            (D_et["elements"], (D_et["rows"], D_et["cols"])), shape=(N * M, N * M)
         )
 
-    def divergence_matrix(self, stencil_size=1, *, sparse=True):
-        """Return the matrix mapping horizontal vectors to divergence."""
-        return self.grid._divergence_matrix(S=stencil_size, return_sparse=sparse)
+        if cube_coordinates:
+            if sparse:
+                return D_xi, D_et
+            else:
+                return np.array(D_xi.todense()), np.array(D_et.todense())
 
-    def interpolate_scalar(self, lon, lat, values):
-        """Interpolate cell-centred scalar values to longitude/latitude points."""
-        return self.grid._interpolate_scalar(lon, lat, values)
+        # A scalar gradient is a covector.  Convert its coordinate partials
+        # through the exact dual basis of the embedded cubed-sphere surface.
+        # This remains well-defined at the projection centre and avoids the
+        # 0/0 terms in the historical Ronchi-equation implementation.
+        east_coeff, north_coeff, _ = self.surface_geometry()
+        Le = (
+            scipy_sparse.diags(east_coeff[:, 0]) @ D_xi
+            + scipy_sparse.diags(east_coeff[:, 1]) @ D_et
+        )
+        Ln = (
+            scipy_sparse.diags(north_coeff[:, 0]) @ D_xi
+            + scipy_sparse.diags(north_coeff[:, 1]) @ D_et
+        )
+        if sparse:
+            return Le, Ln
+        else:
+            return np.array(Le.todense()), np.array(Ln.todense())
+
+    def divergence_matrix(self, stencil_size=1, *, sparse=True):
+        """
+        Calculate the matrix that produces the divergence of a vector field
+
+        The returned 2N x N matrix operates on a 1D array that represents a
+        vector field. The array must be of length 2N, where N is the number
+        of grid cells. The first N elements are the eastward components and
+        the last N are the northward components.
+
+        Note - this code is based on equations (12) and (23) of Ronchi. The
+        'matrification' is explained in my regional data analysis document;
+        it is not super easy to understand it from the code alone.
+
+        Parameters
+        ----------
+        stencil_size: int, optional
+            Stencil size. Default is 1, in which case derivatives will be calculated
+            with a 3-point stencil. With S = 2, a 5-point stencil will be used. etc.
+        sparse: bool, optional
+            Set to True if you want scipy.sparse matrices instead of dense numpy arrays
+        """
+        D_xi, D_eta = self.gradient_matrices(
+            stencil_size=stencil_size, cube_coordinates=True, sparse=True
+        )
+        east_coeff, north_coeff, sqrt_g = self.surface_geometry()
+
+        # In curvilinear coordinates,
+        # div(V) = 1/sqrt(g) * partial_a(sqrt(g) V^a).
+        # The dual-basis coefficients convert geographic east/north vector
+        # components into the contravariant components V^xi and V^eta.
+        inv_sqrt_g = scipy_sparse.diags(1 / sqrt_g)
+        east = inv_sqrt_g @ (
+            D_xi @ scipy_sparse.diags(sqrt_g * east_coeff[:, 0])
+            + D_eta @ scipy_sparse.diags(sqrt_g * east_coeff[:, 1])
+        )
+        north = inv_sqrt_g @ (
+            D_xi @ scipy_sparse.diags(sqrt_g * north_coeff[:, 0])
+            + D_eta @ scipy_sparse.diags(sqrt_g * north_coeff[:, 1])
+        )
+        result = scipy_sparse.hstack((east, north), format="csc")
+        return result if sparse else result.toarray()
 
     def surface_geometry(self):
-        """Return dual-basis coefficients and the surface metric density."""
-        return self.grid._surface_geometry()
+        """Return geographic dual-basis coefficients and ``sqrt(det(g))``.
+
+        The returned east and north arrays have columns for the xi and eta
+        contravariant directions.  They serve both scalar-gradient and vector-
+        divergence operators, keeping those two constructions geometrically
+        consistent.
+        """
+        grid = self.grid
+        xi = grid.xi.reshape(-1)
+        eta = grid.eta.reshape(-1)
+
+        # Columns 0 and 1 of the inverse coordinate transform are the physical
+        # tangent vectors d(position)/dxi and d(position)/deta in local ECEF.
+        jacobian_local = cs_vectors.pc(xi, eta, r=grid.radius, block=4, inverse=True)[:, :, :2]
+        jacobian_geo = np.einsum("ij,njk->nik", grid.projection.R_local2geo, jacobian_local)
+        metric = np.einsum("nki,nkj->nij", jacobian_geo, jacobian_geo)
+        dual_basis = np.einsum("nki,nij->nkj", jacobian_geo, np.linalg.inv(metric))
+
+        lon = np.deg2rad(grid.lon.reshape(-1))
+        lat = np.deg2rad(grid.lat.reshape(-1))
+        east = np.column_stack((-np.sin(lon), np.cos(lon), np.zeros_like(lon)))
+        north = np.column_stack(
+            (
+                -np.sin(lat) * np.cos(lon),
+                -np.sin(lat) * np.sin(lon),
+                np.cos(lat),
+            )
+        )
+        east_coeff = np.einsum("nk,nkj->nj", east, dual_basis)
+        north_coeff = np.einsum("nk,nkj->nj", north, dual_basis)
+        sqrt_g = np.sqrt(np.linalg.det(metric))
+        return east_coeff, north_coeff, sqrt_g
+
+    def interpolate_scalar(self, lon, lat, values):
+        """
+        Interpolate values of a cell-centred scalar field at the requested
+        longitude/latitude locations. Bilinear interpolation uses only the
+        nearest four values and therefore requires memory proportional to the
+        number of evaluation points, not the product of grid and point counts.
+
+        Parameters
+        ----------
+        lon: array
+            array of longitudes [degrees] - must have same shape as lat_
+        lat: array
+            array of latitudes [degrees] - must have same shape as lon_
+        values: array
+            2D array (or flattened) of the scalar field as defined on the CS grid
+            (dimensions must match)
+
+        Returns
+        -------
+        Interpolated values of the 2D scalar field at the desired input (lon, lat)
+        locations.
+        """
+        grid = self.grid
+        lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
+
+        # Remove points outside grid
+        inside = grid.ingrid(lon, lat)
+        lon_ = lon[inside]
+        lat_ = lat[inside]
+
+        # Get i,j index of each evaluation location, as a float
+        binnumber = grid.bin_index(lon_, lat_)
+        i = binnumber[0].flatten()
+        j = binnumber[1].flatten()
+        xi_obs, eta_obs = grid.projection.geo2cube(lon_.flatten(), lat_.flatten())
+        xi_grid = grid.xi[i, j]
+        eta_grid = grid.eta[i, j]
+        i_frac = (eta_obs - eta_grid) / grid.deta
+        j_frac = (xi_obs - xi_grid) / grid.dxi
+        i = i + i_frac
+        j = j + j_frac
+
+        # Handle issue with machine precission causing points to end up in wrong place
+        # using floor/ceil if specifying to evaluate very close to the grid loations
+        # used in the interpolation
+        close_i = np.isclose(np.round(i), i, atol=1e-14)
+        i[close_i] = np.round(i)[close_i] + 1e-14
+        close_j = np.isclose(np.round(j), j, atol=1e-14)
+        j[close_j] = np.round(j)[close_j] + 1e-14
+
+        # Handle input points falling within the perimiter cells, but outside the
+        # boundary determined by the center location in the perimiter cells. For those
+        # input points an extrapolation will be performed based on the bilinear
+        # interpolation scheme (just evaluated outside the "box" of the 4 points).
+        small_i = i <= 0  # due to ingrid it must also be > -0.5
+        i[small_i] = 0.00001
+        small_j = j <= 0  # due to ingrid it must also be > -0.5
+        j[small_j] = 0.00001
+        large_i = i >= grid.shape[0] - 1  # due to ingrid it must also be > -0.5
+        i[large_i] = grid.shape[0] - 1 - 0.00001
+        large_j = j >= grid.shape[1] - 1  # due to ingrid it must also be > -0.5
+        j[large_j] = grid.shape[1] - 1 - 0.00001
+
+        # Indices of the four nodes surrounding each observation/evaluation location
+        ifloor = np.floor(i).astype(int)
+        iceil = np.ceil(i).astype(int)
+        jfloor = np.floor(j).astype(int)
+        jceil = np.ceil(j).astype(int)
+
+        # CS coordinates and 1D indices of these points
+        xi1 = grid.xi[ifloor, jfloor]
+        eta1 = grid.eta[ifloor, jfloor]
+        ij1 = grid.flat_index(ifloor, jfloor)
+        # xi2 = grid.xi[iceil,jfloor] # We dont need all 4 the xi-eta coords. since their
+        # coordinates will be the pairwise similar
+        eta2 = grid.eta[iceil, jfloor]
+        ij2 = grid.flat_index(iceil, jfloor)
+        # xi3 = grid.xi[iceil,jceil]
+        # eta3 = grid.eta[iceil,jceil]
+        ij3 = grid.flat_index(iceil, jceil)
+        xi4 = grid.xi[ifloor, jceil]
+        # eta4 = grid.eta[ifloor,jceil]
+        ij4 = grid.flat_index(ifloor, jceil)
+
+        # CS coordinates of observations/evaluation locations
+        xi_obs, eta_obs = grid.projection.geo2cube(lon_.flatten(), lat_.flatten())
+        # Bilinear interpolation: https://en.wikipedia.org/wiki/Bilinear_interpolation
+        w1 = (xi4 - xi_obs) * (eta2 - eta_obs) / ((xi4 - xi1) * (eta2 - eta1))  # w11
+        w2 = (xi4 - xi_obs) * (eta_obs - eta1) / ((xi4 - xi1) * (eta2 - eta1))  # w12
+        w3 = (xi_obs - xi1) * (eta_obs - eta1) / ((xi4 - xi1) * (eta2 - eta1))  # w22
+        w4 = (xi_obs - xi1) * (eta2 - eta_obs) / ((xi4 - xi1) * (eta2 - eta1))  # w21
+
+        scalar_values = np.asarray(values).reshape(-1)
+        if scalar_values.size != grid.size:
+            raise ValueError(
+                f"values must contain {grid.size} grid values; got {scalar_values.size}"
+            )
+        interpolated_ = (
+            w1 * scalar_values[ij1]
+            + w2 * scalar_values[ij2]
+            + w3 * scalar_values[ij3]
+            + w4 * scalar_values[ij4]
+        )
+
+        # Insert nans and ensure to return an array with same shape as input
+        interpolated = np.full(
+            lat.size,
+            np.nan,
+            dtype=np.result_type(interpolated_, float),
+        )
+        interpolated[inside.flatten()] = interpolated_
+
+        return interpolated.reshape(lat.shape)
 
 
 @dataclass(frozen=True)
@@ -1403,7 +1442,7 @@ class RegionalCSGridSpec:
             raise TypeError("regional-grid metadata must be a mapping")
         projection = metadata.get("projection")
         if not isinstance(projection, Mapping):
-            raise ValueError("projection metadata must be a mapping")
+            raise TypeError("projection metadata must be a mapping")
         return cls(
             schema=metadata.get("schema"),
             version=metadata.get("version"),

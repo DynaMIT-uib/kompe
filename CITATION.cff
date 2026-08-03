@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use Kompe in scientific work, please cite the software."
+title: "Kompe: spherical operators, meshes, projections, and expansions"
+type: software
+version: 0.1.0
+date-released: 2026-08-03
+authors:
+  - family-names: Laundal
+    given-names: Karl M.
+  - family-names: Skeidsvoll
+    given-names: Andreas
+repository-code: "https://github.com/DynaMIT-uib/kompe"
+license: MIT
