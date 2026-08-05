@@ -614,8 +614,8 @@ class RegionalCSMesh(StructuredSurfaceMesh):
             eta_edge = np.linspace(-eta_span / 2, eta_span / 2, n_eta + 1)
         elif cell_size is not None:
             eta_cell_size, xi_cell_size = cell_size
-            n_eta = max(1, int(round(eta_span / np.arctan(eta_cell_size / self.radius))))
-            n_xi = max(1, int(round(xi_span / np.arctan(xi_cell_size / self.radius))))
+            n_eta = max(1, round(eta_span / np.arctan(eta_cell_size / self.radius)))
+            n_xi = max(1, round(xi_span / np.arctan(xi_cell_size / self.radius)))
             xi_edge = np.linspace(-xi_span / 2, xi_span / 2, n_xi + 1)
             eta_edge = np.linspace(-eta_span / 2, eta_span / 2, n_eta + 1)
         else:
