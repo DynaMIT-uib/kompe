@@ -6,6 +6,8 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.special import binom
 
+from kompe.cubed_sphere import cs_coordinates
+
 
 def _first_derivative_weights(sample_offsets, step_size):
     """Return finite-difference weights at zero for sample offsets."""
@@ -46,11 +48,10 @@ class CSFiniteDifferences:
         if order != 1:
             raise NotImplementedError("Only first order differentiation is supported.")
 
-        basis = self.basis
         shape = (6, N, N)
         size = 6 * N * N
 
-        h = basis.xi(1, N) - basis.xi(0, N)
+        h = cs_coordinates.coordinate(1, N) - cs_coordinates.coordinate(0, N)
 
         k, i, j = map(
             np.ravel, np.meshgrid(np.arange(6), np.arange(N), np.arange(N), indexing="ij")
@@ -103,12 +104,15 @@ class CSFiniteDifferences:
             weights = np.ones(k.size)
         weights = weights / Ni
 
-        h = basis.xi(1, N) - basis.xi(0, N)
+        h = cs_coordinates.coordinate(1, N) - cs_coordinates.coordinate(0, N)
         cols = np.full(k.size, -1, dtype=np.int64)
 
-        xi, eta = basis.xi(i + 0.5, N), basis.eta(j + 0.5, N)
-        _, theta, phi = basis.cube2spherical(xi, eta, k, r=1.0, deg=True)
-        new_xi, new_eta, new_k = basis.geo2cube(phi, 90 - theta)
+        xi = cs_coordinates.coordinate(i + 0.5, N)
+        eta = cs_coordinates.coordinate(j + 0.5, N)
+        _, theta, phi = basis.mesh.projection.cube_to_spherical(
+            xi, eta, k, radius=1.0, degrees=True
+        )
+        new_xi, new_eta, new_k = basis.mesh.projection.geographic_to_cube(phi, 90 - theta)
         new_i, new_j = new_xi / h + (N - 1) / 2, new_eta / h + (N - 1) / 2
 
         on_i_grid_line = np.isclose(new_i - np.rint(new_i), 0)

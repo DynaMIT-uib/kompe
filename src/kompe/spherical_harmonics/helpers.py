@@ -8,10 +8,10 @@ import numpy as np
 class SHIndices:
     """Container for (n,m) index pairs."""
 
-    def __init__(self, Nmax: int, Mmax: int):
+    def __init__(self, max_degree: int, max_order: int):
         index_pairs = []
-        for n in range(Nmax + 1):
-            for m in range(min(Mmax, n) + 1):
+        for n in range(max_degree + 1):
+            for m in range(min(max_order, n) + 1):
                 index_pairs.append((n, m))
         self.index_pairs = tuple(index_pairs)
         self.make_arrays()
@@ -40,9 +40,9 @@ class SHIndices:
         """Return string representation of the SHIndices."""
         return self.__repr__()
 
-    def set_Nmin(self, Nmin: int):
-        """Set minimum degree Nmin."""
-        self.index_pairs = tuple([p for p in self.index_pairs if p[0] >= Nmin])
+    def set_Nmin(self, min_degree: int):
+        """Set minimum degree min_degree."""
+        self.index_pairs = tuple([p for p in self.index_pairs if p[0] >= min_degree])
         self.make_arrays()
         return self
 
@@ -65,7 +65,7 @@ class SHIndices:
         self._index_map = {pair: i for i, pair in enumerate(self.index_pairs)}
 
 
-def schmidt_quasi_normalization_factors(Nmax: int, Mmax: int):
+def schmidt_quasi_normalization_factors(max_degree: int, max_order: int):
     """
     Return a matrix of Schmidt quasi-normalization factors.
 
@@ -74,26 +74,26 @@ def schmidt_quasi_normalization_factors(Nmax: int, Mmax: int):
 
     Parameters
     ----------
-    Nmax : int
+    max_degree : int
         Maximum degree.
-    Mmax : int
+    max_order : int
         Maximum order.
 
     Returns
     -------
-    S_matrix : ndarray, shape (Nmax+1, Mmax+1)
+    S_matrix : ndarray, shape (max_degree+1, max_order+1)
         Matrix of normalization factors where S_matrix[n, m] is the
         factor for the (n, m) pair.
     """
-    S_matrix = np.zeros((Nmax + 1, Mmax + 1))
+    S_matrix = np.zeros((max_degree + 1, max_order + 1))
     S_matrix[0, 0] = 1.0
 
-    for n in range(1, Nmax + 1):
+    for n in range(1, max_degree + 1):
         # Recurrence for m=0
         S_matrix[n, 0] = S_matrix[n - 1, 0] * (2.0 * n - 1.0) / n
 
         # Recurrence for m > 0
-        for m in range(1, min(n, Mmax) + 1):
+        for m in range(1, min(n, max_order) + 1):
             factor_m_dep = 2.0 if m == 1 else 1.0
             factor = math.sqrt((n - m + 1.0) * factor_m_dep / (n + m))
             S_matrix[n, m] = S_matrix[n, m - 1] * factor

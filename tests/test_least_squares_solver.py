@@ -348,7 +348,7 @@ def test_least_squares_problem_follows_jax_operator_context_when_numpy_active():
         set_backend("numpy")
         problem = LeastSquaresProblem(A=jnp.asarray(A), solution_shape=2, data_shapes=3)
         rhs_block, _, _ = problem.assemble_rhs_block(rhs)
-        system_block = problem.get_system_linear_map().matmat(np.eye(2))
+        system_block = problem.system_operator().matmat(np.eye(2))
     finally:
         set_backend(previous_backend)
 

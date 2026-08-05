@@ -1,11 +1,11 @@
 """Radial operations for spherical-harmonic coefficients."""
 
-from kompe.core import SurfaceOperators, is_sh_basis
+from kompe.core import SurfaceDifferentialBasis
 from kompe.math import as_linear_map
 from kompe.math.backend import get_array_module
 
 
-class SolidHarmonics:
+class SolidHarmonicOperators:
     """Extend an SH basis with regular and irregular radial laws.
 
     The wrapped basis describes the angular coefficient space. This
@@ -37,10 +37,13 @@ class SolidHarmonics:
 
     def __init__(self, basis):
         """Initialize radial operations for an SH angular basis."""
-        if not isinstance(basis, SurfaceOperators) or not is_sh_basis(basis):
-            raise TypeError("SolidHarmonics requires an SH surface basis.")
+        from kompe.spherical_harmonics.sh_basis import SHBasis
+
+        root_basis = getattr(basis, "root_basis", basis)
+        if not isinstance(basis, SurfaceDifferentialBasis) or not isinstance(root_basis, SHBasis):
+            raise TypeError("SolidHarmonicOperators requires an SH surface basis.")
         if not hasattr(basis, "n"):
-            raise TypeError("SolidHarmonics basis must expose harmonic degrees as 'n'.")
+            raise TypeError("SolidHarmonicOperators basis must expose harmonic degrees as 'n'.")
         basis.validate_metadata()
         self.basis = basis
 
@@ -78,22 +81,22 @@ class SolidHarmonics:
         """Map poloidal coefficients to the boundary potential jump."""
         return radius * self.poloidal_to_boundary_potential_jump_factor
 
-    def get_regular_reference_shift_operator(self, start, end):
+    def regular_reference_shift_operator(self, start, end):
         """Return the regular reference-radius shift operator."""
         return as_linear_map(self.regular_reference_shift(start, end))
 
-    def get_irregular_reference_shift_operator(self, start, end):
+    def irregular_reference_shift_operator(self, start, end):
         """Return the irregular reference-radius shift operator."""
         return as_linear_map(self.irregular_reference_shift(start, end))
 
-    def get_poloidal_to_regular_potential_operator(self):
+    def poloidal_to_regular_potential_operator(self):
         """Return the poloidal-to-regular-potential operator."""
         return as_linear_map(self.poloidal_to_regular_potential_factor)
 
-    def get_poloidal_to_irregular_potential_operator(self):
+    def poloidal_to_irregular_potential_operator(self):
         """Return the poloidal-to-irregular-potential operator."""
         return as_linear_map(self.poloidal_to_irregular_potential_factor)
 
-    def get_poloidal_to_boundary_potential_jump_operator(self, radius):
+    def poloidal_to_boundary_potential_jump_operator(self, radius):
         """Return the poloidal-to-boundary-potential-jump operator."""
         return as_linear_map(self.poloidal_to_boundary_potential_jump(radius))

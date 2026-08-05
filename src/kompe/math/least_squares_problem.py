@@ -39,7 +39,7 @@ class LeastSquaresProblem:
             (solution_shape,) if isinstance(solution_shape, int) else tuple(solution_shape)
         )
         self.solution_size = math.prod(self.solution_shape)
-        self._system_linear_map_cache: dict[bool, LinearMap] = {}
+        self._system_operator_cache: dict[bool, LinearMap] = {}
         self._dense_system_matrix_cache: dict[str, Any] = {}
         self._dense_normal_equation_cache: dict[str, tuple[Any, Any, Any]] = {}
         self._dense_normal_pinv_cache: dict[tuple[str, float], Any] = {}
@@ -127,7 +127,7 @@ class LeastSquaresProblem:
     @cached_property
     def data_operator(self) -> LinearMap:
         """Assemble the data operator without regularization."""
-        return self.get_system_linear_map(include_regularization=False)
+        return self.system_operator(include_regularization=False)
 
     @cached_property
     def dense_system_matrix(self) -> np.ndarray:
@@ -233,7 +233,7 @@ class LeastSquaresProblem:
         """Return cached dense system matrix for one backend key."""
         if backend_key not in self._dense_system_matrix_cache:
             backend = "numpy" if backend_key == "numpy" else None
-            self._dense_system_matrix_cache[backend_key] = self.get_system_linear_map().to_matrix(
+            self._dense_system_matrix_cache[backend_key] = self.system_operator().to_matrix(
                 backend=backend
             )
         return self._dense_system_matrix_cache[backend_key]
@@ -263,7 +263,7 @@ class LeastSquaresProblem:
         active_regularization_terms = (
             self._active_regularization_terms() if include_regularization else ()
         )
-        backend_context = self.get_system_linear_map(
+        backend_context = self.system_operator(
             include_regularization=include_regularization
         ).backend_context
         xp = get_array_module(*(p[0] for p in valid_b), *backend_context)
@@ -285,15 +285,15 @@ class LeastSquaresProblem:
         d_block = xp.vstack(blocks) if blocks else xp.zeros((0, num_rhs), dtype=dtype)
         return d_block, rhs_shape, num_rhs
 
-    def get_system_linear_map(self, include_regularization: bool = True) -> LinearMap:
+    def system_operator(self, include_regularization: bool = True) -> LinearMap:
         """Get the ``LinearMap`` system operator."""
-        if include_regularization not in self._system_linear_map_cache:
-            self._system_linear_map_cache[include_regularization] = self._build_system_linear_map(
+        if include_regularization not in self._system_operator_cache:
+            self._system_operator_cache[include_regularization] = self._build_system_operator(
                 include_regularization
             )
-        return self._system_linear_map_cache[include_regularization]
+        return self._system_operator_cache[include_regularization]
 
-    def _build_system_linear_map(self, include_regularization: bool) -> LinearMap:
+    def _build_system_operator(self, include_regularization: bool) -> LinearMap:
         active_regularization_terms = (
             tuple(self._active_regularization_terms()) if include_regularization else ()
         )

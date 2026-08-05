@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import cached_property
 from typing import ClassVar
 
 import numpy as np
@@ -19,6 +20,8 @@ from kompe.cubed_sphere.cs_coordinates import (
     cube_to_spherical,
     metric_tensor,
 )
+from kompe.cubed_sphere.global_projection import GlobalCSProjection
+from kompe.grid import SphericalGrid
 from kompe.math import as_linear_map, identity_linear_map
 from kompe.math.backend import to_numpy, use_jax
 from kompe.mesh import StructuredSurfaceMesh
@@ -28,41 +31,43 @@ from kompe.mesh import StructuredSurfaceMesh
 class GlobalCSMesh(StructuredSurfaceMesh):
     """Structured six-face cubed-sphere mesh for one grid resolution."""
 
-    N: int
-    arr_xi: np.ndarray
-    arr_eta: np.ndarray
-    arr_block: np.ndarray
-    arr_theta: np.ndarray
-    arr_phi: np.ndarray
+    cells_per_face: int
+    xi: np.ndarray
+    eta: np.ndarray
+    face: np.ndarray
+    theta: np.ndarray
+    phi: np.ndarray
     metric_tensor: np.ndarray
     sqrt_detg: np.ndarray
-    unit_area: np.ndarray
+    _cell_areas: np.ndarray
+    projection: GlobalCSProjection
 
-    def __init__(self, N):
-        """Construct a unit-sphere mesh with ``N`` cells per face edge."""
-        if isinstance(N, bool) or not isinstance(N, (int, np.integer)):
-            raise TypeError("N must be an integer")
-        if N <= 0:
+    def __init__(self, cells_per_face):
+        """Construct a unit-sphere mesh with a fixed face-edge resolution."""
+        if isinstance(cells_per_face, bool) or not isinstance(cells_per_face, (int, np.integer)):
+            raise TypeError("cells_per_face must be an integer")
+        if cells_per_face <= 0:
             raise ValueError("Cubed sphere mesh dimension must be positive")
 
-        N = int(N)
-        k, i, j = self._gridpoints(N)
-        arr_xi = coordinate(i[:, :-1, :-1] + 0.5, N).reshape(-1)
-        arr_eta = coordinate(j[:, :-1, :-1] + 0.5, N).reshape(-1)
-        arr_block = k[:, :-1, :-1].reshape(-1)
-        _, arr_theta, arr_phi = cube_to_spherical(arr_xi, arr_eta, arr_block, deg=True)
-        cell_metric = metric_tensor(arr_xi, arr_eta)
+        cells_per_face = int(cells_per_face)
+        k, i, j = self._gridpoints(cells_per_face)
+        xi = coordinate(i[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
+        eta = coordinate(j[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
+        face = k[:, :-1, :-1].reshape(-1)
+        _, theta, phi = cube_to_spherical(xi, eta, face, deg=True)
+        cell_metric = metric_tensor(xi, eta)
 
         for name, value in (
-            ("N", N),
-            ("arr_xi", arr_xi),
-            ("arr_eta", arr_eta),
-            ("arr_block", arr_block),
-            ("arr_theta", arr_theta),
-            ("arr_phi", arr_phi),
+            ("cells_per_face", cells_per_face),
+            ("xi", xi),
+            ("eta", eta),
+            ("face", face),
+            ("theta", theta),
+            ("phi", phi),
             ("metric_tensor", cell_metric),
             ("sqrt_detg", np.sqrt(determinants_3x3(cell_metric))),
-            ("unit_area", self._cell_areas(N)),
+            ("_cell_areas", self._compute_cell_areas(cells_per_face)),
+            ("projection", GlobalCSProjection()),
         ):
             object.__setattr__(self, name, value)
         self.__post_init__()
@@ -70,14 +75,14 @@ class GlobalCSMesh(StructuredSurfaceMesh):
     def __post_init__(self):
         """Own immutable arrays used by basis and cache identity."""
         for name in (
-            "arr_xi",
-            "arr_eta",
-            "arr_block",
-            "arr_theta",
-            "arr_phi",
+            "xi",
+            "eta",
+            "face",
+            "theta",
+            "phi",
             "metric_tensor",
             "sqrt_detg",
-            "unit_area",
+            "_cell_areas",
         ):
             object.__setattr__(self, name, _owned_readonly_array(getattr(self, name)))
         self.validate_mesh_metadata()
@@ -85,52 +90,37 @@ class GlobalCSMesh(StructuredSurfaceMesh):
     @property
     def signature(self):
         """Stable mesh identity for operators and caches."""
-        return ("GLOBAL_CS_MESH", int(self.N))
+        return ("GLOBAL_CS_MESH", int(self.cells_per_face))
 
     @property
-    def mesh_shape(self):
+    def shape(self):
         """Logical ``(face, eta, xi)`` cell shape."""
-        return (6, int(self.N), int(self.N))
+        return (6, int(self.cells_per_face), int(self.cells_per_face))
 
-    @property
-    def cell_center_theta(self):
-        """Cell-centre colatitudes in degrees."""
-        return self.arr_theta.reshape(self.mesh_shape)
-
-    @property
-    def cell_center_phi(self):
-        """Cell-centre longitudes in degrees."""
-        return self.arr_phi.reshape(self.mesh_shape)
+    @cached_property
+    def cell_centers(self):
+        """Cell-centre coordinates and unit-sphere area weights."""
+        return SphericalGrid(
+            theta=self.theta,
+            phi=self.phi,
+            area_weights=self._cell_areas,
+        )
 
     @property
     def cell_areas(self):
         """Cell areas on the unit sphere."""
-        return self.unit_area.reshape(self.mesh_shape)
+        return self._cell_areas.reshape(self.shape)
 
-    @property
-    def theta(self):
-        """Flattened cell-centre colatitudes in degrees."""
-        return self.arr_theta
+    def coordinate(self, index):
+        """Return xi/eta coordinate values for logical edge indices."""
+        return coordinate(index, self.cells_per_face)
 
-    @property
-    def phi(self):
-        """Flattened cell-centre longitudes in degrees."""
-        return self.arr_phi
-
-    @property
-    def area_weights(self):
-        """Flattened unit-sphere cell areas for weighted analysis."""
-        return self.unit_area
-
-    @property
-    def size(self):
-        """Number of cell-centred sample locations."""
-        return self.cell_count
-
-    @property
-    def index_length(self):
-        """Total number of native cells."""
-        return self.cell_count
+    def grid_line_indices(self, *, flat=False):
+        """Return face, xi, and eta indices for all mesh grid lines."""
+        face, xi, eta = self._gridpoints(self.cells_per_face)
+        if flat:
+            return face.reshape(-1), xi.reshape(-1), eta.reshape(-1)
+        return face, xi, eta
 
     @staticmethod
     def _gridpoints(N):
@@ -150,7 +140,7 @@ class GlobalCSMesh(StructuredSurfaceMesh):
         return np.abs(2.0 * np.arctan2(numerator, denominator))
 
     @classmethod
-    def _cell_areas(cls, N):
+    def _compute_cell_areas(cls, N):
         """Return exact spherical CS cell areas."""
         k, i, j = cls._gridpoints(N)
         block = k[:, :-1, :-1].reshape(-1)
@@ -231,7 +221,7 @@ class CSGridRemapper:
         """Return a cache key for a grid."""
         signature = getattr(grid, "signature", None)
         if signature is None:
-            raise TypeError("CS grid remapping requires Grid objects with signatures.")
+            raise TypeError("CS grid remapping requires SphericalGrid objects with signatures.")
         return signature
 
     def _cached_remap_matrix(self, key, build):
@@ -277,7 +267,9 @@ class CSGridRemapper:
     def block_interpolation_weights(self, theta, phi, theta_target, phi_target):
         """Return per-block interpolation weights."""
         basis = self.basis
-        xi_target, eta_target, block_target = basis.geo2cube(phi_target, 90 - theta_target)
+        xi_target, eta_target, block_target = basis.mesh.projection.geographic_to_cube(
+            phi_target, 90 - theta_target
+        )
         xi_target = xi_target.reshape(-1)
         eta_target = eta_target.reshape(-1)
         block_target = block_target.reshape(-1)
@@ -291,14 +283,16 @@ class CSGridRemapper:
             if target_index.size == 0:
                 continue
 
-            _, th0, ph0 = basis.cube2spherical(0, 0, block_index, deg=False)
+            _, th0, ph0 = basis.mesh.projection.cube_to_spherical(0, 0, block_index, degrees=False)
             r0 = np.array(
                 [np.sin(th0) * np.cos(ph0), np.sin(th0) * np.sin(ph0), np.cos(th0)]
             ).reshape((-1, 1))
             source_mask = np.sum(r0 * r, axis=0) > 0
             source_index = np.flatnonzero(source_mask)
 
-            xi_source, eta_source, _ = basis.geo2cube(phi, 90 - theta, block=block_index)
+            xi_source, eta_source, _ = basis.mesh.projection.geographic_to_cube(
+                phi, 90 - theta, face=block_index
+            )
             source_points = np.column_stack([xi_source[source_mask], eta_source[source_mask]])
             target_points = np.column_stack([xi_target[target_index], eta_target[target_index]])
             vertices, weights = self.linear_interpolation_weights(source_points, target_points)
@@ -336,15 +330,29 @@ class CSGridRemapper:
         theta_target, phi_target = self.grid_theta_phi(target_grid)
         blocks = self.block_interpolation_weights(theta, phi, theta_target, phi_target)
 
-        xi_source, eta_source, block_source = basis.geo2cube(phi, 90 - theta)
-        source_ps = basis.get_Ps(xi_source, eta_source, r=1, block=block_source)
-        source_q = basis.get_Q(90 - theta, r=1, inverse=True)
+        xi_source, eta_source, block_source = basis.mesh.projection.geographic_to_cube(
+            phi, 90 - theta
+        )
+        source_ps = basis.mesh.projection.spherical_to_cube_vector_matrix(
+            xi_source, eta_source, radius=1, face=block_source
+        )
+        source_q = basis.mesh.projection.spherical_normalization_matrix(
+            90 - theta, 1, inverse=True
+        )
         source_transform = np.einsum("nij,njk->nik", source_ps, source_q)
 
-        xi_target, eta_target, block_target = basis.geo2cube(phi_target, 90 - theta_target)
-        _, theta_out, _ = basis.cube2spherical(xi_target, eta_target, block_target, deg=True)
-        target_q = basis.get_Q(90 - theta_out, r=1, inverse=False)
-        target_ps_inv = basis.get_Ps(xi_target, eta_target, r=1, block=block_target, inverse=True)
+        xi_target, eta_target, block_target = basis.mesh.projection.geographic_to_cube(
+            phi_target, 90 - theta_target
+        )
+        _, theta_out, _ = basis.mesh.projection.cube_to_spherical(
+            xi_target, eta_target, block_target, degrees=True
+        )
+        target_q = basis.mesh.projection.spherical_normalization_matrix(
+            90 - theta_out, 1, inverse=False
+        )
+        target_ps_inv = basis.mesh.projection.cube_to_spherical_vector_matrix(
+            xi_target, eta_target, radius=1, face=block_target
+        )
         target_transform = np.einsum("nij,njk->nik", target_q, target_ps_inv)
 
         n_source = theta.size
@@ -355,7 +363,9 @@ class CSGridRemapper:
         data = []
 
         for block_index, target_index, source_vertices, weights in blocks:
-            qij = basis.get_Qij(xi_source, eta_source, block_source, block_index)
+            qij = basis.mesh.projection.face_to_face_vector_matrix(
+                xi_source, eta_source, block_source, block_index
+            )
             source_to_block = np.einsum("nij,njk->nik", qij, source_transform)
             source_coeff = source_to_block[source_vertices]
             source_coeff = np.stack([-source_coeff[..., 1], source_coeff[..., 0]], axis=-1)
@@ -432,7 +442,7 @@ class CSGridRemapper:
         basis = self.basis
         theta_target, phi_target = np.broadcast_arrays(theta_target, phi_target)
         target_shape = theta_target.shape
-        xi, eta, block = basis.geo2cube(phi_target, 90 - theta_target)
+        xi, eta, block = basis.mesh.projection.geographic_to_cube(phi_target, 90 - theta_target)
         xi, eta, block = xi.reshape(-1), eta.reshape(-1), block.reshape(-1)
 
         theta, phi = np.broadcast_arrays(theta, phi)
@@ -461,9 +471,13 @@ class CSGridRemapper:
         th, ph = np.deg2rad(theta), np.deg2rad(phi)
         position = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)))
 
-        u_xi, u_eta, u_block = basis.geo2cube(phi, 90 - theta)
-        spherical_to_panel = basis.get_Ps(u_xi, u_eta, r=1, block=u_block)
-        geographic_to_spherical = basis.get_Q(90 - theta, r=1, inverse=True)
+        u_xi, u_eta, u_block = basis.mesh.projection.geographic_to_cube(phi, 90 - theta)
+        spherical_to_panel = basis.mesh.projection.spherical_to_cube_vector_matrix(
+            u_xi, u_eta, radius=1, face=u_block
+        )
+        geographic_to_spherical = basis.mesh.projection.spherical_normalization_matrix(
+            90 - theta, 1, inverse=True
+        )
         geographic_to_panel = np.einsum(
             "nij,njk->nik", spherical_to_panel, geographic_to_spherical
         )
@@ -472,10 +486,14 @@ class CSGridRemapper:
 
         interpolated_panel = np.empty((block.size, 3) + value_shape, dtype=np.float64)
         for block_index in range(6):
-            panel_rotation = basis.get_Qij(u_xi, u_eta, u_block, block_index)
+            panel_rotation = basis.mesh.projection.face_to_face_vector_matrix(
+                u_xi, u_eta, u_block, block_index
+            )
             values_on_panel = np.einsum("nij,nj...->ni...", panel_rotation, panel_values)
 
-            _, panel_theta, panel_phi = basis.cube2spherical(0, 0, block_index, deg=False)
+            _, panel_theta, panel_phi = basis.mesh.projection.cube_to_spherical(
+                0, 0, block_index, degrees=False
+            )
             panel_center = np.hstack(
                 (
                     np.sin(panel_theta) * np.cos(panel_phi),
@@ -484,7 +502,9 @@ class CSGridRemapper:
                 )
             ).reshape((-1, 1))
             source_mask = np.sum(panel_center * position, axis=0) > 0
-            source_xi, source_eta, _ = basis.geo2cube(phi, 90 - theta, block=block_index)
+            source_xi, source_eta, _ = basis.mesh.projection.geographic_to_cube(
+                phi, 90 - theta, face=block_index
+            )
             target_mask = block == block_index
             interpolated_panel[target_mask] = griddata(
                 np.column_stack((source_xi[source_mask], source_eta[source_mask])),
@@ -493,9 +513,13 @@ class CSGridRemapper:
                 **kwargs,
             )
 
-        _, theta_out, _ = basis.cube2spherical(xi, eta, block, deg=True)
-        spherical_to_geographic = basis.get_Q(90 - theta_out, r=1, inverse=False)
-        panel_to_spherical = basis.get_Ps(xi, eta, r=1, block=block, inverse=True)
+        _, theta_out, _ = basis.mesh.projection.cube_to_spherical(xi, eta, block, degrees=True)
+        spherical_to_geographic = basis.mesh.projection.spherical_normalization_matrix(
+            90 - theta_out, 1, inverse=False
+        )
+        panel_to_spherical = basis.mesh.projection.cube_to_spherical_vector_matrix(
+            xi, eta, radius=1, face=block
+        )
         panel_to_geographic = np.einsum(
             "nij,njk->nik", spherical_to_geographic, panel_to_spherical
         )
@@ -510,7 +534,7 @@ class CSGridRemapper:
         basis = self.basis
         theta_target, phi_target = np.broadcast_arrays(theta_target, phi_target)
         target_shape = theta_target.shape
-        xi, eta, block = basis.geo2cube(phi_target, 90 - theta_target)
+        xi, eta, block = basis.mesh.projection.geographic_to_cube(phi_target, 90 - theta_target)
         xi, eta, block = xi.reshape(-1), eta.reshape(-1), block.reshape(-1)
 
         theta, phi = np.broadcast_arrays(theta, phi)
@@ -535,7 +559,9 @@ class CSGridRemapper:
         interpolated = np.empty((block.size,) + value_shape, dtype=np.float64)
 
         for block_index in range(6):
-            _, panel_theta, panel_phi = basis.cube2spherical(0, 0, block_index, deg=False)
+            _, panel_theta, panel_phi = basis.mesh.projection.cube_to_spherical(
+                0, 0, block_index, degrees=False
+            )
             panel_center = np.hstack(
                 (
                     np.sin(panel_theta) * np.cos(panel_phi),
@@ -544,7 +570,9 @@ class CSGridRemapper:
                 )
             ).reshape((-1, 1))
             source_mask = np.sum(panel_center * position, axis=0) > 0
-            source_xi, source_eta, _ = basis.geo2cube(phi, 90 - theta, block=block_index)
+            source_xi, source_eta, _ = basis.mesh.projection.geographic_to_cube(
+                phi, 90 - theta, face=block_index
+            )
             target_mask = block == block_index
             interpolated[target_mask] = griddata(
                 np.column_stack((source_xi[source_mask], source_eta[source_mask])),

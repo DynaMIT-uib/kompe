@@ -8,11 +8,11 @@ imported from its owning package:
 ```python
 import kompe
 
-basis = kompe.GlobalCSBasis(N=16)
+basis = kompe.GlobalCSBasis(cells_per_face=16)
 ```
 
-The sole retained PynaMIT spelling is
-`pynamit.BasisEvaluator`, an alias of `kompe.SphericalTransform`. There is no
+The sole retained PynaMIT class spelling is
+`pynamit.BasisEvaluator`, a thin subclass of `kompe.SphericalTransform`. There is no
 general `pynamit.math` facade and no general spherical re-export surface.
 `KOMPE_USE_JAX` and `KOMPE_LEAST_SQUARES_SOLVER` are the only numerical
 environment settings.
@@ -20,29 +20,32 @@ environment settings.
 Historical `SphericalTransform.project_scalar` and `project_helmholtz` calls
 become `analyze_scalar_samples` and `analyze_helmholtz_samples`; the
 `projection_basis` argument becomes `analysis_basis`. This keeps coordinate
-projections distinct from coefficient analysis. The short evaluator matrix
-spellings (`G`, `G_th`, and related names) are not part of Kompe's API; use the
-descriptive synthesis properties.
+projections distinct from coefficient analysis. The evaluator properties `G`
+and `G_helmholtz` remain on that PynaMIT subclass for collaborator
+compatibility. They return Kompe's `scalar_synthesis_matrix` and
+`helmholtz_synthesis_matrix`, respectively. No other short matrix aliases are
+part of either public API.
 
 ## Lompe
 
 Lompe imports its regional cubed-sphere and SECS matrices from `kompe`.
-Its working grid remains the structured `RegionalCSGrid`; no global basis is
+Its working mesh remains the structured `RegionalCSMesh`; no global basis is
 required for the current inversion.
 
 Lompe does not maintain a parallel grid class or a legacy `lompe.cs` namespace.
 Its input adapter reconstructs historical grid-like objects and saved grid
-dictionaries as canonical `RegionalCSGrid` instances before the model uses
+dictionaries as canonical `RegionalCSMesh` instances before the model uses
 them.
 
-New saved grids use the versioned `RegionalCSGridSpec.to_mapping()` format.
+New saved grids use the versioned `RegionalCSMeshSpec.to_dict()` format.
 The adapter continues to accept historical `L`/`W`/`Lres`/`Wres` dictionaries,
 but that vocabulary is not part of Kompe's current public serialization API.
 Differential and interpolation operations are accessed through
-`grid.operators`. Canonical construction uses descriptive names and requires
+`mesh.operators`. Canonical construction uses descriptive names and requires
 an explicit radius, for example
-`RegionalCSGrid(projection, length, width, length_resolution,
-width_resolution, radius=radius)`.
+`RegionalCSMesh(projection, length, width, radius=radius,
+cell_size=(eta_size, xi_size))` or an explicit integer
+`shape=(n_eta, n_xi)`.
 
 Lompe does not own a spherical-harmonic representation or transform. It calls
 `ppigrf` for the reference geomagnetic field; that external model is based on
@@ -57,8 +60,9 @@ The `secsy` distribution is a compatibility facade depending on `kompe`.
 Its function API and names (`CSprojection`, `CSgrid`, `CSplot`) remain
 available. Historical `secsy.CSgrid.theta` and `.phi` stay in radians, with
 canonical degrees available as `.theta_deg` and `.phi_deg`. New
-`RegionalCSGrid` instances use the uniform `kompe` contract: canonical
-angular coordinates are degrees, and `_rad` accessors are explicit.
+`RegionalCSMesh` instances use the uniform `kompe` contract: geographic
+coordinates are available through the mesh and its degree-valued
+`cell_centers`. The radian attributes exist only on secsy's historical façade.
 Legacy `get_SECS_*` names and `CSgrid.get_Le_Ln()` remain implemented in secsy
 as thin translations to canonical Kompe kernels and `RegionalCSOperators`.
 
@@ -66,22 +70,22 @@ as thin translations to canonical Kompe kernels and `RegionalCSOperators`.
 
 ```text
 SphericalRepresentation
-├── Grid                               unstructured sample points
-├── RegionalCSGrid                     structured regional mesh values
+├── SphericalGrid                               unstructured sample points
 └── SphericalBasis
-    └── ScalarSynthesis
+    └── ScalarBasis
         ├── SECSBasis                  Green-function/current synthesis
-        └── SurfaceOperators
+        └── SurfaceDifferentialBasis
             ├── SHBasis                global spectral basis
             └── GlobalCSBasis          global six-face nodal basis
 
 StructuredSurfaceMesh
-├── RegionalCSGrid                     bounded single-face mesh
+├── RegionalCSMesh                     bounded single-face mesh
 └── GlobalCSMesh                       closed six-face native mesh
-    └── composed by GlobalCSBasis.mesh
+
+GlobalCSBasis.mesh ──► GlobalCSMesh
 ```
 
-`SECSBasis` deliberately does not inherit `SurfaceOperators`: its Green
+`SECSBasis` deliberately does not inherit `SurfaceDifferentialBasis`: its Green
 functions have distributional Laplacians at their poles, so pretending it has
 the same square coefficient-space Laplacian and mean-free Poisson semantics as
 SH or global CS would make the interface less honest. It is nevertheless a

@@ -9,8 +9,7 @@ from collections import OrderedDict
 import numpy as np
 import scipy.sparse as sp
 
-from kompe.core import SurfaceOperators
-from kompe.cubed_sphere import cs_coordinates, cs_vectors
+from kompe.core import SurfaceDifferentialBasis
 from kompe.cubed_sphere.cs_differencing import CSFiniteDifferences
 from kompe.cubed_sphere.cs_grid import CSGridRemapper, GlobalCSMesh
 from kompe.math import as_linear_map, identity_linear_map
@@ -18,7 +17,7 @@ from kompe.math.backend import get_array_module, to_numpy, use_jax
 from kompe.math.least_squares_solver import sparse_constrained_least_squares_map
 
 
-class GlobalCSBasis(SurfaceOperators):
+class GlobalCSBasis(SurfaceDifferentialBasis):
     """Class for representing cubed sphere bases.
 
     This module provides an implementation of the cubed sphere grid
@@ -38,18 +37,17 @@ class GlobalCSBasis(SurfaceOperators):
 
     Attributes
     ----------
-    N : int
-        Number of grid cells per cube edge (only set if N provided in
-        constructor).
-    arr_xi : ndarray
+    cells_per_face : int
+        Number of grid cells along each cube-face edge.
+    xi : ndarray
         Xi coordinates of native cell centers, in radians.
-    arr_eta : ndarray
+    eta : ndarray
         Eta coordinates of native cell centers, in radians.
-    arr_theta : ndarray
+    theta : ndarray
         Colatitude coordinates of native cell centers, in degrees.
-    arr_phi : ndarray
+    phi : ndarray
         Longitude coordinates of native cell centers, in degrees.
-    arr_block : ndarray
+    face : ndarray
         Block indices (0-5) of native cell centers.
     g : ndarray
         Metric tensor
@@ -95,23 +93,23 @@ class GlobalCSBasis(SurfaceOperators):
 
     _surface_cache_size = 16
 
-    def __init__(self, N):
+    def __init__(self, cells_per_face):
         """Initialize the cubed sphere basis.
 
-        Initialize arrays for a grid with N×N cells on each cube face.
-        The native coefficients live at the 6×N×N cell centers.
+        Initialize arrays for a grid with the requested number of cells along
+        each cube-face edge.
 
         Parameters
         ----------
-        N : int
+        cells_per_face : int
             Number of grid cells per cube edge. Must be even.
 
         Raises
         ------
         TypeError
-            If N is not an integer.
+            If ``cells_per_face`` is not an integer.
         ValueError
-            If N is not a positive even number.
+            If ``cells_per_face`` is not a positive even number.
         """
         self._kind = "CS"
         self._index_names = None
@@ -126,28 +124,19 @@ class GlobalCSBasis(SurfaceOperators):
         self._surface_matrix_cache = OrderedDict()
         self._surface_operator_cache = OrderedDict()
 
-        if isinstance(N, bool) or not isinstance(N, (int, np.integer)):
-            raise TypeError("N must be an integer")
-        if N <= 0:
+        if isinstance(cells_per_face, bool) or not isinstance(cells_per_face, (int, np.integer)):
+            raise TypeError("cells_per_face must be an integer")
+        if cells_per_face <= 0:
             raise ValueError("Cubed sphere grid dimension must be positive")
-        if N % 2 != 0:
+        if cells_per_face % 2 != 0:
             raise ValueError("Cubed sphere grid dimension must be even")
 
-        self.N = int(N)
-        self.mesh = GlobalCSMesh(self.N)
-        self.grid_geometry = self.mesh
-        self.arr_xi = self.mesh.arr_xi
-        self.arr_eta = self.mesh.arr_eta
-        self.arr_block = self.mesh.arr_block
-        self.arr_theta = self.mesh.arr_theta
-        self.arr_phi = self.mesh.arr_phi
-        self.g = self.mesh.metric_tensor
-        self.sqrt_detg = self.mesh.sqrt_detg
-        self.unit_area = self.mesh.unit_area
+        self.cells_per_face = int(cells_per_face)
+        self.mesh = GlobalCSMesh(self.cells_per_face)
 
         self.index_names = ("theta", "phi")
-        self.index_length = self.mesh.index_length
-        self.index_arrays = (self.arr_theta, self.arr_phi)
+        self.index_length = self.mesh.size
+        self.index_arrays = (self.mesh.theta, self.mesh.phi)
 
         self.validate_metadata()
 
@@ -214,18 +203,12 @@ class GlobalCSBasis(SurfaceOperators):
     @property
     def coefficient_space_signature(self):
         """Return a signature for CS coefficient compatibility."""
-        return ("CS", int(self.N))
+        return ("CS", int(self.cells_per_face))
 
     @property
     def native_grid(self):
-        """Return the native CS cell centers as a ``Grid``."""
-        if not hasattr(self, "_native_grid"):
-            from kompe.grid import Grid
-
-            self._native_grid = Grid(
-                theta=self.arr_theta, phi=self.arr_phi, area_weights=self.unit_area
-            )
-        return self._native_grid
+        """Return the native CS cell centers as a ``SphericalGrid``."""
+        return self.mesh.cell_centers
 
     @staticmethod
     def _surface_cache_key(name, grid, *parts):
@@ -265,16 +248,16 @@ class GlobalCSBasis(SurfaceOperators):
             cache.popitem(last=False)
         return operator
 
-    def get_scalar_evaluation_matrix(self, grid, derivative=None):
+    def scalar_evaluation_matrix(self, grid, derivative=None):
         """Return the cached CS scalar evaluation matrix."""
         return self._cached_surface_matrix(
             "scalar_evaluation",
             grid,
-            lambda: self.evaluate_on_grid(grid, derivative=derivative),
+            lambda: self._build_scalar_evaluation_matrix(grid, derivative=derivative),
             derivative,
         )
 
-    def get_scalar_evaluation_operator(self, grid, derivative=None):
+    def scalar_evaluation_operator(self, grid, derivative=None):
         """Return the cached CS scalar evaluation operator."""
 
         def build():
@@ -292,7 +275,7 @@ class GlobalCSBasis(SurfaceOperators):
             if derivative is None:
                 return self.scalar_grid_remap_operator(self.native_grid, grid)
 
-            matrix = self.get_scalar_evaluation_matrix(grid, derivative=derivative)
+            matrix = self.scalar_evaluation_matrix(grid, derivative=derivative)
             return as_linear_map(
                 matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
             )
@@ -302,7 +285,7 @@ class GlobalCSBasis(SurfaceOperators):
     @property
     def scalar_mean_weights(self):
         """Return area-normalized weights for scalar surface means."""
-        weights = np.asarray(self.unit_area, dtype=float)
+        weights = np.asarray(self.mesh.cell_areas.reshape(-1), dtype=float)
         total_area = float(np.sum(weights))
         if total_area <= 0.0:
             raise ValueError("GlobalCSBasis unit_area must have positive total area.")
@@ -346,9 +329,9 @@ class GlobalCSBasis(SurfaceOperators):
             return bool(same_as(self.native_grid))
         if not hasattr(grid, "theta") or not hasattr(grid, "phi"):
             return False
-        from kompe.grid import Grid
+        from kompe.grid import SphericalGrid
 
-        grid_hash = Grid.coordinate_hash(to_numpy(grid.theta), to_numpy(grid.phi))
+        grid_hash = SphericalGrid.coordinate_hash(to_numpy(grid.theta), to_numpy(grid.phi))
         return grid_hash == self.native_grid.hash
 
     def scalar_grid_remap_operator(self, source_grid, target_grid):
@@ -367,11 +350,11 @@ class GlobalCSBasis(SurfaceOperators):
 
     def _coordinate_derivatives(self):
         """Return derivatives of xi/eta with respect to theta/phi."""
-        xi, eta, r, block = np.broadcast_arrays(self.arr_xi, self.arr_eta, 1.0, self.arr_block)
+        xi, eta, r, block = np.broadcast_arrays(self.mesh.xi, self.mesh.eta, 1.0, self.mesh.face)
         xi, eta, r, block = map(np.ravel, [xi, eta, r, block])
 
-        pc = self.get_Pc(xi, eta, r=r, block=block)
-        _, theta, phi = self.cube2spherical(xi, eta, r=r, block=block)
+        pc = self.mesh.projection.cartesian_to_cube_vector_matrix(xi, eta, radius=r, face=block)
+        _, theta, phi = self.mesh.projection.cube_to_spherical(xi, eta, block, radius=r)
 
         sin_theta, cos_theta = np.sin(theta), np.cos(theta)
         sin_phi, cos_phi = np.sin(phi), np.cos(phi)
@@ -393,12 +376,18 @@ class GlobalCSBasis(SurfaceOperators):
     def _get_derivative_bundle(self):
         """Build native-grid angular derivative operators."""
         if self._derivative_bundle is None:
-            dxi, deta = self.get_Diff(self.N, coordinate="both", Ns=1, Ni=4, order=1)
+            dxi, deta = self._differentiation_matrix(
+                self.cells_per_face,
+                coordinate="both",
+                Ns=1,
+                Ni=4,
+                order=1,
+            )
             dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi = self._coordinate_derivatives()
 
             dtheta = sp.diags(dxi_dtheta) @ dxi + sp.diags(deta_dtheta) @ deta
             dphi_unscaled = sp.diags(dxi_dphi) @ dxi + sp.diags(deta_dphi) @ deta
-            sin_theta = self._safe_sin_theta(self.arr_theta)
+            sin_theta = self._safe_sin_theta(self.mesh.theta)
 
             # ``phi_unscaled`` is d/dphi. ``phi`` is the azimuthal
             # surface component sin(theta)^-1 d/dphi used by gradients.
@@ -412,7 +401,7 @@ class GlobalCSBasis(SurfaceOperators):
             }
         return self._derivative_bundle
 
-    def evaluate_on_grid(self, grid, derivative=None):
+    def _build_scalar_evaluation_matrix(self, grid, derivative=None):
         """Evaluate CS nodal basis or derivatives."""
         xp = get_array_module(getattr(grid, "theta", None), getattr(grid, "phi", None))
         native_grid = self._is_native_grid(grid)
@@ -438,16 +427,16 @@ class GlobalCSBasis(SurfaceOperators):
 
     def _grid_to_cs_indices(self, grid):
         """Return CS face and cell-center indices."""
-        xi, eta, block = self.geo2cube(grid.phi, 90 - grid.theta)
-        h = self.xi(1, self.N) - self.xi(0, self.N)
-        i = xi / h + (self.N - 1) / 2
-        j = eta / h + (self.N - 1) / 2
+        xi, eta, block = self.mesh.projection.geographic_to_cube(grid.phi, 90 - grid.theta)
+        h = self.mesh.coordinate(1) - self.mesh.coordinate(0)
+        i = xi / h + (self.cells_per_face - 1) / 2
+        j = eta / h + (self.cells_per_face - 1) / 2
         return block.reshape(-1), i.reshape(-1), j.reshape(-1)
 
     def _scalar_interpolation_matrix(self, grid):
         """Return the built-in scalar interpolation as a matrix."""
         return self.interpolate_scalar(
-            np.eye(self.index_length), self.arr_theta, self.arr_phi, grid.theta, grid.phi
+            np.eye(self.index_length), self.mesh.theta, self.mesh.phi, grid.theta, grid.phi
         )
 
     def _interpolate_tangential_operator(self, tangential_operator, grid):
@@ -457,27 +446,27 @@ class GlobalCSBasis(SurfaceOperators):
             tangential_operator[1],
             -tangential_operator[0],
             np.zeros_like(tangential_operator[0]),
-            self.arr_theta,
-            self.arr_phi,
+            self.mesh.theta,
+            self.mesh.phi,
             grid.theta,
             grid.phi,
         )
         return np.stack([-north, east], axis=0)
 
-    def get_surface_gradient_matrix(self, grid):
+    def surface_gradient_matrix(self, grid):
         """Return the CS surface-gradient matrix on ``grid``."""
 
         def build():
             if self._is_native_grid(grid):
-                return SurfaceOperators.get_surface_gradient_matrix(self, grid)
-            native_gradient = SurfaceOperators.get_surface_gradient_matrix(self, self)
+                return SurfaceDifferentialBasis.surface_gradient_matrix(self, grid)
+            native_gradient = SurfaceDifferentialBasis.surface_gradient_matrix(self, self)
             matrix = self._interpolate_tangential_operator(native_gradient, grid)
             xp = get_array_module(getattr(grid, "theta", None), matrix)
             return xp.asarray(matrix)
 
         return self._cached_surface_matrix("surface_gradient", grid, build)
 
-    def get_surface_gradient_operator(self, grid):
+    def surface_gradient_operator(self, grid):
         """Return the CS surface-gradient operator on ``grid``."""
 
         def build():
@@ -492,20 +481,20 @@ class GlobalCSBasis(SurfaceOperators):
 
         return self._cached_surface_operator("surface_gradient", grid, build)
 
-    def get_rhat_cross_gradient_matrix(self, grid):
+    def rhat_cross_gradient_matrix(self, grid):
         """Return the CS rhat-cross-gradient matrix on ``grid``."""
 
         def build():
             if self._is_native_grid(grid):
-                return SurfaceOperators.get_rhat_cross_gradient_matrix(self, grid)
-            native_rxgrad = SurfaceOperators.get_rhat_cross_gradient_matrix(self, self)
+                return SurfaceDifferentialBasis.rhat_cross_gradient_matrix(self, grid)
+            native_rxgrad = SurfaceDifferentialBasis.rhat_cross_gradient_matrix(self, self)
             matrix = self._interpolate_tangential_operator(native_rxgrad, grid)
             xp = get_array_module(getattr(grid, "theta", None), matrix)
             return xp.asarray(matrix)
 
         return self._cached_surface_matrix("rhat_cross_gradient", grid, build)
 
-    def get_rhat_cross_gradient_operator(self, grid):
+    def rhat_cross_gradient_operator(self, grid):
         """Return the CS rhat-cross-gradient operator on ``grid``."""
 
         def build():
@@ -520,14 +509,14 @@ class GlobalCSBasis(SurfaceOperators):
 
         return self._cached_surface_operator("rhat_cross_gradient", grid, build)
 
-    def get_helmholtz_synthesis_matrix(self, grid):
+    def helmholtz_synthesis_matrix(self, grid):
         """Return the CS Helmholtz synthesis tensor on ``grid``."""
 
         def build():
             if self._is_native_grid(grid):
-                return SurfaceOperators.get_helmholtz_synthesis_matrix(self, grid)
+                return SurfaceDifferentialBasis.helmholtz_synthesis_matrix(self, grid)
             xp = get_array_module(getattr(grid, "theta", None), getattr(grid, "phi", None))
-            native_gradient = SurfaceOperators.get_surface_gradient_matrix(self, self)
+            native_gradient = SurfaceDifferentialBasis.surface_gradient_matrix(self, self)
             native_rxgrad = np.stack([-native_gradient[1], native_gradient[0]], axis=0)
             target_gradient = self._interpolate_tangential_operator(native_gradient, grid)
             target_rxgrad = self._interpolate_tangential_operator(native_rxgrad, grid)
@@ -535,7 +524,7 @@ class GlobalCSBasis(SurfaceOperators):
 
         return self._cached_surface_matrix("helmholtz_synthesis", grid, build)
 
-    def get_helmholtz_synthesis_operator(self, grid):
+    def helmholtz_synthesis_operator(self, grid):
         """Return the CS Helmholtz synthesis operator on ``grid``."""
 
         def build():
@@ -556,7 +545,7 @@ class GlobalCSBasis(SurfaceOperators):
         phi = bundle["phi"]
         return sp.bmat([[-theta, -phi], [-phi, theta]], format="csr")
 
-    def get_helmholtz_analysis_operator(self, grid, *, sqrt_weights=None):
+    def helmholtz_analysis_operator(self, grid, *, sqrt_weights=None):
         """Return sparse constrained native-grid Helmholtz analysis."""
         if not self._is_native_grid(grid):
             return None
@@ -588,14 +577,14 @@ class GlobalCSBasis(SurfaceOperators):
             self._laplacian_sparse_cache[key] = ((term_theta + term_phi) / (r**2)).tocsr()
         return self._laplacian_sparse_cache[key]
 
-    def laplacian(self, r=1.0):
+    def _surface_laplacian(self, r=1.0):
         """Return the discrete scalar Laplacian matrix."""
         key = float(r)
         if key not in self._laplacian_cache:
             self._laplacian_cache[key] = self._sparse_laplacian_matrix(r).toarray()
         return get_array_module().asarray(self._laplacian_cache[key])
 
-    def get_surface_laplacian_operator(self, r=1.0):
+    def surface_laplacian_operator(self, r=1.0):
         """Return the native sparse scalar Laplacian operator."""
         return as_linear_map(
             self._sparse_laplacian_matrix(r),
@@ -603,7 +592,7 @@ class GlobalCSBasis(SurfaceOperators):
             output_shape=(self.index_length,),
         )
 
-    def get_mean_free_surface_poisson_operator(self, r=1.0):
+    def mean_free_surface_poisson_operator(self, r=1.0):
         """Return the mean-zero inverse of the discrete Laplacian."""
         n = self.index_length
         normalized_mean = np.sqrt(n) * self.scalar_mean_weights
@@ -612,371 +601,7 @@ class GlobalCSBasis(SurfaceOperators):
             self._sparse_laplacian_matrix(r), gauge, input_shape=(n,), output_shape=(n,)
         )
 
-    def get_gridpoints(self, N, flat=False):
-        """Generate grid-line indices for a given resolution.
-
-        Parameters
-        ----------
-        N : int
-            Number of grid cells per edge.
-        flat : bool, optional
-            Whether to return flattened arrays.
-
-        Returns
-        -------
-        k : ndarray
-            Block indices (0-5).
-        i : ndarray
-            Xi direction indices (0 to N).
-        j : ndarray
-            Eta direction indices (0 to N).
-
-        Notes
-        -----
-        Arrays have shape (6,N+1,N+1) if `flat` is ``False``, or
-        (6*(N+1)*(N+1),) if `flat` is ``True``.
-        Native GlobalCSBasis coefficients are cell-centered at
-        ``i + 0.5, j + 0.5`` for ``i, j = 0, ..., N-1``.
-        """
-        k, i, j = np.meshgrid(np.arange(6), np.arange(N + 1), np.arange(N + 1), indexing="ij")
-        if flat:
-            return k.reshape(-1), i.reshape(-1), j.reshape(-1)
-        else:
-            return k, i, j
-
-    def xi(self, i, N):
-        """Calculate xi coordinate for grid index.
-
-        Maps index i=0 to -π/4 and i=N to π/4, providing the xi
-        coordinate in the cubed sphere grid system.
-
-        Parameters
-        ----------
-        i : array-like
-            Index values (can be non-integer).
-        N : int
-            Grid resolution (number of cells per edge).
-
-        Returns
-        -------
-        ndarray
-            Xi coordinates in radians from -π/4 to π/4.
-
-        Raises
-        ------
-        TypeError
-            If `N` is not an integer.
-        ValueError
-            If `N` is less than 1.
-        """
-        return cs_coordinates.coordinate(i, N)
-
-    def eta(self, j, N):
-        """Calculate eta coordinate for grid index.
-
-        Maps index ``j=0`` to -π/4 and ``j=N`` to π/4, providing the eta
-        coordinate in the cubed sphere grid system. This function is
-        mathematically identical to xi() but is provided separately for
-        code clarity.
-
-        Parameters
-        ----------
-        j : array-like
-            Index values (can be non-integer).
-        N : int
-            Grid resolution (number of cells per edge).
-
-        Returns
-        -------
-        ndarray
-            Eta coordinates in radians from -π/4 to π/4.
-
-        Raises
-        ------
-        TypeError
-            If `N` is not an integer.
-        ValueError
-            If `N` is less than 1.
-        """
-        return cs_coordinates.coordinate(j, N)
-
-    def get_delta(self, xi, eta):
-        """Calculate delta parameter for metric calculations.
-
-        Computes ``δ = 1 + tan²(ξ) + tan²(η)``.
-
-        Parameters
-        ----------
-        xi : array-like
-            Xi coordinates in radians.
-        eta : array-like
-            Eta coordinates in radians.
-
-        Returns
-        -------
-        ndarray
-            Delta values with shape determined by broadcasting rules.
-        """
-        return cs_coordinates.delta(xi, eta)
-
-    def get_metric_tensor(self, xi, eta, r=1, covariant=True):
-        """Calculate metric tensor components.
-
-        Calculates the metric tensor components for the cubed sphere
-        grid system at given points, which relate coordinate
-        differentials to distances according to the equation
-        ``ds² = gᵢⱼ dxⁱdxʲ``. Implementation based on equation (12) from
-        Yin et al. (2017).
-
-        Parameters
-        ----------
-        xi : array-like
-            Xi coordinates in radians.
-        eta : array-like
-            Eta coordinates in radians.
-        r : array-like, optional
-            Radial coordinates.
-        covariant : bool, optional
-            If ``True`` return covariant components, otherwise return
-            contravariant components.
-
-        Returns
-        -------
-        g : ndarray
-            Metric tensor components with shape (N,3,3) where N is the
-            number of input points. Last two dimensions are tensor
-            indices.
-        """
-        return cs_coordinates.metric_tensor(xi, eta, r=r, covariant=covariant)
-
-    def cube2cartesian(self, xi, eta, r=1, block=0):
-        """Calculate Cartesian ECEF coordinates of given points.
-
-        Output will have same unit as `r`.
-
-        Calculations based on equations from Appendix A of Yin et al.
-        (2017).
-
-        Parameters
-        ----------
-        xi : array-like
-            Array of xi coordinates in radians.
-        eta : array-like
-            Array of eta coordinates in radians.
-        r : array-like, optional
-            Array of radii.
-        block : array-like, optional
-            Array of block indices.
-
-        Returns
-        -------
-        x : array
-            Array of Cartesian x coordinates, shape determined by input
-            according to broadcasting rules.
-        y : array
-            Array of Cartesian y coordinates, shape determined by input
-            according to broadcasting rules.
-        z : array
-            Array of Cartesian z coordinates, shape determined by input
-            according to broadcasting rules.
-        """
-        return cs_coordinates.cube_to_cartesian(xi, eta, r=r, block=block)
-
-    def cube2spherical(self, xi, eta, block, r=1, deg=False):
-        """Convert from cubed sphere to spherical coordinates.
-
-        Converts cubed sphere coordinates to spherical coordinates
-        through intermediate Cartesian coordinates using equations from
-        Appendix A of Yin et al. (2017).
-
-        Parameters
-        ----------
-        xi : array-like
-            Xi coordinates in radians.
-        eta : array-like
-            Eta coordinates in radians.
-        block : array-like
-            Block indices (0-5)
-        r : float or array-like, optional
-            Radial coordinates.
-        deg : bool, optional
-            Return angles in degrees if True, otherwise radians.
-
-        Returns
-        -------
-        r : ndarray
-            Radial coordinates (same units as input r).
-        theta : ndarray
-            Colatitude in radians or degrees.
-        phi : ndarray
-            Longitude in radians or degrees.
-        """
-        return cs_coordinates.cube_to_spherical(xi, eta, block, r=r, deg=deg)
-
-    def get_Pc(self, xi, eta, r=1, block=0, inverse=False):
-        """Get Pc matrix.
-
-        Calculates elements of transformation matrix `Pc` at all input
-        points.
-
-        The `Pc` matrix transforms Cartesian components ``(ux, uy, uz)``
-        to contravariant components in a cubed sphere coordinate
-        system::
-
-            |u1| = |P00 P01 P02| |ux|
-            |u2| = |P10 P11 P12| |uy|
-            |u3| = |P20 P21 P22| |uz|
-
-        The output, `Pc`, will have shape ``(N, 3, 3)``.
-
-        Calculations based on equations from Appendix A of Yin et al.
-        (2017), with similar notation.
-
-        Parameters
-        ----------
-        xi : array-like
-            Array of xi coordinates, in radians.
-        eta : array-like
-            Array of eta coordinates, in radians.
-        r : array-like, optional
-            Array of radii.
-        block : array-like, optional
-            Array of block indices.
-        inverse : bool, optional
-            Set to ``True`` if you want the inverse transformation
-            matrix.
-
-        Returns
-        -------
-        Pc : array
-            Transformation matrices `Pc`, one for each point described
-            by the input parameters (using broadcasting rules). For
-            ``N`` such points, `Pc` will have shape ``(N, 3, 3)``, where
-            the last two dimensions refer to column and row of the
-            matrix.
-        """
-        return cs_vectors.pc(xi, eta, r=r, block=block, inverse=inverse)
-
-    def get_Ps(self, xi, eta, r=1, block=0, inverse=False):
-        """Get Ps matrix.
-
-        Calculates elements of transformation matrix `Ps` at all input
-        points.
-
-        The `Ps` matrix transforms vector components
-        ``(u_east, u_north, u_r)`` to contravariant components in a
-        cubed sphere coordinate system::
-
-            |u1| = |P00 P01 P02| |u_east|
-            |u2| = |P10 P11 P12| |u_north|
-            |u3| = |P20 P21 P22| |u_r|
-
-        The output, `Ps`, will have shape ``(N, 3, 3)``.
-
-        Calculations based on equations from Appendix A of Yin et al.
-        (2017), with similar notation, except that ``lambda`` and
-        ``phi`` is replaced with ``east`` and ``north`` (here, ``phi``
-        means longitude, and not latitude as in Yin et al. (2017).
-
-        Parameters
-        ----------
-        xi : array-like
-            Array of xi coordinates, in radians.
-        eta : array-like
-            Array of eta coordinates, in radians.
-        r : array-like, optional
-            Array of radii.
-        block : array-like, optional
-            Array of block indices.
-        inverse : bool, optional
-            Set to ``True`` if you want the inverse transformation
-            matrix.
-
-        Returns
-        -------
-        Ps : array
-            Transformation matrices `Ps`, one for each point described
-            by the input parameters (using broadcasting rules). For
-            ``N`` such points, `Ps` will have shape ``(N, 3, 3)``, where
-            the last two dimensions refer to column and row of the
-            matrix.
-        """
-        return cs_vectors.ps(xi, eta, r=r, block=block, inverse=inverse)
-
-    def get_Qij(self, xi, eta, block_i, block_j):
-        """Get Qij matrix.
-
-        Calculates matrix `Qij` that transforms contravariant vector
-        components from block `block_i` to `block_j`.
-
-        Calculations are done via transformation to spherical
-        coordinates, as suggested by Yin et al. (2017) See equations
-        (66) and (67) in their paper.
-
-        It works like this, where ``(u1, u2, u3)`` refer to
-        contravariant vector components in the cubed sphere coordinate
-        system::
-
-            |u1_j|      |u1_i|
-            |u2_j| = Qij|u2_i|
-            |u3_j|      |u3_i|
-
-        Parameters
-        ----------
-        xi : array-like
-            Array of xi coordinates on block given by `block_i`, in
-            radians.
-        eta : array-like
-            Array of eta coordinates on block given by `block_i`, in
-            radians.
-        block_i : array-like, optional
-            Indices of block(s) from which to transform vector
-            components.
-        block_j : array-like, optional
-            Indices of block(s) to which to transform vector components.
-
-        Returns
-        -------
-        Qij : array
-            Transformation matrices `Qij`, one for each point described
-            by the input parameters (using broadcasting rules). For
-            ``N`` such points, `Qij` will have shape ``(N, 3, 3)``,
-            where the last two dimensions refer to column and row of the
-            matrix.
-        """
-        return cs_vectors.q_between_blocks(xi, eta, block_i, block_j)
-
-    def get_Q(self, lat, r, inverse=False):
-        """Get Q matrix.
-
-        Calculates the matrices that convert from unnormalized spherical
-        components to normalized spherical vector components::
-
-            |u_east_normalized |    |u_east |
-            |u_north_normalized| = Q|u_north|
-            |u_r_normalized    |    |u_r    |
-
-        Based on equations after (A25) in Yin et al. (2017).
-
-        Parameters
-        ----------
-        lat : array
-            Array of latitudes, in degrees.
-        r : array
-            Array of radii.
-        inverse : bool, optional
-            Set to ``True`` if you want the inverse transformation
-            matrix.
-
-        Returns
-        -------
-        Q : array
-            ``(N, 3, 3)`` array, where ``N`` is the size implied by
-            broadcasting the input.
-        """
-        return cs_vectors.spherical_q(lat, r, inverse=inverse)
-
-    def get_Diff(self, N, coordinate="xi", Ns=1, Ni=4, order=1):
+    def _differentiation_matrix(self, N, coordinate="xi", Ns=1, Ni=4, order=1):
         """Get scalar field differentiation matrix.
 
         Calculate matrix that differentiates a scalar field, defined on
@@ -1017,122 +642,6 @@ class GlobalCSBasis(SurfaceOperators):
         return self._finite_differences.difference_matrix(
             N, coordinate=coordinate, Ns=Ns, Ni=Ni, order=order
         )
-
-    def get_interpolation_matrix(self, k, i, j, N, Ni, weights=None, rows=None):
-        """Get matrix for grid to cubed sphere interpolation.
-
-        Calculates a sparse matrix D that interpolates from grid points
-        in a ``(6, N, N)`` grid to the indices (`k`, `i`, `j`).
-
-        `D` will have ``6*N**2`` columns that refer to the ``(6, N, N)``
-        grid points, spanning the 6 blocks in the cubed sphere, with
-        duplicate points on the boundaries.
-
-        Parameters
-        ----------
-        k : array-like
-            Integer indices that refer to cube block. Must be ``>= 0``
-            and ``<= 5``. Will be flattened.
-        i : array-like
-            Integer indices that refer to the ``xi``-direction (but can
-            be negative or ``>= N``). Will be flattened.
-        j : array-like
-            Integer indices that refer to the ``eta``-direction (but can
-            be negative or ``>= N``). Will be flattened.
-        N : int
-            Number of grid points.
-        Ni : int
-            Number of interpolation points. Must be ``<= N`` (4 is often
-            appropriate).
-        weights : array-like, optional
-            If different values of `k`, `i`, `j` are assigned to the
-            same row, the corresponding element will have value 1 (or
-            whatever the interpolation dictates) unless weights is
-            specified. For differentiation, use weights to specify the
-            stencil coefficients.
-        rows : array-like, optional
-            The row index of each element in `k`, `i`, `j`. Different
-            elements of `k`, `i`, `j` can be put in the same row. If not
-            specified, each element in `k`, `i`, `j` will be given its
-            own row.
-
-        Returns
-        -------
-        D : sparse matrix
-            ``(rows.max() + 1 by 6*N*N)`` matrix that, when multiplied
-            by a vector containing a scalar field on the ``6*N*N`` grid
-            points, produces interpolated values at the given grid
-            points. The grid points may be outside the cube blocks, for
-            example they can be negative (actually that's the point,
-            otherwise this function would not be needed).
-        """
-        return self._finite_differences.interpolation_matrix(
-            k, i, j, N, Ni, weights=weights, rows=rows
-        )
-
-    def block(self, lon, lat):
-        """Determine cube faces (blocks) of spherical coordinates.
-
-        For each input point, determines which of the six cube faces is
-        closest by calculating distances to face midpoints in Cartesian
-        space.
-
-        Parameters
-        ----------
-        lon : array-like
-            Geocentric longitude(s) in degrees.
-        lat : array-like
-            Geocentric latitude(s) in degrees.
-
-        Returns
-        -------
-        ndarray
-            Indices of the block that each (lon, lat) point belongs to:
-            - 0 (I)   : Equatorial face at 0° longitude
-            - 1 (II)  : Equatorial face at 90° longitude
-            - 2 (III) : Equatorial face at 180° longitude
-            - 3 (IV)  : Equatorial face at 270° longitude
-            - 4 (V)   : North polar face
-            - 5 (VI)  : South polar face
-
-        Notes
-        -----
-        The method uses Euclidean distances to face midpoints in
-        Cartesian space to determine block membership. This ensures
-        unique block assignment even for points near block boundaries.
-        """
-        return cs_coordinates.cube_face(lon, lat)
-
-    def geo2cube(self, lon, lat, block=None):
-        """Convert geocentric coordinates to cube coordinates.
-
-        Input parameters must have same shape. Output will have same
-        shape.
-
-        Parameters
-        ----------
-        lon : array
-            Geocentric longitude(s) to convert to cube coords, in
-            degrees.
-        lat : array
-            Geocentric latitude(s) to convert to cube coords, in
-            degrees.
-        block : array-like, optional
-            Option to specify cube block. If ``None``, it will be
-            calculated. If specified, be careful because the function
-            will map points at opposite side of the sphere to specified
-            block.
-
-        Returns
-        -------
-        xi : array
-            `xi`, as defined in Ronchi et al. (1996). Unit is radians.
-        eta : array
-            `eta`, as defined in Ronchi et al. (1996). Unit is radians.
-        block : array
-            Index of the block that `xi`, `eta` belongs to.
-        """
-        return cs_coordinates.geo_to_cube(lon, lat, block=block)
 
     def interpolate_vector_components(
         self, u_east, u_north, u_r, theta, phi, theta_target, phi_target, **kwargs

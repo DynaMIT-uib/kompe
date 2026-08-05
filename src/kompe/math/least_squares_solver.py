@@ -443,7 +443,7 @@ class LeastSquaresSolver:
         if xp is not np:
             return self._solve_lsmr_jax(problem, rhs_block, num_rhs, preconditioner, **kwargs)
 
-        system_map = problem.get_system_linear_map()
+        system_map = problem.system_operator()
         solve_map, recover_solution = self._preconditioned_system(system_map, preconditioner)
         lsmr_options = self._lsmr_options(system_map, kwargs)
         linear_operator = solve_map.as_linear_operator()
@@ -467,7 +467,7 @@ class LeastSquaresSolver:
         from kompe.math.jax_lsmr import lsmr as jax_lsmr
 
         xp = get_array_module(rhs_block)
-        system_map = problem.get_system_linear_map()
+        system_map = problem.system_operator()
         solve_map, recover_solution = self._preconditioned_system(system_map, preconditioner)
         lsmr_options = self._lsmr_options(system_map, kwargs)
         columns = []
@@ -524,7 +524,7 @@ class LeastSquaresSolver:
         if xp is not np:
             return self._solve_cgls_jax(problem, rhs_block, num_rhs, preconditioner, **kwargs)
 
-        system_map = problem.get_system_linear_map()
+        system_map = problem.system_operator()
         normal_op = LinearOperator(
             (system_map.shape[1], system_map.shape[1]),
             matvec=lambda x: np.asarray(system_map.rmatvec(system_map.matvec(x))),
@@ -564,7 +564,7 @@ class LeastSquaresSolver:
         """Solve normal equations with JAX CG."""
         from jax.scipy.sparse.linalg import cg as jax_cg
 
-        system_map = problem.get_system_linear_map()
+        system_map = problem.system_operator()
         cg_rhs = system_map.rmatmat(rhs_block).reshape(problem.solution_size, num_rhs)
         max_iter = kwargs.pop("maxiter", ITERATION_SAFETY_FACTOR * problem.solution_size)
         tolerance = kwargs.pop("tol", kwargs.pop("rtol", self.tolerance))
@@ -623,7 +623,7 @@ class LeastSquaresSolver:
         self, problem: LeastSquaresProblem, *, square_root: bool
     ) -> LinearMap:
         """Build a diagonal preconditioner from ``diag(A* A)``."""
-        diag = problem.get_system_linear_map().normal_matrix_diag()
+        diag = problem.system_operator().normal_matrix_diag()
         inv_diag = np.divide(1.0, diag, out=np.ones_like(diag), where=diag != 0)
         values = np.sqrt(inv_diag) if square_root else inv_diag
         return diagonal_linear_map(

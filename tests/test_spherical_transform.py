@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from kompe import GlobalCSBasis, Grid, SHBasis, SphericalTransform
+from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
 from kompe.cubed_sphere.cs_grid import CSGridRemapper
 from kompe.math import JAX_AVAILABLE, set_backend, to_numpy, use_jax
 from kompe.math.least_squares_solver import dense_full_rank_least_squares_map
@@ -13,7 +13,7 @@ def _regular_grid():
     lat = np.linspace(-70.0, 70.0, 11)
     lon = np.linspace(0.0, 330.0, 12)
     lat_grid, lon_grid = np.meshgrid(lat, lon, indexing="ij")
-    return Grid(lat=lat_grid.reshape(-1), lon=lon_grid.reshape(-1))
+    return SphericalGrid(lat=lat_grid.reshape(-1), lon=lon_grid.reshape(-1))
 
 
 def test_transform_cache_controls_rebuild_equivalent_analysis():
@@ -53,8 +53,7 @@ def test_rotated_gradient_analysis_matches_dense_least_squares():
     transform = SphericalTransform(basis, grid, area_weighted=True)
     scale = np.linspace(0.5, 1.5, basis.index_length)
     synthesis = (
-        np.asarray(transform.scalar_coeffs_to_gridded_rhat_cross_gradient)
-        * scale.reshape(1, 1, -1)
+        np.asarray(transform.rhat_cross_gradient_matrix) * scale.reshape(1, 1, -1)
     ).reshape(2 * grid.size, basis.index_length)
     expected = dense_full_rank_least_squares_map(
         synthesis,
@@ -85,7 +84,7 @@ def test_structured_sh_normal_matrix_matches_explicit_system(field_type):
     )
 
     observed = np.asarray(problem.dense_normal_matrix())
-    system = np.asarray(problem.get_system_linear_map().to_matrix(backend="numpy"))
+    system = np.asarray(problem.system_operator().to_matrix(backend="numpy"))
 
     np.testing.assert_allclose(observed, system.T @ system, rtol=1e-12, atol=1e-12)
 
@@ -94,7 +93,7 @@ def test_spherical_transform_caches_direct_input_transforms_by_grid():
     """Direct analysis cache keeps separate compatible input grids."""
     basis = SHBasis(3, 2, mean_free=True)
     grid = _regular_grid()
-    shifted_grid = Grid(lat=grid.lat, lon=grid.lon + 1.0)
+    shifted_grid = SphericalGrid(lat=grid.lat, lon=grid.lon + 1.0)
     transform = SphericalTransform(basis, grid)
 
     transform.analyze_scalar_samples(np.zeros(grid.size), input_grid=grid, analysis_basis=basis)
@@ -112,8 +111,10 @@ def test_weighted_analysis_cache_distinguishes_grid_measures():
     """Different grid measures use different analyses."""
     basis = SHBasis(3, 2, mean_free=True)
     target = _regular_grid()
-    first = Grid(lat=target.lat, lon=target.lon, area_weights=np.ones(target.size))
-    second = Grid(lat=target.lat, lon=target.lon, area_weights=np.linspace(1.0, 2.0, target.size))
+    first = SphericalGrid(lat=target.lat, lon=target.lon, area_weights=np.ones(target.size))
+    second = SphericalGrid(
+        lat=target.lat, lon=target.lon, area_weights=np.linspace(1.0, 2.0, target.size)
+    )
     transform = SphericalTransform(basis, target, area_weighted=True)
     values = np.zeros(target.size)
 
@@ -233,14 +234,14 @@ def test_schmidt_surface_norms_match_gauss_legendre_quadrature():
     solid_angle = np.broadcast_to(
         latitude_weights[:, None] * (2.0 * np.pi / phi.size), theta_grid.shape
     )
-    grid = Grid(
+    grid = SphericalGrid(
         theta=theta_grid.reshape(-1),
         phi=phi_grid.reshape(-1),
         area_weights=solid_angle.reshape(-1),
     )
     basis = SHBasis(5, 5, mean_free=False)
-    values = np.asarray(basis.get_scalar_evaluation_matrix(grid))
-    gradient = np.asarray(basis.get_surface_gradient_matrix(grid))
+    values = np.asarray(basis.scalar_evaluation_matrix(grid))
+    gradient = np.asarray(basis.surface_gradient_matrix(grid))
     normalized_area = solid_angle.reshape(-1) / (4.0 * np.pi)
     q = 1.0 / (2.0 * basis.n + 1.0)
     mu = basis.n * (basis.n + 1.0)
@@ -337,16 +338,18 @@ def test_spherical_transform_least_squares_use_operator_properties():
     scalar_problem = transform.scalar_least_squares_problem
     helmholtz_problem = transform.helmholtz_least_squares_problem
 
-    assert scalar_problem.A[0] is transform.scalar_coeffs_to_grid_operator
-    assert helmholtz_problem.A[0] is transform.helmholtz_coeffs_to_gridded_vector_operator
-    assert not hasattr(transform, "_scalar_coeffs_to_grid")
-    assert not hasattr(transform, "_helmholtz_coeffs_to_gridded_vector")
+    assert scalar_problem.A[0] is transform.scalar_synthesis_operator
+    assert helmholtz_problem.A[0] is transform.helmholtz_synthesis_operator
+    assert not hasattr(transform, "_scalar_synthesis_matrix")
+    assert not hasattr(transform, "_helmholtz_synthesis_matrix")
 
 
 def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch):
     """Native CS synthesis can apply sparse operators."""
     basis = GlobalCSBasis(4)
-    grid = Grid(theta=basis.arr_theta, phi=basis.arr_phi, area_weights=basis.unit_area)
+    grid = SphericalGrid(
+        theta=basis.mesh.theta, phi=basis.mesh.phi, area_weights=basis.mesh.cell_areas.reshape(-1)
+    )
     transform = SphericalTransform(basis, grid)
     bundle = basis._get_derivative_bundle()
     theta = bundle["theta"].toarray()
@@ -364,7 +367,7 @@ def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch)
     def fail_evaluate_on_grid(*args, **kwargs):
         raise AssertionError("native CS synthesis should use operator paths")
 
-    monkeypatch.setattr(basis, "evaluate_on_grid", fail_evaluate_on_grid)
+    monkeypatch.setattr(basis, "scalar_evaluation_matrix", fail_evaluate_on_grid)
 
     np.testing.assert_allclose(transform.synthesize_scalar(scalar_coeffs), scalar_coeffs)
     np.testing.assert_allclose(
@@ -374,8 +377,8 @@ def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch)
         transform.synthesize_scalar(scalar_coeffs, derivative="phi"), phi @ scalar_coeffs
     )
     np.testing.assert_allclose(transform.synthesize_helmholtz(vector_coeffs), expected_helmholtz)
-    assert not hasattr(transform, "_scalar_coeffs_to_grid")
-    assert not hasattr(transform, "_helmholtz_coeffs_to_gridded_vector")
+    assert not hasattr(transform, "_scalar_synthesis_matrix")
+    assert not hasattr(transform, "_helmholtz_synthesis_matrix")
 
 
 def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
@@ -384,12 +387,12 @@ def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
     basis = SHBasis(3, 2, mean_free=True)
     grid_remap_basis = GlobalCSBasis(8)
     source_basis = GlobalCSBasis(10)
-    target_grid = Grid(
-        theta=grid_remap_basis.arr_theta,
-        phi=grid_remap_basis.arr_phi,
-        area_weights=grid_remap_basis.unit_area,
+    target_grid = SphericalGrid(
+        theta=grid_remap_basis.mesh.theta,
+        phi=grid_remap_basis.mesh.phi,
+        area_weights=grid_remap_basis.mesh.cell_areas.reshape(-1),
     )
-    input_grid = Grid(theta=source_basis.arr_theta, phi=source_basis.arr_phi)
+    input_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
     values = np.vstack([np.sin(np.deg2rad(input_grid.theta)), np.cos(np.deg2rad(input_grid.phi))])
     transform = SphericalTransform(basis, target_grid, grid_remap_basis=grid_remap_basis)
     calls = 0
@@ -427,10 +430,10 @@ def test_spherical_transform_skips_matching_grid_remap(monkeypatch):
     """Sample analysis skips remapping on matching grids."""
     basis = SHBasis(3, 2, mean_free=True)
     grid_remap_basis = GlobalCSBasis(8)
-    grid = Grid(
-        theta=grid_remap_basis.arr_theta,
-        phi=grid_remap_basis.arr_phi,
-        area_weights=grid_remap_basis.unit_area,
+    grid = SphericalGrid(
+        theta=grid_remap_basis.mesh.theta,
+        phi=grid_remap_basis.mesh.phi,
+        area_weights=grid_remap_basis.mesh.cell_areas.reshape(-1),
     )
     values = np.vstack([np.sin(np.deg2rad(grid.theta)), np.cos(np.deg2rad(grid.phi))])
     transform = SphericalTransform(basis, grid, grid_remap_basis=grid_remap_basis)
@@ -448,14 +451,16 @@ def test_spherical_transform_skips_matching_grid_remap(monkeypatch):
 
 
 def test_spherical_transform_requires_grid_remap_operator():
-    """Grid-to-grid analysis requires remap operators."""
+    """SphericalGrid-to-grid analysis requires remap operators."""
     basis = SHBasis(3, 2, mean_free=True)
     target_basis = GlobalCSBasis(8)
     source_basis = GlobalCSBasis(10)
-    target_grid = Grid(
-        theta=target_basis.arr_theta, phi=target_basis.arr_phi, area_weights=target_basis.unit_area
+    target_grid = SphericalGrid(
+        theta=target_basis.mesh.theta,
+        phi=target_basis.mesh.phi,
+        area_weights=target_basis.mesh.cell_areas.reshape(-1),
     )
-    input_grid = Grid(theta=source_basis.arr_theta, phi=source_basis.arr_phi)
+    input_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
     values = np.sin(np.deg2rad(input_grid.theta))
     transform = SphericalTransform(basis, target_grid, grid_remap_basis=object())
 
@@ -471,12 +476,12 @@ def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
     basis = SHBasis(3, 2, mean_free=True)
     grid_remap_basis = GlobalCSBasis(8)
     source_basis = GlobalCSBasis(10)
-    target_grid = Grid(
-        theta=grid_remap_basis.arr_theta,
-        phi=grid_remap_basis.arr_phi,
-        area_weights=grid_remap_basis.unit_area,
+    target_grid = SphericalGrid(
+        theta=grid_remap_basis.mesh.theta,
+        phi=grid_remap_basis.mesh.phi,
+        area_weights=grid_remap_basis.mesh.cell_areas.reshape(-1),
     )
-    input_grid = Grid(theta=source_basis.arr_theta, phi=source_basis.arr_phi)
+    input_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
     theta_values = np.vstack(
         [np.sin(np.deg2rad(input_grid.theta)), np.cos(np.deg2rad(input_grid.theta))]
     )
@@ -522,8 +527,8 @@ def test_cs_scalar_remap_operator_matches_interpolation():
     """Cached scalar remap matches the legacy CS interpolation."""
     source_basis = GlobalCSBasis(8)
     target_basis = GlobalCSBasis(6)
-    source_grid = Grid(theta=source_basis.arr_theta, phi=source_basis.arr_phi)
-    target_grid = Grid(theta=target_basis.arr_theta, phi=target_basis.arr_phi)
+    source_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
+    target_grid = SphericalGrid(theta=target_basis.mesh.theta, phi=target_basis.mesh.phi)
     values = np.sin(np.deg2rad(source_grid.theta)) + 0.25 * np.cos(np.deg2rad(source_grid.phi))
 
     operator = target_basis.scalar_grid_remap_operator(source_grid, target_grid)
@@ -540,8 +545,8 @@ def test_cs_tangential_remap_operator_matches_interpolation():
     """Cached tangential remap matches legacy interpolation."""
     source_basis = GlobalCSBasis(8)
     target_basis = GlobalCSBasis(6)
-    source_grid = Grid(theta=source_basis.arr_theta, phi=source_basis.arr_phi)
-    target_grid = Grid(theta=target_basis.arr_theta, phi=target_basis.arr_phi)
+    source_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
+    target_grid = SphericalGrid(theta=target_basis.mesh.theta, phi=target_basis.mesh.phi)
     theta_component = np.sin(np.deg2rad(source_grid.theta))
     phi_component = np.cos(np.deg2rad(source_grid.phi))
     values = np.vstack([theta_component, phi_component])
@@ -569,8 +574,8 @@ def test_cs_tangential_remap_matrix_cache_is_shared(monkeypatch):
     source_basis = GlobalCSBasis(8)
     target_basis = GlobalCSBasis(6)
     equivalent_target_basis = GlobalCSBasis(6)
-    source_grid = Grid(theta=source_basis.arr_theta, phi=source_basis.arr_phi)
-    target_grid = Grid(theta=target_basis.arr_theta, phi=target_basis.arr_phi)
+    source_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
+    target_grid = SphericalGrid(theta=target_basis.mesh.theta, phi=target_basis.mesh.phi)
     values = np.vstack(
         [np.sin(np.deg2rad(source_grid.theta)), np.cos(np.deg2rad(source_grid.phi))]
     )
@@ -596,16 +601,16 @@ def test_cs_tangential_remap_matrix_cache_is_shared(monkeypatch):
 def test_cs_non_native_scalar_operator_uses_remap_without_dense_interpolation(monkeypatch):
     """CS non-native scalar operators use sparse remaps."""
     basis = GlobalCSBasis(8)
-    _, theta, phi = basis.cube2spherical(
-        basis.xi(np.array([1.2, 2.3, 3.4, 4.5]), basis.N),
-        basis.eta(np.array([1.1, 2.2, 3.1, 4.2]), basis.N),
+    _, theta, phi = basis.mesh.projection.cube_to_spherical(
+        basis.mesh.coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
+        basis.mesh.coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
         np.zeros(4),
-        deg=True,
+        degrees=True,
     )
-    target = Grid(theta=theta, phi=phi)
-    coeffs = np.sin(np.deg2rad(basis.arr_theta)) + 0.25 * np.cos(np.deg2rad(basis.arr_phi))
+    target = SphericalGrid(theta=theta, phi=phi)
+    coeffs = np.sin(np.deg2rad(basis.mesh.theta)) + 0.25 * np.cos(np.deg2rad(basis.mesh.phi))
     expected = basis.interpolate_scalar(
-        coeffs, basis.arr_theta, basis.arr_phi, target.theta, target.phi
+        coeffs, basis.mesh.theta, basis.mesh.phi, target.theta, target.phi
     )
 
     def fail_interpolate_scalar(*args, **kwargs):
@@ -613,7 +618,7 @@ def test_cs_non_native_scalar_operator_uses_remap_without_dense_interpolation(mo
 
     monkeypatch.setattr(basis, "interpolate_scalar", fail_interpolate_scalar)
 
-    operator = basis.get_scalar_evaluation_operator(target)
+    operator = basis.scalar_evaluation_operator(target)
 
     assert operator.output_shape == (target.size,)
     np.testing.assert_allclose(operator.matvec(coeffs), expected, atol=1e-12)
@@ -622,24 +627,22 @@ def test_cs_non_native_scalar_operator_uses_remap_without_dense_interpolation(mo
 def test_cs_non_native_vector_operators_use_remap_without_dense_interpolation(monkeypatch):
     """CS non-native vector operators use sparse remaps."""
     basis = GlobalCSBasis(8)
-    _, theta, phi = basis.cube2spherical(
-        basis.xi(np.array([1.2, 2.3, 3.4, 4.5]), basis.N),
-        basis.eta(np.array([1.1, 2.2, 3.1, 4.2]), basis.N),
+    _, theta, phi = basis.mesh.projection.cube_to_spherical(
+        basis.mesh.coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
+        basis.mesh.coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
         np.zeros(4),
-        deg=True,
+        degrees=True,
     )
-    target = Grid(theta=theta, phi=phi)
-    scalar_coeffs = np.sin(np.deg2rad(basis.arr_theta)) + 0.25 * np.cos(np.deg2rad(basis.arr_phi))
+    target = SphericalGrid(theta=theta, phi=phi)
+    scalar_coeffs = np.sin(np.deg2rad(basis.mesh.theta)) + 0.25 * np.cos(
+        np.deg2rad(basis.mesh.phi)
+    )
     helmholtz_coeffs = np.vstack([scalar_coeffs, scalar_coeffs[::-1]])
 
-    expected_gradient = np.tensordot(
-        basis.get_surface_gradient_matrix(target), scalar_coeffs, axes=1
-    )
-    expected_rxgrad = np.tensordot(
-        basis.get_rhat_cross_gradient_matrix(target), scalar_coeffs, axes=1
-    )
+    expected_gradient = np.tensordot(basis.surface_gradient_matrix(target), scalar_coeffs, axes=1)
+    expected_rxgrad = np.tensordot(basis.rhat_cross_gradient_matrix(target), scalar_coeffs, axes=1)
     expected_helmholtz = np.tensordot(
-        basis.get_helmholtz_synthesis_matrix(target), helmholtz_coeffs, axes=2
+        basis.helmholtz_synthesis_matrix(target), helmholtz_coeffs, axes=2
     )
 
     def fail_interpolate_vector_components(*args, **kwargs):
@@ -647,9 +650,9 @@ def test_cs_non_native_vector_operators_use_remap_without_dense_interpolation(mo
 
     monkeypatch.setattr(basis, "interpolate_vector_components", fail_interpolate_vector_components)
 
-    gradient_operator = basis.get_surface_gradient_operator(target)
-    rxgrad_operator = basis.get_rhat_cross_gradient_operator(target)
-    helmholtz_operator = basis.get_helmholtz_synthesis_operator(target)
+    gradient_operator = basis.surface_gradient_operator(target)
+    rxgrad_operator = basis.rhat_cross_gradient_operator(target)
+    helmholtz_operator = basis.helmholtz_synthesis_operator(target)
 
     np.testing.assert_allclose(
         gradient_operator.matvec(scalar_coeffs).reshape(2, target.size),
@@ -670,12 +673,14 @@ def test_cs_non_native_scalar_analysis_solves_against_remap_operator():
     """CS scalar analysis is identity only on the native grid."""
     basis = GlobalCSBasis(4)
     target_basis = GlobalCSBasis(6)
-    target = Grid(
-        theta=target_basis.arr_theta, phi=target_basis.arr_phi, area_weights=target_basis.unit_area
+    target = SphericalGrid(
+        theta=target_basis.mesh.theta,
+        phi=target_basis.mesh.phi,
+        area_weights=target_basis.mesh.cell_areas.reshape(-1),
     )
     transform = SphericalTransform(basis, target)
     coeff_rows = np.vstack(
-        [np.sin(np.deg2rad(basis.arr_theta)), np.cos(np.deg2rad(basis.arr_phi))]
+        [np.sin(np.deg2rad(basis.mesh.theta)), np.cos(np.deg2rad(basis.mesh.phi))]
     )
     value_rows = np.stack([transform.synthesize_scalar(row) for row in coeff_rows])
 
@@ -695,11 +700,13 @@ def test_cs_non_native_helmholtz_analysis_solves_against_remap_operator():
     """CS Helmholtz analysis is identity only on the native grid."""
     basis = GlobalCSBasis(4)
     target_basis = GlobalCSBasis(6)
-    target = Grid(
-        theta=target_basis.arr_theta, phi=target_basis.arr_phi, area_weights=target_basis.unit_area
+    target = SphericalGrid(
+        theta=target_basis.mesh.theta,
+        phi=target_basis.mesh.phi,
+        area_weights=target_basis.mesh.cell_areas.reshape(-1),
     )
     transform = SphericalTransform(basis, target)
-    base = np.sin(np.deg2rad(basis.arr_theta)) + 0.25 * np.cos(np.deg2rad(basis.arr_phi))
+    base = np.sin(np.deg2rad(basis.mesh.theta)) + 0.25 * np.cos(np.deg2rad(basis.mesh.phi))
     coeffs = basis.project_helmholtz_mean_free(np.vstack([base, base[::-1]]))
     values = transform.synthesize_helmholtz(coeffs)
 
@@ -714,7 +721,11 @@ def test_mean_free_sh_helmholtz_analysis_uses_full_rank_factorization(area_weigh
     """Gauge-free SH analysis avoids a tall SVD on either backend."""
     basis = SHBasis(4, 3, mean_free=True)
     cs_basis = GlobalCSBasis(8)
-    grid = Grid(theta=cs_basis.arr_theta, phi=cs_basis.arr_phi, area_weights=cs_basis.unit_area)
+    grid = SphericalGrid(
+        theta=cs_basis.mesh.theta,
+        phi=cs_basis.mesh.phi,
+        area_weights=cs_basis.mesh.cell_areas.reshape(-1),
+    )
     transform = SphericalTransform(basis, grid, area_weighted=area_weighted)
     reference = SphericalTransform(basis, grid, area_weighted=area_weighted)
     rng = np.random.default_rng(20260718)
@@ -740,7 +751,7 @@ def test_full_mean_sh_helmholtz_analysis_retains_rank_deficient_fallback():
     """Constant SH gauges continue through pseudoinverse analysis."""
     basis = SHBasis(3, 2, mean_free=False)
     cs_basis = GlobalCSBasis(6)
-    grid = Grid(theta=cs_basis.arr_theta, phi=cs_basis.arr_phi)
+    grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
     transform = SphericalTransform(basis, grid)
 
     assert transform._optimized_helmholtz_analysis_operator() is None
@@ -751,7 +762,9 @@ def test_full_mean_sh_helmholtz_analysis_retains_rank_deficient_fallback():
 def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_weighted):
     """Native CS analysis stays sparse and fixes both gauges."""
     basis = GlobalCSBasis(4)
-    grid = Grid(theta=basis.arr_theta, phi=basis.arr_phi, area_weights=basis.unit_area)
+    grid = SphericalGrid(
+        theta=basis.mesh.theta, phi=basis.mesh.phi, area_weights=basis.mesh.cell_areas.reshape(-1)
+    )
     transform = SphericalTransform(basis, grid, area_weighted=area_weighted)
     reference_transform = SphericalTransform(basis, grid, area_weighted=area_weighted)
     rng = np.random.default_rng(42)
@@ -813,14 +826,18 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
     try:
         set_backend("jax")
         basis = GlobalCSBasis(4)
-        grid = Grid(theta=basis.arr_theta, phi=basis.arr_phi, area_weights=basis.unit_area)
+        grid = SphericalGrid(
+            theta=basis.mesh.theta,
+            phi=basis.mesh.phi,
+            area_weights=basis.mesh.cell_areas.reshape(-1),
+        )
 
         transform = SphericalTransform(basis, grid)
         scalar_coeffs = np.linspace(0.0, 1.0, basis.index_length)
         scalar_values = transform.synthesize_scalar(scalar_coeffs)
         assert "jax" in type(scalar_values).__module__
         np.testing.assert_allclose(
-            to_numpy(scalar_values), to_numpy(transform.scalar_coeffs_to_grid) @ scalar_coeffs
+            to_numpy(scalar_values), to_numpy(transform.scalar_synthesis_matrix) @ scalar_coeffs
         )
 
         vector_coeffs = np.vstack([scalar_coeffs, scalar_coeffs[::-1]])
@@ -828,7 +845,7 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         assert "jax" in type(vector_values).__module__
         np.testing.assert_allclose(
             to_numpy(vector_values),
-            np.tensordot(to_numpy(transform.helmholtz_coeffs_to_gridded_vector), vector_coeffs, 2),
+            np.tensordot(to_numpy(transform.helmholtz_synthesis_matrix), vector_coeffs, 2),
         )
     finally:
         set_backend(previous_backend)
@@ -843,10 +860,10 @@ def test_spherical_transform_preserves_explicit_jax_coefficients():
     try:
         set_backend("numpy")
         basis = GlobalCSBasis(4)
-        grid = Grid(
-            theta=np.asarray(basis.arr_theta),
-            phi=np.asarray(basis.arr_phi),
-            area_weights=np.asarray(basis.unit_area),
+        grid = SphericalGrid(
+            theta=np.asarray(basis.mesh.theta),
+            phi=np.asarray(basis.mesh.phi),
+            area_weights=np.asarray(basis.mesh.cell_areas.reshape(-1)),
         )
         transform = SphericalTransform(basis, grid)
         coeffs = jnp.linspace(0.0, 1.0, basis.index_length)
@@ -855,7 +872,7 @@ def test_spherical_transform_preserves_explicit_jax_coefficients():
 
         assert "jax" in type(values).__module__
         np.testing.assert_allclose(
-            to_numpy(values), transform.scalar_coeffs_to_grid @ to_numpy(coeffs)
+            to_numpy(values), transform.scalar_synthesis_matrix @ to_numpy(coeffs)
         )
     finally:
         set_backend(previous_backend)

@@ -5,16 +5,15 @@ import pytest
 from scipy import sparse
 
 from kompe import (
-    REGIONAL_CS_GRID_SCHEMA,
-    REGIONAL_CS_GRID_SCHEMA_VERSION,
     GlobalCSBasis,
-    RegionalCSGrid,
-    RegionalCSGridSpec,
+    RegionalCSMesh,
+    RegionalCSMeshSpec,
     RegionalCSOperators,
     RegionalCSProjection,
     SHBasis,
     SphericalRepresentation,
 )
+from kompe.cubed_sphere import REGIONAL_CS_MESH_SCHEMA, REGIONAL_CS_MESH_SCHEMA_VERSION
 
 
 def _longitude_error(actual, expected):
@@ -27,46 +26,41 @@ def test_projection_roundtrip_is_finite_at_centre_and_axes(orientation):
     xi = np.array([0.0, 0.0, 0.12, -0.19, 0.21])
     eta = np.array([0.0, 0.18, 0.0, 0.11, -0.16])
 
-    lon, lat = projection.cube2geo(xi, eta)
-    actual_xi, actual_eta = projection.geo2cube(lon, lat)
+    lon, lat = projection.cube_to_geographic(xi, eta)
+    actual_xi, actual_eta = projection.geographic_to_cube(lon, lat)
 
     assert np.isfinite(lon).all()
     assert np.isfinite(lat).all()
     np.testing.assert_allclose(actual_xi, xi, atol=2e-14)
     np.testing.assert_allclose(actual_eta, eta, atol=2e-14)
-    centre_lon, centre_lat = projection.cube2geo(np.array(0.0), np.array(0.0))
+    centre_lon, centre_lat = projection.cube_to_geographic(np.array(0.0), np.array(0.0))
     np.testing.assert_allclose(_longitude_error(centre_lon, 18.0), 0.0, atol=2e-14)
     np.testing.assert_allclose(centre_lat, 67.0, atol=2e-14)
 
 
 def test_regional_grid_has_canonical_units_metadata_and_roundtrip():
     projection = RegionalCSProjection((20.0, 70.0), [0.3, 0.7])
-    grid = RegionalCSGrid(projection, 1800.0, 1400.0, 18, 14, radius=6371.2)
+    grid = RegionalCSMesh(projection, 1800.0, 1400.0, shape=(18, 14), radius=6371.2)
 
-    assert isinstance(grid, SphericalRepresentation)
-    assert grid.kind == "REGIONAL_CS_GRID"
-    assert grid.index_length == grid.size
-    assert all(values.size == grid.size for values in grid.index_arrays)
-    np.testing.assert_allclose(grid.theta, (90.0 - grid.lat).reshape(-1))
-    np.testing.assert_allclose(grid.phi, grid.lon.reshape(-1))
-    np.testing.assert_allclose(grid.theta_rad, np.deg2rad(grid.theta))
-    np.testing.assert_allclose(grid.phi_rad, np.deg2rad(grid.phi))
-    np.testing.assert_allclose(grid.area_weights, grid.A.reshape(-1))
+    assert not isinstance(grid, SphericalRepresentation)
+    assert grid.signature[0] == "REGIONAL_CS_MESH"
+    np.testing.assert_allclose(grid.cell_centers.theta, (90.0 - grid.lat).reshape(-1))
+    np.testing.assert_allclose(grid.cell_centers.phi, grid.lon.reshape(-1))
+    np.testing.assert_allclose(grid.cell_centers.area_weights, grid.cell_areas.reshape(-1))
     assert grid.length == 1800.0
     assert grid.width == 1400.0
-    assert grid.length_resolution == 18
-    assert grid.width_resolution == 14
+    assert grid.shape == (18, 14)
     assert grid.radius == 6371.2
-    assert grid.width_shift == 0.0
+    assert grid.xi_shift == 0.0
     for legacy_name in ("L", "W", "Lres", "Wres", "R", "wshift"):
         assert not hasattr(grid, legacy_name)
 
     spec = grid.to_spec()
-    metadata = spec.to_mapping()
-    restored = RegionalCSGrid.from_spec(metadata)
-    assert metadata["schema"] == REGIONAL_CS_GRID_SCHEMA
-    assert metadata["version"] == REGIONAL_CS_GRID_SCHEMA_VERSION
-    assert RegionalCSGridSpec.from_mapping(metadata) == spec
+    metadata = spec.to_dict()
+    restored = RegionalCSMesh.from_spec(metadata)
+    assert metadata["schema"] == REGIONAL_CS_MESH_SCHEMA
+    assert metadata["version"] == REGIONAL_CS_MESH_SCHEMA_VERSION
+    assert RegionalCSMeshSpec.from_dict(metadata) == spec
     assert restored.signature == grid.signature
     np.testing.assert_allclose(restored.lon, grid.lon)
     np.testing.assert_allclose(restored.lat, grid.lat)
@@ -80,17 +74,16 @@ def test_regional_grid_has_canonical_units_metadata_and_roundtrip():
 def test_regional_grid_requires_explicit_radius_and_shifts_only_width_axis():
     projection = RegionalCSProjection((20.0, 70.0), 0.0)
     with pytest.raises(TypeError, match="radius"):
-        RegionalCSGrid(projection, 1800.0, 1400.0, 18, 14)
+        RegionalCSMesh(projection, 1800.0, 1400.0, shape=(18, 14))
 
-    baseline = RegionalCSGrid(projection, 1800.0, 1400.0, 18, 14, radius=6371.2)
-    shifted = RegionalCSGrid(
+    baseline = RegionalCSMesh(projection, 1800.0, 1400.0, shape=(18, 14), radius=6371.2)
+    shifted = RegionalCSMesh(
         projection,
         1800.0,
         1400.0,
-        18,
-        14,
+        shape=(18, 14),
         radius=6371.2,
-        width_shift=100.0,
+        xi_shift=100.0,
     )
     np.testing.assert_allclose(shifted.eta_mesh, baseline.eta_mesh)
     np.testing.assert_allclose(shifted.xi_mesh, baseline.xi_mesh - 100.0 / 6371.2)
@@ -99,32 +92,30 @@ def test_regional_grid_requires_explicit_radius_and_shifts_only_width_axis():
 def test_regional_grid_rejects_nonuniform_edges_and_invalid_stencils():
     projection = RegionalCSProjection((20.0, 70.0), 0.0)
     with pytest.raises(ValueError, match="uniformly spaced"):
-        RegionalCSGrid(
+        RegionalCSMesh(
             projection,
             1000.0,
             800.0,
-            3,
-            3,
             radius=6371.2,
-            edges=([-0.2, -0.1, 0.2], [-0.2, 0.0, 0.2]),
+            xi_edges=[-0.2, -0.1, 0.2],
+            eta_edges=[-0.2, 0.0, 0.2],
         )
 
-    grid = RegionalCSGrid(projection, 1000.0, 800.0, 3, 3, radius=6371.2)
+    grid = RegionalCSMesh(projection, 1000.0, 800.0, shape=(3, 3), radius=6371.2)
     with pytest.raises(ValueError, match="at least"):
-        grid.operators.gradient_matrices(stencil_size=2)
+        grid.operators.surface_gradient_matrices(stencil_size=2)
 
 
 def test_regional_scalar_interpolation_preserves_shape_and_complex_values():
-    grid = RegionalCSGrid(
+    grid = RegionalCSMesh(
         RegionalCSProjection((20.0, 70.0), 23.0),
         1800.0,
         1400.0,
-        18,
-        14,
+        shape=(18, 14),
         radius=6371.2,
     )
     values = np.arange(grid.size).reshape(grid.shape) * (1.0 + 2.0j)
-    actual = grid.operators.interpolate_scalar(grid.lon, grid.lat, values)
+    actual = grid.operators.interpolate_scalar(values, grid.lon, grid.lat)
 
     assert actual.shape == grid.shape
     assert np.iscomplexobj(actual)
@@ -132,16 +123,15 @@ def test_regional_scalar_interpolation_preserves_shape_and_complex_values():
 
 
 def test_regional_operator_matrices_are_sparse_by_default():
-    grid = RegionalCSGrid(
+    grid = RegionalCSMesh(
         RegionalCSProjection((20.0, 70.0), 23.0),
         1800.0,
         1400.0,
-        18,
-        14,
+        shape=(18, 14),
         radius=6371.2,
     )
-    east, north = grid.operators.gradient_matrices()
-    divergence = grid.operators.divergence_matrix()
+    east, north = grid.operators.surface_gradient_matrices()
+    divergence = grid.operators.surface_divergence_matrix()
 
     assert sparse.issparse(east)
     assert sparse.issparse(north)
@@ -149,12 +139,11 @@ def test_regional_operator_matrices_are_sparse_by_default():
 
 
 def test_regional_grid_owns_topology_while_operator_object_owns_numerics():
-    grid = RegionalCSGrid(
+    grid = RegionalCSMesh(
         RegionalCSProjection((20.0, 70.0), 23.0),
         1800.0,
         1400.0,
-        18,
-        14,
+        shape=(18, 14),
         radius=6371.2,
     )
     eta_index = np.array([0, 1, -1])
@@ -162,8 +151,8 @@ def test_regional_grid_owns_topology_while_operator_object_owns_numerics():
     flat = grid.flat_index(eta_index, xi_index)
     actual_eta, actual_xi = grid.unravel_index(flat)
 
-    np.testing.assert_array_equal(actual_eta, eta_index % grid.NL)
-    np.testing.assert_array_equal(actual_xi, xi_index % grid.NW)
+    np.testing.assert_array_equal(actual_eta, eta_index % grid.n_eta)
+    np.testing.assert_array_equal(actual_xi, xi_index % grid.n_xi)
     for former_grid_method in (
         "_gradient_matrices",
         "_divergence_matrix",
@@ -174,34 +163,32 @@ def test_regional_grid_owns_topology_while_operator_object_owns_numerics():
 
 
 def test_embedded_metric_matches_cell_area_formula():
-    grid = RegionalCSGrid(
+    grid = RegionalCSMesh(
         RegionalCSProjection((-25.0, 64.0), [0.8, 0.6]),
         2100.0,
         1300.0,
-        20,
-        12,
+        shape=(20, 12),
         radius=6471.2,
     )
     _, _, sqrt_g = grid.operators.surface_geometry()
     embedded_area = sqrt_g * grid.dxi * grid.deta
-    np.testing.assert_allclose(embedded_area, grid.A.reshape(-1), rtol=6e-15)
+    np.testing.assert_allclose(embedded_area, grid.cell_areas.reshape(-1), rtol=6e-15)
 
 
 def test_regional_gradient_and_divergence_recover_spherical_laplacian():
-    grid = RegionalCSGrid(
+    grid = RegionalCSMesh(
         RegionalCSProjection((20.0, 70.0), 23.0),
         2000.0,
         1600.0,
-        40,
-        32,
+        shape=(40, 32),
         radius=6371.2,
     )
     assert isinstance(grid.operators, RegionalCSOperators)
     assert grid.operators is grid.operators
-    east_derivative, north_derivative = grid.operators.gradient_matrices(
+    east_derivative, north_derivative = grid.operators.surface_gradient_matrices(
         stencil_size=2, sparse=True
     )
-    divergence = grid.operators.divergence_matrix(stencil_size=2, sparse=True)
+    divergence = grid.operators.surface_divergence_matrix(stencil_size=2, sparse=True)
     assert sparse.issparse(east_derivative)
     assert sparse.issparse(north_derivative)
     assert sparse.issparse(divergence)
@@ -229,48 +216,50 @@ def test_grid_spec_requires_the_versioned_canonical_mapping():
         "projection": {"position": [20.0, 70.0], "orientation": [1.0, 0.0]},
         "length": 1800.0,
         "width": 1400.0,
-        "length_resolution": 18,
-        "width_resolution": 14,
+        "shape": [18, 14],
         "radius": 6371.2,
-        "width_shift": 0.0,
-        "edges": None,
+        "xi_shift": 0.0,
     }
 
     with pytest.raises(ValueError, match="schema"):
-        RegionalCSGridSpec.from_mapping(unversioned)
+        RegionalCSMeshSpec.from_dict(unversioned)
 
 
-def test_grid_spec_rejects_unknown_versions_and_mixed_resolution_conventions():
+def test_mesh_spec_rejects_unknown_versions_and_ambiguous_construction_modes():
     metadata = {
-        "schema": REGIONAL_CS_GRID_SCHEMA,
-        "version": REGIONAL_CS_GRID_SCHEMA_VERSION + 1,
+        "schema": REGIONAL_CS_MESH_SCHEMA,
+        "version": REGIONAL_CS_MESH_SCHEMA_VERSION + 1,
         "projection": {"position": [0.0, 60.0], "orientation": [1.0, 0.0]},
         "length": 1000.0,
         "width": 800.0,
-        "length_resolution": 10,
-        "width_resolution": 8,
+        "shape": [10, 8],
         "radius": 6371.2,
     }
     with pytest.raises(ValueError, match="schema version"):
-        RegionalCSGridSpec.from_mapping(metadata)
+        RegionalCSMeshSpec.from_dict(metadata)
 
-    metadata["version"] = REGIONAL_CS_GRID_SCHEMA_VERSION
-    metadata["width_resolution"] = 100.0
-    with pytest.raises(ValueError, match="same convention"):
-        RegionalCSGridSpec.from_mapping(metadata)
+    metadata["version"] = REGIONAL_CS_MESH_SCHEMA_VERSION
+    metadata["cell_size"] = [100.0, 100.0]
+    with pytest.raises(ValueError, match="exactly one"):
+        RegionalCSMeshSpec.from_dict(metadata)
 
 
 def test_global_and_harmonic_bases_accept_regional_grid_contract():
-    grid = RegionalCSGrid(
+    grid = RegionalCSMesh(
         RegionalCSProjection((10.0, 60.0), 10.0),
         800.0,
         600.0,
-        6,
-        4,
+        shape=(6, 4),
         radius=6371.2,
     )
     harmonic = SHBasis(2, 2)
     global_cs = GlobalCSBasis(4)
 
-    assert harmonic.evaluate_on_grid(grid).shape == (grid.size, harmonic.index_length)
-    assert global_cs.evaluate_on_grid(grid).shape == (grid.size, global_cs.index_length)
+    assert harmonic.scalar_evaluation_matrix(grid.cell_centers).shape == (
+        grid.size,
+        harmonic.index_length,
+    )
+    assert global_cs.scalar_evaluation_matrix(grid.cell_centers).shape == (
+        grid.size,
+        global_cs.index_length,
+    )

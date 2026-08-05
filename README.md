@@ -19,8 +19,9 @@ The public implementations include:
 
 - spherical-harmonic (`SHBasis`), Spherical Elementary Current System
   (`SECSBasis`), and global cubed-sphere (`GlobalCSBasis`) expansions;
-- regional cubed-sphere projections (`RegionalCSProjection`);
-- regional and global structured cubed-sphere meshes (`RegionalCSGrid` and
+- regional and global cubed-sphere projections (`RegionalCSProjection` and
+  `GlobalCSProjection`);
+- regional and global structured cubed-sphere meshes (`RegionalCSMesh` and
   `GlobalCSMesh`);
 - scalar, tangential, magnetic-field, analysis, synthesis, differential, and
   transfer operators;
@@ -42,18 +43,18 @@ libraries are consumers or compatibility facades.
 PynaMIT imports Kompe directly and retains only its historical
 `BasisEvaluator` spelling. The legacy secsy function names and class spellings
 remain in secsy rather than becoming aliases in Kompe. Lompe consumes the
-canonical regional grid directly and translates historical serialized grids
+canonical regional mesh directly and translates historical serialized grids
 at its own package boundary.
 
 ## Geometry and representation boundaries
 
-`Grid` is an arbitrary set of
+`SphericalGrid` is an arbitrary set of
 evaluation or observation points; it does not claim cells or topology.
 `StructuredSurfaceMesh` is the distinct contract implemented by the regional
-CS grid and the native `GlobalCSMesh` exposed as `GlobalCSBasis.mesh`.
-`RegionalCSGrid` owns geometry; its cached `operators` object owns gradient,
+CS mesh and the native `GlobalCSMesh` exposed as `GlobalCSBasis.mesh`.
+`RegionalCSMesh` owns geometry; its cached `operators` object owns gradient,
 divergence, surface-metric, and interpolation operations. A versioned
-`RegionalCSGridSpec` is the stable interchange format for saved grids and
+`RegionalCSMeshSpec` is the stable interchange format for saved grids and
 consumer translation layers.
 
 An expansion does not have to use a mesh. SH and SECS expansions are analytic
@@ -68,30 +69,35 @@ transformations; coefficient fitting is called analysis.
 All public coordinate and component conventions are explicit:
 
 - geographic latitude/longitude and canonical `theta`/`phi` are degrees;
-- regional grids also expose explicit `theta_rad`/`phi_rad` arrays;
 - cubed-sphere `xi`/`eta` are radians;
 - radii are unit-agnostic but must be mutually consistent;
 - surface-operator components are `(theta, phi)` (south, east);
 - SECS kernels return `(east, north[, radial])`.
 
-Regional grids are bounded patches. They share geometry and operator
+Regional meshes are bounded patches. They share geometry and operator
 capabilities with closed-sphere representations, but do not claim
 closed-surface Helmholtz or mean-free Poisson semantics.
 
 ## Quick start
 
 ```python
-from kompe import RegionalCSGrid, RegionalCSProjection
+from kompe import RegionalCSMesh, RegionalCSProjection
 
 projection = RegionalCSProjection((20.0, 70.0), orientation=0.0)
-grid = RegionalCSGrid(projection, 1800.0, 1400.0, 18, 14, radius=6371.2)
+mesh = RegionalCSMesh(
+    projection,
+    length=1800.0,
+    width=1400.0,
+    radius=6371.2,
+    shape=(14, 18),
+)
 
-east_gradient, north_gradient = grid.operators.gradient_matrices(sparse=True)
-divergence = grid.operators.divergence_matrix(sparse=True)
+east_gradient, north_gradient = mesh.operators.surface_gradient_matrices(sparse=True)
+divergence = mesh.operators.surface_divergence_matrix(sparse=True)
 
-metadata = grid.to_spec().to_mapping()
-restored = RegionalCSGrid.from_spec(metadata)
-assert restored.signature == grid.signature
+metadata = mesh.to_spec().to_dict()
+restored = RegionalCSMesh.from_spec(metadata)
+assert restored.signature == mesh.signature
 ```
 
 Install the numerical core with `pip install kompe`. JAX acceleration is an

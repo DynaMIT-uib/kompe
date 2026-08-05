@@ -5,15 +5,15 @@ from __future__ import annotations
 import numpy as np
 
 from kompe.constants import EARTH_RADIUS_M
-from kompe.core import ScalarSynthesis
-from kompe.grid import Grid
+from kompe.core import ScalarBasis
+from kompe.grid import SphericalGrid
 from kompe.math import LinearMap, as_linear_map
 from kompe.secs.kernels import magnetic_field_matrices, surface_current_matrices
 
 DEFAULT_IONOSPHERE_RADIUS_M = EARTH_RADIUS_M + 110e3
 
 
-class SECSBasis(ScalarSynthesis):
+class SECSBasis(ScalarBasis):
     """A basis of spherical elementary current systems.
 
     Coefficients are amplitudes at the pole locations in ``poles``. One
@@ -25,14 +25,12 @@ class SECSBasis(ScalarSynthesis):
     SECS Green functions have distributional surface Laplacians. This
     class therefore implements scalar and vector synthesis, but does not
     claim the square coefficient-space Laplacian and closed-surface gauge
-    semantics of :class:`~kompe.SurfaceOperators`.
+    semantics of :class:`~kompe.SurfaceDifferentialBasis`.
 
     Parameters
     ----------
-    poles : Grid, optional
+    poles : SphericalGrid
         Geographic locations of the elementary systems.
-    lat, lon : array-like, optional
-        Pole coordinates in degrees when ``poles`` is not supplied.
     radius : float, optional
         Radius of the current sheet. Units are arbitrary but must be
         consistent with evaluation radii and singularity limits.
@@ -48,27 +46,14 @@ class SECSBasis(ScalarSynthesis):
 
     def __init__(
         self,
-        poles=None,
+        poles,
         *,
-        lat=None,
-        lon=None,
         radius=DEFAULT_IONOSPHERE_RADIUS_M,
         constant=1.0 / (4.0 * np.pi),
         current_type,
     ):
-        if poles is not None and (lat is not None or lon is not None):
-            raise ValueError("Provide either poles or lat/lon, not both.")
-        if poles is None:
-            if lat is None or lon is None:
-                raise ValueError("SECSBasis requires poles or both lat and lon.")
-            poles = Grid(lat=lat, lon=lon)
-        if not isinstance(poles, Grid):
-            if all(hasattr(poles, name) for name in ("lat", "lon", "size")):
-                poles = Grid(lat=poles.lat, lon=poles.lon)
-            else:
-                raise TypeError(
-                    "SECSBasis poles must be a spherical point grid with lat/lon coordinates."
-                )
+        if not isinstance(poles, SphericalGrid):
+            raise TypeError("SECSBasis poles must be a SphericalGrid.")
 
         radius = float(radius)
         constant = float(constant)
@@ -139,7 +124,7 @@ class SECSBasis(ScalarSynthesis):
             raise ValueError("chunk_size must be positive")
         return int(chunk_size)
 
-    def evaluate_on_grid(self, grid, derivative=None):
+    def scalar_evaluation_matrix(self, grid, derivative=None):
         """Evaluate scalar Green functions for the selected current-system mode.
 
         Derivatives are intentionally exposed through the explicitly framed
@@ -162,7 +147,7 @@ class SECSBasis(ScalarSynthesis):
             RI=self.radius,
         )
 
-    def get_surface_current_matrix(self, grid, *, current_type=None, singularity_limit=0.0):
+    def surface_current_matrix(self, grid, *, current_type=None, singularity_limit=0.0):
         """Return current synthesis in canonical ``(theta, phi)`` order."""
         self._validate_grid(grid)
         current_type = self.current_type if current_type is None else current_type
@@ -180,7 +165,7 @@ class SECSBasis(ScalarSynthesis):
         )
         return np.stack([-north, east], axis=0)
 
-    def get_surface_current_operator(
+    def surface_current_operator(
         self,
         grid,
         *,
@@ -199,7 +184,7 @@ class SECSBasis(ScalarSynthesis):
         if current_type not in {"curl_free", "divergence_free"}:
             raise ValueError("current_type must be 'curl_free' or 'divergence_free'.")
         if chunk_size is None:
-            matrix = self.get_surface_current_matrix(
+            matrix = self.surface_current_matrix(
                 grid, current_type=current_type, singularity_limit=singularity_limit
             )
             return as_linear_map(
@@ -277,26 +262,24 @@ class SECSBasis(ScalarSynthesis):
             output_shape=(2, grid.size),
         )
 
-    def get_helmholtz_current_synthesis_matrix(self, grid, *, singularity_limit=0.0):
+    def helmholtz_current_synthesis_matrix(self, grid, *, singularity_limit=0.0):
         """Return curl-free/divergence-free current synthesis tensor."""
-        curl_free = self.get_surface_current_matrix(
+        curl_free = self.surface_current_matrix(
             grid, current_type="curl_free", singularity_limit=singularity_limit
         )
-        divergence_free = self.get_surface_current_matrix(
+        divergence_free = self.surface_current_matrix(
             grid, current_type="divergence_free", singularity_limit=singularity_limit
         )
         return np.stack([curl_free, divergence_free], axis=2)
 
-    def get_helmholtz_current_synthesis_operator(self, grid, *, singularity_limit=0.0):
+    def helmholtz_current_synthesis_operator(self, grid, *, singularity_limit=0.0):
         """Return two-potential SECS current synthesis operator."""
-        matrix = self.get_helmholtz_current_synthesis_matrix(
-            grid, singularity_limit=singularity_limit
-        )
+        matrix = self.helmholtz_current_synthesis_matrix(grid, singularity_limit=singularity_limit)
         return as_linear_map(
             matrix, input_shape=(2, self.index_length), output_shape=(2, grid.size)
         )
 
-    def get_magnetic_field_matrix(
+    def magnetic_field_matrix(
         self,
         grid,
         evaluation_radius,
@@ -324,9 +307,9 @@ class SECSBasis(ScalarSynthesis):
         )
         return np.stack([radial, -north, east], axis=0)
 
-    def get_magnetic_field_operator(self, grid, evaluation_radius, **kwargs):
+    def magnetic_field_operator(self, grid, evaluation_radius, **kwargs):
         """Return coefficient-to-magnetic-field synthesis operator."""
-        matrix = self.get_magnetic_field_matrix(grid, evaluation_radius, **kwargs)
+        matrix = self.magnetic_field_matrix(grid, evaluation_radius, **kwargs)
         return as_linear_map(matrix, input_shape=(self.index_length,), output_shape=(3, grid.size))
 
 

@@ -3,7 +3,7 @@
 import numpy as np
 
 
-class RegionalCSPlot:
+class RegionalCSPlotter:
     def __init__(self, ax, csgrid, **kwargs):
         """
         A class creating a cubed sphere axis object to plot data with (lon,lat) corrdinates on a cubed sphere projection.
@@ -13,7 +13,7 @@ class RegionalCSPlot:
         --------
         import matplotlib.pyplot as plt
         fig,ax = plt.subplots()
-        csax = RegionalCSPlot(ax,grid)
+        csax = RegionalCSPlotter(ax,grid)
         csax.MEMBERFUNCTION()
         plt.show()
 
@@ -28,7 +28,7 @@ class RegionalCSPlot:
         ----------
         ax : matplotlib.AxesSubplot
             A standard matplotlib AxesSubplot object.
-        csgrid : kompe.RegionalCSGrid
+        csgrid : kompe.RegionalCSMesh
             A cubed sphere grid object.
         **kwargs : dict, optional
             Keywords to control grid lines.
@@ -190,7 +190,7 @@ class RegionalCSPlot:
 
         # Convert to cs coordinates
         if gridtype == "geo":
-            xi, eta = self.grid.projection.geo2cube(*np.meshgrid(lon, lat_levels))
+            xi, eta = self.grid.projection.geographic_to_cube(*np.meshgrid(lon, lat_levels))
 
         # Plot the grid lines
         self.ax.plot(xi.T, eta.T, **kwargs)
@@ -203,7 +203,7 @@ class RegionalCSPlot:
 
         # Convert to cs coordinates
         if gridtype == "geo":
-            xi, eta = self.grid.projection.geo2cube(*np.meshgrid(lon_levels, lat))
+            xi, eta = self.grid.projection.geographic_to_cube(*np.meshgrid(lon_levels, lat))
 
         # Plot the grid
         self.ax.plot(xi, eta, **kwargs)
@@ -212,7 +212,7 @@ class RegionalCSPlot:
         count_min = self.grid.radius * (self.grid.xi_max + self.grid.eta_max) // 300
 
         # Add latitudinal ticks
-        iii = self.grid.ingrid(*np.meshgrid(lon, lat_levels))  # points in csgrid
+        iii = self.grid.contains(*np.meshgrid(lon, lat_levels))  # points in csgrid
         lon_mean = anglemean(
             np.where(~iii, np.nan, lon[None, :]), axis=1
         )  # mean of lon grid lines
@@ -228,7 +228,7 @@ class RegionalCSPlot:
             for x, y in zip(lon_pos[lon_count > count_min], lat_levels[lon_count > count_min])
         ]
 
-        iii = self.grid.ingrid(*np.meshgrid(lon_levels, lat))  # points in csgrid
+        iii = self.grid.contains(*np.meshgrid(lon_levels, lat))  # points in csgrid
         lat_mean = np.nanmean(
             np.where(~iii, np.nan, lat[:, None]), axis=0
         )  # mean of lat grid lines
@@ -268,7 +268,7 @@ class RegionalCSPlot:
         # xi(eta) for xi>0
         xi = np.arange(0, self.grid.xi_max * 1.1, csres)
 
-        diff = self.grid.projection.differentials(
+        diff = self.grid.projection.differential_elements(
             *np.meshgrid(xi, eta), csres, 0, radius=self.grid.radius
         )[0]
         diff[:, 0] = 0
@@ -285,7 +285,7 @@ class RegionalCSPlot:
         # xi(eta) for xi<0
         xi = np.arange(0, self.grid.xi_min * 1.1, -csres)
 
-        diff = self.grid.projection.differentials(
+        diff = self.grid.projection.differential_elements(
             *np.meshgrid(xi, eta), -csres, 0, radius=self.grid.radius
         )[0]
         diff[:, 0] = 0
@@ -334,7 +334,7 @@ class RegionalCSPlot:
         # eta(xi) for eta>0
         eta = np.arange(0, self.grid.eta_max * 1.1, csres)
 
-        diff = self.grid.projection.differentials(
+        diff = self.grid.projection.differential_elements(
             *np.meshgrid(xi, eta), 0, csres, radius=self.grid.radius
         )[1].T
         diff[:, 0] = 0
@@ -351,7 +351,7 @@ class RegionalCSPlot:
         # xi(eta) for xi<0
         eta = np.arange(0, self.grid.eta_min * 1.1, -csres)
 
-        diff = self.grid.projection.differentials(
+        diff = self.grid.projection.differential_elements(
             *np.meshgrid(xi, eta), 0, -csres, radius=self.grid.radius
         )[1].T
         diff[:, 0] = 0
@@ -418,9 +418,9 @@ class RegionalCSPlot:
 
         """
 
-        xi, eta = self.grid.projection.geo2cube(lon, lat)
+        xi, eta = self.grid.projection.geographic_to_cube(lon, lat)
 
-        if self.grid.ingrid(lon, lat):
+        if self.grid.contains(lon, lat):
             return self.ax.text(xi, eta, text, **kwargs)
         else:
             print('text outside plot limit - set "ignore_limits = True" to override')
@@ -444,7 +444,7 @@ class RegionalCSPlot:
             A list of lines representing the plotted data.
 
         """
-        x, y = self.grid.projection.geo2cube(lon, lat)
+        x, y = self.grid.projection.geographic_to_cube(lon, lat)
         return self.ax.plot(x, y, **kwargs)
 
     def scatter(self, lon, lat, **kwargs):
@@ -466,7 +466,7 @@ class RegionalCSPlot:
             A list of lines representing the plotted data.
 
         """
-        x, y = self.grid.projection.geo2cube(lon, lat)
+        x, y = self.grid.projection.geographic_to_cube(lon, lat)
         return self.ax.scatter(x, y, **kwargs)
 
     def contour(self, *args, **kwargs):
@@ -497,7 +497,7 @@ class RegionalCSPlot:
         if len(args) == 1:  # Only C provided
             return self.ax.contour(self.grid.xi, self.grid.eta, args[0], **kwargs)
         elif len(args) == 3:
-            X, Y = self.grid.projection.geo2cube(args[0], args[1])
+            X, Y = self.grid.projection.geographic_to_cube(args[0], args[1])
             return self.ax.contour(X, Y, args[2], **kwargs)
         else:
             raise TypeError("Only accepts 1 or 3 arguments")
@@ -530,7 +530,7 @@ class RegionalCSPlot:
         if len(args) == 1:  # Only C provided
             return self.ax.contourf(self.grid.xi, self.grid.eta, args[0], **kwargs)
         elif len(args) == 3:
-            X, Y = self.grid.projection.geo2cube(args[0], args[1])
+            X, Y = self.grid.projection.geographic_to_cube(args[0], args[1])
             return self.ax.contourf(X, Y, args[2], **kwargs)
         else:
             raise TypeError("Only accepts 1 or 3 arguments")
@@ -563,7 +563,7 @@ class RegionalCSPlot:
         if len(args) == 1:  # Only C provided
             return self.ax.pcolormesh(self.grid.xi_mesh, self.grid.eta_mesh, args[0], **kwargs)
         elif len(args) == 3:
-            X, Y = self.grid.projection.geo2cube(args[0], args[1])
+            X, Y = self.grid.projection.geographic_to_cube(args[0], args[1])
             return self.ax.pcolormesh(X, Y, args[2], **kwargs)
         else:
             raise TypeError("Only accepts 1 or 3 arguments")
@@ -592,7 +592,7 @@ class RegionalCSPlot:
 
         """
 
-        x, y, Ax, Ay = self.grid.projection.vector_cube_projection(east, north, lon, lat)
+        x, y, Ax, Ay = self.grid.projection.geographic_vector_to_cube(east, north, lon, lat)
 
         return self.ax.quiver(x, y, Ax, Ay, **kwargs)
 
@@ -616,7 +616,7 @@ class RegionalCSPlot:
         if "color" not in kwargs:
             kwargs["color"] = "black"
 
-        for cl in self.grid.projection.get_projected_coastlines(resolution=resolution):
+        for cl in self.grid.projection.projected_coastlines(resolution=resolution):
             xi, eta = cl
             self.ax.plot(xi, eta, **kwargs)
 
@@ -646,4 +646,4 @@ def anglemean(X, axis=None):
     )
 
 
-__all__ = ["RegionalCSPlot", "anglemean"]
+__all__ = ["RegionalCSPlotter", "anglemean"]

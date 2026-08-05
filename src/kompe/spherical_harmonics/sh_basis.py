@@ -8,7 +8,7 @@ import numpy as np
 import scipy
 from packaging import version
 
-from kompe.core import BasisView, SurfaceOperators, _owned_readonly_array
+from kompe.core import BasisView, SurfaceDifferentialBasis, _owned_readonly_array
 from kompe.math import as_linear_map
 from kompe.math.backend import get_array_module, to_numpy, use_jax
 from kompe.spherical_harmonics.helpers import (
@@ -49,34 +49,34 @@ def _double_factorial(n):
     return result
 
 
-def _normalized_degree_limits(Nmax, Mmax):
+def _normalized_degree_limits(max_degree, max_order):
     """Return validated maximum spherical-harmonic degree and order."""
-    if isinstance(Nmax, bool) or not isinstance(Nmax, (int, np.integer)):
-        raise TypeError("Nmax must be an integer.")
-    if isinstance(Mmax, bool) or not isinstance(Mmax, (int, np.integer)):
-        raise TypeError("Mmax must be an integer.")
-    Nmax, Mmax = int(Nmax), int(Mmax)
-    if Nmax < 0:
-        raise ValueError("Nmax must be non-negative.")
-    if Mmax < 0 or Mmax > Nmax:
-        raise ValueError("Mmax must be between zero and Nmax.")
-    return Nmax, Mmax
+    if isinstance(max_degree, bool) or not isinstance(max_degree, (int, np.integer)):
+        raise TypeError("max_degree must be an integer.")
+    if isinstance(max_order, bool) or not isinstance(max_order, (int, np.integer)):
+        raise TypeError("max_order must be an integer.")
+    max_degree, max_order = int(max_degree), int(max_order)
+    if max_degree < 0:
+        raise ValueError("max_degree must be non-negative.")
+    if max_order < 0 or max_order > max_degree:
+        raise ValueError("max_order must be between zero and max_degree.")
+    return max_degree, max_order
 
 
-def _minimum_scalar_degree(Nmin, mean_free):
+def _minimum_scalar_degree(min_degree, mean_free):
     """Resolve the minimum scalar degree from gauge-space options."""
     if mean_free is None:
-        return 1 if Nmin is None else int(Nmin)
+        return 1 if min_degree is None else int(min_degree)
     effective_nmin = 1 if bool(mean_free) else 0
-    if Nmin is not None and int(Nmin) != effective_nmin:
+    if min_degree is not None and int(min_degree) != effective_nmin:
         raise ValueError(
             "SHBasis received inconsistent scalar-space options: "
-            f"Nmin={Nmin} and mean_free={mean_free}."
+            f"min_degree={min_degree} and mean_free={mean_free}."
         )
     return effective_nmin
 
 
-class SHBasis(SurfaceOperators):
+class SHBasis(SurfaceDifferentialBasis):
     """Class for representing spherical harmonic bases.
 
     Uses the Langel (1987) geomagnetism convention.
@@ -97,9 +97,9 @@ class SHBasis(SurfaceOperators):
 
     def __init__(
         self,
-        Nmax,
-        Mmax,
-        Nmin=None,
+        max_degree,
+        max_order,
+        min_degree=None,
         mean_free=None,
         quasi_normalized=True,
         backend="internal",
@@ -110,15 +110,15 @@ class SHBasis(SurfaceOperators):
 
         Parameters
         ----------
-        Nmax : int
+        max_degree : int
             Maximum degree.
-        Mmax : int
+        max_order : int
             Maximum order.
-        Nmin : int, optional
+        min_degree : int, optional
             Minimum degree. Defaults to the mean-free scalar space.
         mean_free : bool, optional
             Whether scalar spaces omit the monopole term. If provided,
-            it must be consistent with ``Nmin``.
+            it must be consistent with ``min_degree``.
         quasi_normalized : bool, optional
             If True, applies Schmidt quasi-normalization factors. By
             default True.
@@ -128,12 +128,17 @@ class SHBasis(SurfaceOperators):
         operator_cache : object, optional
             Cache implementing ``get_or_create(category, identity, builder)``.
         """
-        Nmax, Mmax = _normalized_degree_limits(Nmax, Mmax)
+        max_degree, max_order = _normalized_degree_limits(max_degree, max_order)
         if backend not in ["internal", "scipy"]:
             raise ValueError(f"Backend '{backend}' not recognized. Use 'internal' or 'scipy'.")
-        effective_nmin = _minimum_scalar_degree(Nmin, mean_free)
-        self.Nmax, self.Mmax, self.Nmin, self.backend = Nmax, Mmax, effective_nmin, backend
-        self.mean_free = self.Nmin >= 1
+        effective_nmin = _minimum_scalar_degree(min_degree, mean_free)
+        self.max_degree, self.max_order, self.min_degree, self.backend = (
+            max_degree,
+            max_order,
+            effective_nmin,
+            backend,
+        )
+        self.mean_free = self.min_degree >= 1
         self.operator_cache = operator_cache
         self._related_basis_cache = {}
         self._grid_cache = OrderedDict()
@@ -162,15 +167,17 @@ class SHBasis(SurfaceOperators):
 
     def _init_coefficient_indices(self):
         """Build cosine/sine coefficient indices and filters."""
-        all_indices = SHIndices(self.Nmax, self.Mmax)
+        all_indices = SHIndices(self.max_degree, self.max_order)
         self.index_pairs = tuple(all_indices.index_pairs)
 
-        self.cnm = SHIndices(self.Nmax, self.Mmax)
-        self.cnm.index_pairs = tuple(pair for pair in self.index_pairs if pair[0] >= self.Nmin)
+        self.cnm = SHIndices(self.max_degree, self.max_order)
+        self.cnm.index_pairs = tuple(
+            pair for pair in self.index_pairs if pair[0] >= self.min_degree
+        )
         self.cnm.make_arrays()
-        self.snm = SHIndices(self.Nmax, self.Mmax)
+        self.snm = SHIndices(self.max_degree, self.max_order)
         self.snm.index_pairs = tuple(
-            pair for pair in self.index_pairs if pair[0] >= self.Nmin and pair[1] >= 1
+            pair for pair in self.index_pairs if pair[0] >= self.min_degree and pair[1] >= 1
         )
         self.snm.make_arrays()
 
@@ -192,9 +199,9 @@ class SHBasis(SurfaceOperators):
 
     def _init_normalization(self, quasi_normalized):
         """Build immutable coefficient normalization factors."""
-        self.is_normalized = quasi_normalized
-        if self.is_normalized:
-            s_matrix = schmidt_quasi_normalization_factors(self.Nmax, self.Mmax)
+        self.quasi_normalized = quasi_normalized
+        if self.quasi_normalized:
+            s_matrix = schmidt_quasi_normalization_factors(self.max_degree, self.max_order)
             self.schmidt_factors = _owned_readonly_array(
                 [s_matrix[n, m] for n, m in self.index_pairs]
             )
@@ -204,7 +211,13 @@ class SHBasis(SurfaceOperators):
     @property
     def coefficient_space_signature(self):
         """Return a signature for SH coefficient compatibility."""
-        return ("SH", int(self.Nmax), int(self.Mmax), int(self.Nmin), bool(self.is_normalized))
+        return (
+            "SH",
+            int(self.max_degree),
+            int(self.max_order),
+            int(self.min_degree),
+            bool(self.quasi_normalized),
+        )
 
     @property
     def kind(self):
@@ -349,28 +362,28 @@ class SHBasis(SurfaceOperators):
                 self,
                 coefficient_indices,
                 metadata={
-                    "Nmax": self.Nmax,
-                    "Mmax": self.Mmax,
-                    "Nmin": 1,
+                    "max_degree": self.max_degree,
+                    "max_order": self.max_order,
+                    "min_degree": 1,
                     "mean_free": True,
                     "backend": self.backend,
-                    "is_normalized": self.is_normalized,
+                    "quasi_normalized": self.quasi_normalized,
                 },
                 coefficient_space_signature=(
                     "SH",
-                    int(self.Nmax),
-                    int(self.Mmax),
+                    int(self.max_degree),
+                    int(self.max_order),
                     1,
-                    bool(self.is_normalized),
+                    bool(self.quasi_normalized),
                 ),
                 view_name="mean_free",
             )
         else:
             sibling = SHBasis(
-                self.Nmax,
-                self.Mmax,
+                self.max_degree,
+                self.max_order,
                 mean_free=target_mean_free,
-                quasi_normalized=self.is_normalized,
+                quasi_normalized=self.quasi_normalized,
                 backend=self.backend,
                 operator_cache=self.operator_cache,
             )
@@ -403,7 +416,9 @@ class SHBasis(SurfaceOperators):
         cos_theta = np.cos(theta)
         sin_theta = np.sin(theta)
         diff_order = 1 if compute_derivative else 0
-        p_and_dp_all = assoc_legendre_p_all(self.Nmax, self.Mmax, cos_theta, diff_n=diff_order)
+        p_and_dp_all = assoc_legendre_p_all(
+            self.max_degree, self.max_order, cos_theta, diff_n=diff_order
+        )
         p_all, dp_dz_all = (
             (p_and_dp_all[0], p_and_dp_all[1]) if compute_derivative else (p_and_dp_all[0], None)
         )
@@ -412,11 +427,11 @@ class SHBasis(SurfaceOperators):
         dP_std = np.empty_like(P_std) if compute_derivative else None
 
         for i, (n, m) in enumerate(self.index_pairs):
-            p_values = p_all[n, self.Mmax + m].T
+            p_values = p_all[n, self.max_order + m].T
             cs_phase = (-1) ** m
             P_std[:, i] = p_values * cs_phase
             if compute_derivative:
-                dp_dz_values = dp_dz_all[n, self.Mmax + m].T
+                dp_dz_values = dp_dz_all[n, self.max_order + m].T
                 dp_dz = dp_dz_values * cs_phase
                 dP_std[:, i] = dp_dz * (-sin_theta)
 
@@ -432,7 +447,7 @@ class SHBasis(SurfaceOperators):
         dP_std = np.empty_like(P_std) if compute_derivative else None
 
         for i, (ct, st) in enumerate(zip(cos_theta, sin_theta, strict=True)):
-            p_all, dp_dz_all = lpmn(self.Mmax, self.Nmax, ct)
+            p_all, dp_dz_all = lpmn(self.max_order, self.max_degree, ct)
             for j, (n, m) in enumerate(self.index_pairs):
                 cs_phase = (-1) ** m
                 P_std[i, j] = p_all[m, n] * cs_phase
@@ -444,7 +459,7 @@ class SHBasis(SurfaceOperators):
         dP_scaled = dP_std * self.scipy_scaling_factors if compute_derivative else None
         return P_scaled, dP_scaled
 
-    def evaluate_on_grid(self, grid, derivative=None):
+    def _build_scalar_evaluation_matrix(self, grid, derivative=None):
         """Evaluate scalar basis or surface derivatives on ``grid``."""
 
         def build(legendre_cache):
@@ -461,26 +476,26 @@ class SHBasis(SurfaceOperators):
 
         return self._cached_grid_matrix(grid, ("scalar_evaluation", derivative), build)
 
-    def evaluate_on_grid_uncached(self, grid, derivative=None):
+    def _uncached_scalar_evaluation_matrix(self, grid, derivative=None):
         """Evaluate without the persistent array cache."""
         return get_array_module().asarray(self._evaluate_on_grid(grid, derivative=derivative))
 
-    def get_scalar_evaluation_matrix(self, grid, derivative=None):
+    def scalar_evaluation_matrix(self, grid, derivative=None):
         """Return the cached SH scalar evaluation matrix."""
-        return self.evaluate_on_grid(grid, derivative=derivative)
+        return self._build_scalar_evaluation_matrix(grid, derivative=derivative)
 
-    def get_scalar_evaluation_operator(self, grid, derivative=None):
+    def scalar_evaluation_operator(self, grid, derivative=None):
         """Return the cached SH scalar evaluation operator."""
         return self._cached_grid_operator(
             grid,
             ("scalar_evaluation", derivative),
             lambda: self._operator_from_matrix(
-                self.get_scalar_evaluation_matrix(grid, derivative=derivative),
+                self.scalar_evaluation_matrix(grid, derivative=derivative),
                 input_shape=(self.index_length,),
             ),
         )
 
-    def get_surface_gradient_matrix(self, grid):
+    def surface_gradient_matrix(self, grid):
         """Return the cached SH surface-gradient matrix."""
         return self._cached_grid_matrix(
             grid,
@@ -490,22 +505,22 @@ class SHBasis(SurfaceOperators):
 
     def _build_surface_gradient_matrix(self, grid):
         """Build the SH surface-gradient matrix."""
-        theta_matrix = self.evaluate_on_grid(grid, derivative="theta")
-        phi_matrix = self.evaluate_on_grid(grid, derivative="phi")
+        theta_matrix = self.scalar_evaluation_matrix(grid, derivative="theta")
+        phi_matrix = self.scalar_evaluation_matrix(grid, derivative="phi")
         xp = get_array_module(theta_matrix, phi_matrix)
         return xp.stack([xp.asarray(theta_matrix), xp.asarray(phi_matrix)])
 
-    def get_surface_gradient_operator(self, grid):
+    def surface_gradient_operator(self, grid):
         """Return the cached SH surface-gradient operator."""
         return self._cached_grid_operator(
             grid,
             "surface_gradient",
             lambda: self._operator_from_matrix(
-                self.get_surface_gradient_matrix(grid), input_shape=(self.index_length,)
+                self.surface_gradient_matrix(grid), input_shape=(self.index_length,)
             ),
         )
 
-    def get_rhat_cross_gradient_matrix(self, grid):
+    def rhat_cross_gradient_matrix(self, grid):
         """Return the cached SH r-hat-cross-gradient matrix."""
         return self._cached_grid_matrix(
             grid,
@@ -515,21 +530,21 @@ class SHBasis(SurfaceOperators):
 
     def _build_rhat_cross_gradient_matrix(self, grid):
         """Build the SH r-hat-cross-gradient matrix."""
-        gradient = self.get_surface_gradient_matrix(grid)
+        gradient = self.surface_gradient_matrix(grid)
         xp = get_array_module(gradient)
         return xp.stack([-gradient[1], gradient[0]])
 
-    def get_rhat_cross_gradient_operator(self, grid):
+    def rhat_cross_gradient_operator(self, grid):
         """Return the cached SH r-hat-cross-gradient operator."""
         return self._cached_grid_operator(
             grid,
             "rhat_cross_gradient",
             lambda: self._operator_from_matrix(
-                self.get_rhat_cross_gradient_matrix(grid), input_shape=(self.index_length,)
+                self.rhat_cross_gradient_matrix(grid), input_shape=(self.index_length,)
             ),
         )
 
-    def get_helmholtz_synthesis_matrix(self, grid):
+    def helmholtz_synthesis_matrix(self, grid):
         """Return the cached SH Helmholtz synthesis tensor."""
         return self._cached_grid_matrix(
             grid,
@@ -539,17 +554,17 @@ class SHBasis(SurfaceOperators):
 
     def _build_helmholtz_synthesis_matrix(self, grid):
         """Build the SH Helmholtz synthesis tensor."""
-        gradient = self.get_surface_gradient_matrix(grid)
+        gradient = self.surface_gradient_matrix(grid)
         xp = get_array_module(gradient)
         rotated_gradient = xp.stack([-gradient[1], gradient[0]])
         return xp.stack([-xp.asarray(gradient), rotated_gradient], axis=2)
 
-    def get_helmholtz_synthesis_operator(self, grid):
+    def helmholtz_synthesis_operator(self, grid):
         """Return the cached SH Helmholtz synthesis operator."""
         return self._cached_grid_operator(
             grid,
             "helmholtz_synthesis",
-            lambda: SurfaceOperators.get_helmholtz_synthesis_operator(self, grid),
+            lambda: SurfaceDifferentialBasis.helmholtz_synthesis_operator(self, grid),
         )
 
     def _normalized_legendre_values(self, theta, *, derivative_required, cache):
@@ -673,6 +688,6 @@ class SHBasis(SurfaceOperators):
                     dP[:, nm] -= Knm * dP[:, prev2_idx]
         return dP
 
-    def laplacian(self, r=1.0):
+    def _surface_laplacian(self, r=1.0):
         """Factor to apply the spherical harmonic Laplacian operator."""
         return get_array_module().asarray(-self.n * (self.n + 1) / r**2)

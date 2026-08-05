@@ -102,33 +102,6 @@ def _helmholtz_component_operator(size, component):
     )
 
 
-def basis_kind(basis):
-    """Return the normalized kind tag for a basis-like object."""
-    kind = getattr(basis, "kind", None)
-    return None if kind is None else str(kind).upper()
-
-
-def is_basis_kind(basis, *kinds):
-    """Return whether ``basis`` advertises one of ``kinds``."""
-    kind = basis_kind(basis)
-    return kind is not None and kind in {str(item).upper() for item in kinds}
-
-
-def is_sh_basis(basis):
-    """Return whether ``basis`` is a spherical-harmonic basis."""
-    return is_basis_kind(basis, "SH")
-
-
-def is_cs_basis(basis):
-    """Return whether ``basis`` is a cubed-sphere basis."""
-    return is_basis_kind(basis, "CS")
-
-
-def is_secs_basis(basis):
-    """Return whether ``basis`` is a spherical elementary-current basis."""
-    return is_basis_kind(basis, "SECS")
-
-
 class SphericalRepresentation(ABC):
     """Abstract metadata interface for spherical representations.
 
@@ -143,7 +116,15 @@ class SphericalRepresentation(ABC):
     def signature(self):
         """Return a stable cache signature for this representation."""
         parts = [type(self).__module__, type(self).__qualname__, self.kind]
-        for name in ("Nmax", "Mmax", "Nmin", "mean_free", "backend", "is_normalized", "N"):
+        for name in (
+            "max_degree",
+            "max_order",
+            "min_degree",
+            "mean_free",
+            "backend",
+            "quasi_normalized",
+            "cells_per_face",
+        ):
             if hasattr(self, name):
                 parts.append((name, getattr(self, name)))
         return tuple(parts)
@@ -206,7 +187,7 @@ class SphericalBasis(SphericalRepresentation):
     required_attributes = SphericalRepresentation.required_attributes
 
 
-class ScalarSynthesis(SphericalBasis):
+class ScalarBasis(SphericalBasis):
     """Basis capable of synthesizing scalar values on a spherical grid.
 
     This deliberately does not imply a closed surface, a coefficient-space
@@ -215,30 +196,22 @@ class ScalarSynthesis(SphericalBasis):
     """
 
     @abstractmethod
-    def evaluate_on_grid(self, grid, derivative=None):
-        """Evaluate basis functions or supported derivatives on ``grid``."""
-
-    def evaluate_on_grid_uncached(self, grid, derivative=None):
-        """Evaluate without optional persistent materialization."""
-        return self.evaluate_on_grid(grid, derivative=derivative)
-
-    def get_scalar_evaluation_matrix(self, grid, derivative=None):
+    def scalar_evaluation_matrix(self, grid, derivative=None):
         """Return the scalar coefficient-to-grid matrix."""
-        return _backend_array(
-            self.evaluate_on_grid(grid, derivative=derivative),
-            getattr(grid, "theta", None),
-            getattr(grid, "phi", None),
-        )
 
-    def get_scalar_evaluation_operator(self, grid, derivative=None):
+    def _uncached_scalar_evaluation_matrix(self, grid, derivative=None):
+        """Evaluate without optional persistent materialization."""
+        return self.scalar_evaluation_matrix(grid, derivative=derivative)
+
+    def scalar_evaluation_operator(self, grid, derivative=None):
         """Return the scalar coefficient-to-grid operator."""
-        matrix = self.get_scalar_evaluation_matrix(grid, derivative=derivative)
+        matrix = self.scalar_evaluation_matrix(grid, derivative=derivative)
         return as_linear_map(
             matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
         )
 
 
-class SurfaceOperators(ScalarSynthesis):
+class SurfaceDifferentialBasis(ScalarBasis):
     """Basis with scalar and vector operators on a spherical surface.
 
     The shared tangential Helmholtz convention is
@@ -249,87 +222,87 @@ class SurfaceOperators(ScalarSynthesis):
     """
 
     @abstractmethod
-    def laplacian(self, r=1.0):
+    def _surface_laplacian(self, r=1.0):
         """Return the scalar surface Laplacian operator."""
 
-    def get_surface_gradient_matrix(self, grid):
+    def surface_gradient_matrix(self, grid):
         """Return ``[d_theta, sin(theta)^-1 d_phi]`` on a surface."""
         return _backend_stack(
             [
-                self.evaluate_on_grid(grid, derivative="theta"),
-                self.evaluate_on_grid(grid, derivative="phi"),
+                self.scalar_evaluation_matrix(grid, derivative="theta"),
+                self.scalar_evaluation_matrix(grid, derivative="phi"),
             ]
         )
 
-    def get_surface_gradient_operator(self, grid):
+    def surface_gradient_operator(self, grid):
         """Return the scalar-to-vector surface-gradient operator."""
-        matrix = self.get_surface_gradient_matrix(grid)
+        matrix = self.surface_gradient_matrix(grid)
         return as_linear_map(
             matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
         )
 
-    def get_rhat_cross_gradient_matrix(self, grid):
+    def rhat_cross_gradient_matrix(self, grid):
         """Return the tangential ``rhat x grad`` operator."""
-        grad_theta, grad_phi = self.get_surface_gradient_matrix(grid)
+        grad_theta, grad_phi = self.surface_gradient_matrix(grid)
         return _backend_stack([-grad_phi, grad_theta])
 
-    def get_rhat_cross_gradient_operator(self, grid):
+    def rhat_cross_gradient_operator(self, grid):
         """Return the scalar-to-vector ``rhat x grad`` operator."""
-        matrix = self.get_rhat_cross_gradient_matrix(grid)
+        matrix = self.rhat_cross_gradient_matrix(grid)
         return as_linear_map(
             matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
         )
 
-    def get_helmholtz_synthesis_matrix(self, grid):
+    def helmholtz_synthesis_matrix(self, grid):
         """Return the canonical tangential Helmholtz synthesis tensor.
 
         Coefficients are ordered as curl-free then divergence-free
         potentials. Components are ordered as theta then phi. The field
         convention is ``-grad(phi) + rhat x grad(psi)``.
         """
-        gradient = self.get_surface_gradient_matrix(grid)
+        gradient = self.surface_gradient_matrix(grid)
         rhat_cross_gradient = _backend_stack([-gradient[1], gradient[0]])
         return _backend_stack([-gradient, rhat_cross_gradient], axis=2)
 
-    def get_helmholtz_synthesis_operator(self, grid):
+    def helmholtz_synthesis_operator(self, grid):
         """Return the Helmholtz-potential-to-vector operator."""
-        curl_free = self.get_surface_gradient_operator(grid) @ _helmholtz_component_operator(
+        curl_free = self.surface_gradient_operator(grid) @ _helmholtz_component_operator(
             self.index_length, 0
         )
-        divergence_free = self.get_rhat_cross_gradient_operator(
-            grid
-        ) @ _helmholtz_component_operator(self.index_length, 1)
+        divergence_free = self.rhat_cross_gradient_operator(grid) @ _helmholtz_component_operator(
+            self.index_length, 1
+        )
         return -curl_free + divergence_free
 
-    def get_helmholtz_curl_free_potential_matrix(self):
+    def helmholtz_curl_free_potential_matrix(self):
         """Return the Helmholtz-to-curl-free-potential matrix."""
         xp = get_array_module()
         identity = xp.eye(self.index_length)
         return xp.stack([identity, xp.zeros_like(identity)], axis=1)
 
-    def get_helmholtz_curl_free_potential_operator(self):
+    def helmholtz_curl_free_potential_operator(self):
         """Return the Helmholtz-to-curl-free-potential operator."""
         return _helmholtz_component_operator(self.index_length, 0)
 
-    def get_helmholtz_divergence_free_potential_matrix(self):
+    def helmholtz_divergence_free_potential_matrix(self):
         """Return the Helmholtz-to-divergence-free-potential matrix."""
         xp = get_array_module()
         identity = xp.eye(self.index_length)
         return xp.stack([xp.zeros_like(identity), identity], axis=1)
 
-    def get_helmholtz_divergence_free_potential_operator(self):
+    def helmholtz_divergence_free_potential_operator(self):
         """Return the Helmholtz-to-div-free-potential operator."""
         return _helmholtz_component_operator(self.index_length, 1)
 
-    def get_surface_laplacian_matrix(self, r=1.0):
+    def surface_laplacian_matrix(self, r=1.0):
         """Return the scalar surface-Laplacian coefficient matrix."""
-        return _coefficient_matrix(self.laplacian(r), self.index_length, "laplacian")
+        return _coefficient_matrix(self._surface_laplacian(r), self.index_length, "laplacian")
 
-    def get_surface_laplacian_operator(self, r=1.0):
+    def surface_laplacian_operator(self, r=1.0):
         """Return the surface scalar Laplacian operator."""
-        return as_linear_map(self.laplacian(r))
+        return as_linear_map(self._surface_laplacian(r))
 
-    def get_mean_free_surface_poisson_operator(self, r=1.0):
+    def mean_free_surface_poisson_operator(self, r=1.0):
         """Return the gauge-fixed inverse surface Laplacian.
 
         Scalar spherical-harmonic spaces represent the surface
@@ -338,7 +311,7 @@ class SurfaceOperators(ScalarSynthesis):
         constant nullspace should override this method with their
         natural gauge constraint.
         """
-        laplacian = self.laplacian(r)
+        laplacian = self._surface_laplacian(r)
         xp = get_array_module(laplacian)
         values = xp.asarray(laplacian)
         if values.ndim != 1:
@@ -351,7 +324,7 @@ class SurfaceOperators(ScalarSynthesis):
             )
         return as_linear_map(1.0 / values)
 
-    def get_helmholtz_surface_divergence_matrix(self, r=1.0):
+    def helmholtz_surface_divergence_matrix(self, r=1.0):
         """Return the Helmholtz-to-surface-divergence matrix.
 
         Helmholtz coefficients are ordered as curl-free then
@@ -359,17 +332,17 @@ class SurfaceOperators(ScalarSynthesis):
         ``-grad(phi) + rhat x grad(psi)``, surface divergence is
         ``-laplacian(phi)``.
         """
-        laplacian = self.get_surface_laplacian_matrix(r)
+        laplacian = self.surface_laplacian_matrix(r)
         xp = get_array_module(laplacian)
         return xp.stack([-laplacian, xp.zeros_like(laplacian)], axis=1)
 
-    def get_helmholtz_surface_divergence_operator(self, r=1.0):
+    def helmholtz_surface_divergence_operator(self, r=1.0):
         """Return the Helmholtz-to-surface-divergence operator."""
-        return -self.get_surface_laplacian_operator(r) @ _helmholtz_component_operator(
+        return -self.surface_laplacian_operator(r) @ _helmholtz_component_operator(
             self.index_length, 0
         )
 
-    def get_helmholtz_radial_curl_matrix(self, r=1.0):
+    def helmholtz_radial_curl_matrix(self, r=1.0):
         """Return the Helmholtz-coefficient to radial-curl matrix.
 
         Helmholtz coefficients are ordered as curl-free then
@@ -377,18 +350,18 @@ class SurfaceOperators(ScalarSynthesis):
         ``-grad(phi) + rhat x grad(psi)``, radial curl is
         ``laplacian(psi)``.
         """
-        laplacian = self.get_surface_laplacian_matrix(r)
+        laplacian = self.surface_laplacian_matrix(r)
         xp = get_array_module(laplacian)
         return xp.stack([xp.zeros_like(laplacian), laplacian], axis=1)
 
-    def get_helmholtz_radial_curl_operator(self, r=1.0):
+    def helmholtz_radial_curl_operator(self, r=1.0):
         """Return the Helmholtz-coefficient to radial-curl operator."""
-        return self.get_surface_laplacian_operator(r) @ _helmholtz_component_operator(
+        return self.surface_laplacian_operator(r) @ _helmholtz_component_operator(
             self.index_length, 1
         )
 
 
-class BasisView(SurfaceOperators):
+class BasisView(SurfaceDifferentialBasis):
     """Coefficient-space view of another evaluable basis."""
 
     def __init__(
@@ -401,8 +374,8 @@ class BasisView(SurfaceOperators):
         view_name="view",
     ):
         """Initialize a coefficient-space view."""
-        if not isinstance(parent_basis, SurfaceOperators):
-            raise TypeError("BasisView parent_basis must implement SurfaceOperators.")
+        if not isinstance(parent_basis, SurfaceDifferentialBasis):
+            raise TypeError("BasisView parent_basis must implement SurfaceDifferentialBasis.")
 
         parent_basis.validate_metadata()
         self.parent_basis = parent_basis
@@ -581,21 +554,23 @@ class BasisView(SurfaceOperators):
             return result[:, slice(int(indices[0]), int(indices[-1]) + 1)]
         return result[:, indices]
 
-    def evaluate_on_grid(self, grid, derivative=None):
+    def scalar_evaluation_matrix(self, grid, derivative=None):
         """Evaluate the viewed basis functions on ``grid``."""
         return self._slice_evaluation(
-            self.parent_basis.evaluate_on_grid(grid, derivative=derivative)
+            self.parent_basis.scalar_evaluation_matrix(grid, derivative=derivative)
         )
 
-    def evaluate_on_grid_uncached(self, grid, derivative=None):
+    def _uncached_scalar_evaluation_matrix(self, grid, derivative=None):
         """Evaluate the view without persistent materialization."""
         return self._slice_evaluation(
-            self.parent_basis.evaluate_on_grid_uncached(grid, derivative=derivative)
+            self.parent_basis._uncached_scalar_evaluation_matrix(grid, derivative=derivative)
         )
 
-    def laplacian(self, r=1.0):
+    def _surface_laplacian(self, r=1.0):
         """Return the viewed scalar surface Laplacian operator."""
-        return self._slice_coefficient_operator(self.parent_basis.laplacian(r), "laplacian")
+        return self._slice_coefficient_operator(
+            self.parent_basis._surface_laplacian(r), "laplacian"
+        )
 
     def scalar_fields_are_mean_free_by_construction(self):
         """Return whether scalar coefficients omit the mean term."""

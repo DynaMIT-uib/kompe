@@ -29,9 +29,9 @@ from functools import cached_property
 import numpy as np
 from scipy import sparse as scipy_sparse
 
-from kompe.core import SphericalRepresentation
 from kompe.cubed_sphere import cs_coordinates
-from kompe.math import content_fingerprint
+from kompe.grid import SphericalGrid
+from kompe.math import as_linear_map, content_fingerprint
 from kompe.mesh import StructuredSurfaceMesh
 
 from . import cs_vectors, diffutils, spherical
@@ -42,8 +42,8 @@ datapath = (
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data") + os.sep
 )
 
-REGIONAL_CS_GRID_SCHEMA = "kompe.regional_cs_grid"
-REGIONAL_CS_GRID_SCHEMA_VERSION = 1
+REGIONAL_CS_MESH_SCHEMA = "kompe.regional_cs_mesh"
+REGIONAL_CS_MESH_SCHEMA_VERSION = 1
 
 
 class RegionalCSProjection:
@@ -137,7 +137,7 @@ class RegionalCSProjection:
             tuple(float(value) for value in self.orientation),
         )
 
-    def geo2cube(self, lon, lat, set_points_off_cube_to_nan=False):
+    def geographic_to_cube(self, lon, lat, set_points_off_cube_to_nan=False):
         """Convert from geocentric coordinates to cube coords (xi, eta)
 
         Input parameters must have same shape. Output will have same shape.
@@ -164,7 +164,7 @@ class RegionalCSProjection:
 
         """
         lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
-        local_lon, local_lat = self.geo2local(lon, lat)
+        local_lon, local_lat = self.geographic_to_local(lon, lat)
         xi, eta, _ = cs_coordinates.geo_to_cube(local_lon, local_lat, block=4)
 
         invalid = local_lat < 0
@@ -172,7 +172,7 @@ class RegionalCSProjection:
             invalid = invalid | (np.deg2rad(90 - local_lat) > np.pi / 4)
         return np.where(invalid, np.nan, xi), np.where(invalid, np.nan, eta)
 
-    def cube2geo(self, xi, eta):
+    def cube_to_geographic(self, xi, eta):
         """Convert from cube coordinates (xi, eta) to geocentric (lon, lat)
 
         Input parameters must have same shape. Output will have same shape.
@@ -198,9 +198,9 @@ class RegionalCSProjection:
         """
         xi, eta = np.broadcast_arrays(np.asarray(xi, dtype=float), np.asarray(eta, dtype=float))
         _, theta, phi = cs_coordinates.cube_to_spherical(xi, eta, block=4, deg=True)
-        return self.local2geo(phi, 90 - theta)
+        return self.local_to_geographic(phi, 90 - theta)
 
-    def geo2local(self, lon, lat, reverse=False):
+    def geographic_to_local(self, lon, lat, reverse=False):
         """Convert from geocentric coordinates to local coordinates
 
         lon and lat must have the same shape. Shapes are preserved in output.
@@ -239,7 +239,7 @@ class RegionalCSProjection:
 
         return (newlon.reshape(shape), newlat.reshape(shape))
 
-    def local2geo(self, lon, lat, reverse=False):
+    def local_to_geographic(self, lon, lat, reverse=False):
         """Convert from local coordinates to geocentric coordinates
 
         lon and lat must have the same shape. Shapes are preserved in output
@@ -263,14 +263,14 @@ class RegionalCSProjection:
 
         Note
         ----
-        See self.geo2local for implementation
+        See self.geographic_to_local for implementation
         """
         if reverse:
-            return self.geo2local(lon, lat)
+            return self.geographic_to_local(lon, lat)
         else:
-            return self.geo2local(lon, lat, reverse=True)
+            return self.geographic_to_local(lon, lat, reverse=True)
 
-    def local2geo_enu_rotation(self, lon, lat):
+    def local_to_geographic_enu_rotation(self, lon, lat):
         """Calculate rotation matrices that transform local ENU to geocentric ENU
 
         Parameters
@@ -303,7 +303,7 @@ class RegionalCSProjection:
         R_enulocal2eceflocal = np.stack((e_R, n_R, u_R), axis=2)  # (N, 3, 3) with e n u in columns
 
         # from local to geocentric:
-        lon_G, lat_G = self.local2geo(lon, lat)
+        lon_G, lat_G = self.local_to_geographic(lon, lat)
         th = (90 - lat_G) * d2r
         ph = lon_G * d2r
 
@@ -325,11 +325,11 @@ class RegionalCSProjection:
         assert np.all(np.isclose(R_enulocal2enugeo[:, np.array([0, 1]), 2], 0, atol=1e-6))
         return R_enulocal2enugeo[:, :2, :2]  # (N, 2, 2)
 
-    def vector_cube_projection(self, east, north, lon, lat, return_xi_eta=True):
+    def geographic_vector_to_cube(self, east, north, lon, lat, return_xi_eta=True):
         """Calculate vector components projected on cube
 
         Perfor vector rotation from geographic system to cube
-        system, using self.local2geo_enu_rotation and equation
+        system, using self.local_to_geographic_enu_rotation and equation
         (14) of Ronchi et al.
 
         Parameters
@@ -363,15 +363,15 @@ class RegionalCSProjection:
         Ageo = np.vstack((east, north)).T
 
         # rotation from geo to local:
-        local_lon, local_lat = self.geo2local(lon, lat)
-        R_enu_global2local = self.local2geo_enu_rotation(local_lon, local_lat)
+        local_lon, local_lat = self.geographic_to_local(lon, lat)
+        R_enu_global2local = self.local_to_geographic_enu_rotation(local_lon, local_lat)
         Alocal = np.einsum("nji, nj->ni", R_enu_global2local, Ageo).T
 
         # rearrange to south, east instead of east, north:
         Alocal = np.vstack((-Alocal[1], Alocal[0])).T
 
         # calculate the parameters used in transformation matrix:
-        xi, eta = self.geo2cube(lon, lat)
+        xi, eta = self.geographic_to_cube(lon, lat)
         X = np.tan(-xi)
         Y = np.tan(-eta)
         delta = 1 + X**2 + Y**2
@@ -396,11 +396,11 @@ class RegionalCSProjection:
         else:
             return Axi, Aeta
 
-    def vector_cube_to_geo(self, Axi, Aeta, xi, eta, return_lon_lat=True):
+    def cube_vector_to_geographic(self, Axi, Aeta, xi, eta, return_lon_lat=True):
         """Calculate vector components projected on cube
 
         Perfor vector rotation from cube system to geographic
-        system, using self.local2geo_enu_rotation and equation
+        system, using self.local_to_geographic_enu_rotation and equation
         (14) of Ronchi et al.
 
         Parameters
@@ -455,9 +455,9 @@ class RegionalCSProjection:
         Alocal = np.vstack((Alocal[1], -Alocal[0])).T
 
         # rotation from local to geo:
-        lon, lat = self.cube2geo(xi, eta)
-        local_lon, local_lat = self.geo2local(lon, lat)
-        R_enu_global2local = self.local2geo_enu_rotation(local_lon, local_lat)
+        lon, lat = self.cube_to_geographic(xi, eta)
+        local_lon, local_lat = self.geographic_to_local(lon, lat)
+        R_enu_global2local = self.local_to_geographic_enu_rotation(local_lon, local_lat)
         Ageo = np.einsum("nij, nj->ni", R_enu_global2local, Alocal).T
 
         # components in east, north directions:
@@ -467,14 +467,14 @@ class RegionalCSProjection:
         else:
             return east, north
 
-    def get_projected_coastlines(self, resolution="50m"):
+    def projected_coastlines(self, resolution="50m"):
         """Generate coastlines in projected coordinates"""
         coastlines = np.load(datapath + "coastlines_" + resolution + ".npz")
         for key in coastlines:
             lat, lon = coastlines[key]
-            yield self.geo2cube(lon, lat)
+            yield self.geographic_to_cube(lon, lat)
 
-    def differentials(self, xi, eta, dxi, deta, radius=1.0):
+    def differential_elements(self, xi, eta, dxi, deta, radius=1.0):
         """Calculate magnitudes of line and surface elements
 
         Implementation of equations 18-20 of Ronchi et al.
@@ -526,20 +526,21 @@ class RegionalCSProjection:
         return dlxi, dleta, dS
 
 
-class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
+class RegionalCSMesh(StructuredSurfaceMesh):
     def __init__(
         self,
         projection,
         length,
         width,
-        length_resolution,
-        width_resolution,
         *,
         radius,
-        edges=None,
-        width_shift=0.0,
+        shape=None,
+        cell_size=None,
+        xi_edges=None,
+        eta_edges=None,
+        xi_shift=0.0,
     ):
-        """Set up a regional cubed-sphere grid.
+        """Construct a regional cubed-sphere mesh.
 
         Create a regular grid in xi,eta-coordinates. The grid will cover a
         region of the cube surface that is L by W, where L is the dimension along
@@ -558,22 +559,25 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
             Dimension of grid perpendicular RegionalCSProjection.orientation, i.e. the
             "width" of the grid. Dimension corresponds to the dimension of R at
             the cube-sphere intersection point
-        length_resolution: float or int
-            Cell size (float) or number of cells (int) in the length direction.
-        width_resolution: float or int
-            Cell size (float) or number of cells (int) in the width direction.
-        width_shift: float, optional
-            Distance, in the same units as ``radius``, by which to move the grid
-            in the xi-direction,
-            or W direction. Positive numbers will move the center right (towards
-            positive xi)
-        edges: tuple, optional
-            if you want to force the grid in xi/eta space to certain values, provide
-            them in this tuple.
         radius: float
             Radius of the sphere, in the same units as the dimensions and any
-            floating-point resolutions. It is required so that the grid never
+            cell sizes. It is required so that the mesh never
             silently assumes kilometres or metres.
+        shape: tuple of int, optional
+            Number of cells along the ``(eta, xi)`` axes.
+        cell_size: tuple of float, optional
+            Target physical cell sizes along the ``(eta, xi)`` axes. The final
+            uniform spacing is adjusted slightly so the requested extent is exact.
+        xi_edges, eta_edges: array-like, optional
+            Explicit uniformly spaced computational-coordinate edges in radians.
+        xi_shift: float, optional
+            Physical displacement along the xi axis, in the same units as ``radius``.
+
+        Notes
+        -----
+        Provide exactly one construction mode: ``shape``, ``cell_size``, or both
+        explicit edge arrays. Keeping cell counts and physical cell sizes in
+        separate parameters avoids the historical int-versus-float ambiguity.
 
         """
         if not isinstance(projection, RegionalCSProjection):
@@ -581,53 +585,46 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         for name, value in (("length", length), ("width", width), ("radius", radius)):
             if not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a positive finite number")
-        length_resolution = RegionalCSGridSpec._resolution("length_resolution", length_resolution)
-        width_resolution = RegionalCSGridSpec._resolution("width_resolution", width_resolution)
-        if isinstance(length_resolution, int) != isinstance(width_resolution, int):
-            raise ValueError("length and width resolutions must use the same convention")
-        if not np.isfinite(width_shift):
-            raise ValueError("width_shift must be finite")
+        shape = RegionalCSMeshSpec._shape(shape)
+        cell_size = RegionalCSMeshSpec._cell_size(cell_size)
+        xi_edges = RegionalCSMeshSpec._edge_axis("xi_edges", xi_edges)
+        eta_edges = RegionalCSMeshSpec._edge_axis("eta_edges", eta_edges)
+        explicit_edges = xi_edges is not None or eta_edges is not None
+        if explicit_edges and (xi_edges is None or eta_edges is None):
+            raise ValueError("xi_edges and eta_edges must be provided together")
+        mode_count = int(shape is not None) + int(cell_size is not None) + int(explicit_edges)
+        if mode_count != 1:
+            raise ValueError("Provide exactly one of shape, cell_size, or explicit edges")
+        if not np.isfinite(xi_shift):
+            raise ValueError("xi_shift must be finite")
 
         self.projection = projection
         self.radius = float(radius)
-        self.width_shift = float(width_shift)
+        self.xi_shift = float(xi_shift)
         self.length = float(length)
         self.width = float(width)
-        self.length_resolution = length_resolution
-        self.width_resolution = width_resolution
-        self.edges = RegionalCSGridSpec._edges(edges)
+        self.requested_shape = shape
+        self.requested_cell_size = cell_size
 
-        # make xi and eta arrays for the grid cell boundaries:
-        if self.edges is None:
-            if isinstance(length_resolution, int):
-                xi_edge = (
-                    np.linspace(
-                        -np.arctan(length / radius) / 2,
-                        np.arctan(length / radius) / 2,
-                        width_resolution + 1,
-                    )
-                    - width_shift / self.radius
-                )
-                eta_edge = np.linspace(
-                    -np.arctan(width / radius) / 2,
-                    np.arctan(width / radius) / 2,
-                    length_resolution + 1,
-                )
-            else:
-                xi_edge = (
-                    np.r_[
-                        -np.arctan(length / radius) / 2 : np.arctan(length / radius)
-                        / 2 : np.arctan(length_resolution / radius)
-                    ]
-                    - width_shift / self.radius
-                )
-                eta_edge = np.r_[
-                    -np.arctan(width / radius) / 2 : np.arctan(width / radius) / 2 : np.arctan(
-                        width_resolution / radius
-                    )
-                ]
+        xi_span = np.arctan(self.length / self.radius)
+        eta_span = np.arctan(self.width / self.radius)
+        if shape is not None:
+            n_eta, n_xi = shape
+            xi_edge = np.linspace(-xi_span / 2, xi_span / 2, n_xi + 1)
+            eta_edge = np.linspace(-eta_span / 2, eta_span / 2, n_eta + 1)
+        elif cell_size is not None:
+            eta_cell_size, xi_cell_size = cell_size
+            n_eta = max(1, int(round(eta_span / np.arctan(eta_cell_size / self.radius))))
+            n_xi = max(1, int(round(xi_span / np.arctan(xi_cell_size / self.radius))))
+            xi_edge = np.linspace(-xi_span / 2, xi_span / 2, n_xi + 1)
+            eta_edge = np.linspace(-eta_span / 2, eta_span / 2, n_eta + 1)
         else:
-            xi_edge, eta_edge = (np.asarray(axis) for axis in self.edges)
+            xi_edge = np.asarray(xi_edges)
+            eta_edge = np.asarray(eta_edges)
+
+        xi_edge = xi_edge - self.xi_shift / self.radius
+        self.xi_edges = tuple(float(value) for value in xi_edge)
+        self.eta_edges = tuple(float(value) for value in eta_edge)
 
         for name, axis in (("xi", xi_edge), ("eta", eta_edge)):
             spacing = np.diff(axis)
@@ -639,7 +636,7 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         self.eta_min, self.eta_max = eta_edge.min(), eta_edge.max()
 
         # number of grid cells in L (eta) and W (xi) directions:
-        self.NL, self.NW = len(eta_edge) - 1, len(xi_edge) - 1
+        self.n_eta, self.n_xi = len(eta_edge) - 1, len(xi_edge) - 1
 
         # size of grid cells in xi, eta coordinates:
         self.dxi = xi_edge[1] - xi_edge[0]
@@ -649,41 +646,28 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         self.xi_mesh, self.eta_mesh = np.meshgrid(xi_edge, eta_edge, indexing="xy")
 
         # lon, lat coordiantes of cell corners:
-        self.lon_mesh, self.lat_mesh = self.projection.cube2geo(self.xi_mesh, self.eta_mesh)
+        self.lon_mesh, self.lat_mesh = self.projection.cube_to_geographic(
+            self.xi_mesh, self.eta_mesh
+        )
 
         # xi, eta coordinates of grid points (cell centers):
         self.xi = self.xi_mesh[0:-1, 0:-1] + self.dxi / 2
         self.eta = self.eta_mesh[0:-1, 0:-1] + self.deta / 2
 
         # geocentric lon, lat [deg] of grid points:
-        self.lon, self.lat = self.projection.cube2geo(self.xi, self.eta)
-        self.local_lon, self.local_lat = self.projection.geo2local(self.lon, self.lat)
-
-        # Canonical angular coordinates are degrees, matching Grid and every
-        # basis evaluator. Explicit radian views keep unit conversions visible.
-        self.phi = self.lon.reshape(-1).copy()
-        self.theta = (90 - self.lat).reshape(-1)
-        self.phi_rad, self.theta_rad = self.phi * d2r, self.theta * d2r
-
-        # cubed square parameters for grid points (cell centers)
-        self.X = np.tan(self.xi)
-        self.Y = np.tan(self.eta)
-        self.delta = 1 + self.X**2 + self.Y**2
-        self.C = np.sqrt(1 + self.X**2)
-        self.D = np.sqrt(1 + self.Y**2)
+        self.lon, self.lat = self.projection.cube_to_geographic(self.xi, self.eta)
+        self.local_lon, self.local_lat = self.projection.geographic_to_local(self.lon, self.lat)
 
         # set size and shape
-        self.size = self.lat.size
-        self.shape = self.lat.shape
+        self._shape = tuple(int(length) for length in self.lat.shape)
 
         # calcualte cell area
-        self.A = self.projection.differentials(
+        self._cell_areas = self.projection.differential_elements(
             self.xi, self.eta, self.dxi, self.deta, radius=self.radius
         )[2]
-        self.area_weights = self.A.reshape(-1)
 
         self._signature = (
-            "REGIONAL_CS_GRID",
+            "REGIONAL_CS_MESH",
             self.projection.signature,
             self.radius,
             content_fingerprint(
@@ -704,73 +688,32 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
             "lat",
             "local_lon",
             "local_lat",
-            "theta",
-            "phi",
-            "theta_rad",
-            "phi_rad",
-            "X",
-            "Y",
-            "delta",
-            "C",
-            "D",
-            "A",
-            "area_weights",
+            "_cell_areas",
         ):
             values = np.array(getattr(self, name), copy=True)
             values.setflags(write=False)
             setattr(self, name, values)
-        self.validate_metadata()
         self.validate_mesh_metadata()
 
     @property
-    def mesh_shape(self):
+    def shape(self):
         """Logical ``(eta, xi)`` cell shape."""
-        return tuple(int(length) for length in self.shape)
+        return self._shape
 
-    @property
-    def cell_center_theta(self):
-        """Cell-centre colatitudes in degrees."""
-        return 90.0 - self.lat
-
-    @property
-    def cell_center_phi(self):
-        """Cell-centre longitudes in degrees."""
-        return self.lon
+    @cached_property
+    def cell_centers(self):
+        """Cell-centre coordinates and physical area weights."""
+        return SphericalGrid(lat=self.lat, lon=self.lon, area_weights=self.cell_areas)
 
     @property
     def cell_areas(self):
         """Cell areas in squared radius units."""
-        return self.A.reshape(self.mesh_shape)
-
-    @property
-    def kind(self):
-        """Short identifier for a regional cubed-sphere grid."""
-        return "REGIONAL_CS_GRID"
-
-    @property
-    def index_names(self):
-        """Names of the structured cell-center indices."""
-        return ("eta", "xi")
-
-    @property
-    def index_length(self):
-        """Number of cell-centered values."""
-        return self.size
-
-    @property
-    def index_arrays(self):
-        """Flattened geographic coordinates for cell-centered values."""
-        return self.lat.reshape(-1), self.lon.reshape(-1)
+        return self._cell_areas
 
     @property
     def signature(self):
         """Return exact geometry identity."""
         return self._signature
-
-    @property
-    def coefficient_space_signature(self):
-        """Return grid-value compatibility identity."""
-        return self.signature
 
     @cached_property
     def operators(self):
@@ -779,16 +722,16 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
 
     def to_spec(self):
         """Return a versioned, JSON-serializable grid specification."""
-        return RegionalCSGridSpec.from_grid(self)
+        return RegionalCSMeshSpec.from_mesh(self)
 
     @classmethod
     def from_spec(cls, spec):
-        """Construct a grid from a :class:`RegionalCSGridSpec` or mapping."""
+        """Construct a grid from a :class:`RegionalCSMeshSpec` or mapping."""
         if isinstance(spec, Mapping):
-            spec = RegionalCSGridSpec.from_mapping(spec)
-        if not isinstance(spec, RegionalCSGridSpec):
-            raise TypeError("spec must be a RegionalCSGridSpec or mapping")
-        return spec.build()
+            spec = RegionalCSMeshSpec.from_dict(spec)
+        if not isinstance(spec, RegionalCSMeshSpec):
+            raise TypeError("spec must be a RegionalCSMeshSpec or mapping")
+        return spec.to_mesh()
 
     def __repr__(self):
         """String representation"""
@@ -819,12 +762,12 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         Returns
         -------
         1D array of ints which denote the index(es) of i, j in a flattened version
-        of a 2D array of shape (self.NL, self.NW)
+        of a 2D array of shape (self.n_eta, self.n_xi)
         """
-        i = np.asarray(eta_index) % self.NL
-        j = np.asarray(xi_index) % self.NW
+        i = np.asarray(eta_index) % self.n_eta
+        j = np.asarray(xi_index) % self.n_xi
 
-        return np.ravel_multi_index((i, j), (self.NL, self.NW)).flatten()
+        return np.ravel_multi_index((i, j), (self.n_eta, self.n_xi)).flatten()
 
     def unravel_index(self, flat_index):
         """Return eta and xi indices for flattened cell indices.
@@ -840,9 +783,9 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         Same length (N) as input parameter.
 
         """
-        return np.unravel_index(flat_index, self.mesh_shape)
+        return np.unravel_index(flat_index, self.shape)
 
-    def count(self, lon, lat, **kwargs):
+    def count_points(self, lon, lat, **kwargs):
         """
         Count number of points in each grid cell
 
@@ -865,7 +808,7 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
             and self.lon
         """
         lon, lat = lon.flatten(), lat.flatten()
-        xi, eta = self.projection.geo2cube(lon, lat)
+        xi, eta = self.projection.geographic_to_cube(lon, lat)
 
         xi_edges, eta_edges = self.xi_mesh[0, :], self.eta_mesh[:, 0]
         count, _, _ = np.histogram2d(xi, eta, (xi_edges, eta_edges), **kwargs)
@@ -898,20 +841,20 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         Points that are outside the grid will be given index -1
         """
         lon, lat = lon.flatten(), lat.flatten()
-        xi, eta = self.projection.geo2cube(lon, lat, set_points_off_cube_to_nan=False)
+        xi, eta = self.projection.geographic_to_cube(lon, lat, set_points_off_cube_to_nan=False)
 
         xi_edges, eta_edges = self.xi_mesh[0, :], self.eta_mesh[:, 0]
 
         i = np.digitize(eta, eta_edges) - 1
         j = np.digitize(xi, xi_edges) - 1
 
-        iii = ~self.ingrid(lon, lat)  # points not in grid
+        iii = ~self.contains(lon, lat)  # points not in grid
         i[iii] = -1
         j[iii] = -1
 
         return (i, j)
 
-    def ingrid(self, lon, lat, ext_factor=1.0):
+    def contains(self, lon, lat, extent_factor=1.0):
         """
         Determine if lon, lat are inside grid boundaries or not.
 
@@ -921,8 +864,8 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
             array of longitudes [degrees] - must have same shape as lat
         lat: array
             array of latitudes [degrees] - must have same shape as lon
-        ext_factor: float or int, optional
-            Set ext_factor to a positive/negative float to extend/contract
+        extent_factor: float or int, optional
+            Set extent_factor to a positive/negative float to extend/contract
             ``self.length`` and ``self.width`` by the given factor to include/exclude
             points that are outside/inside the grid. If provided as
             positive/negative int, it will extend/contract the region as
@@ -934,27 +877,30 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         """
         lat, lon = np.array(lat), np.array(lon)
         if lon.shape != lat.shape:
-            raise ValueError("RegionalCSGrid.ingrid: lon and lat must have same shape")
+            raise ValueError("RegionalCSMesh.contains: lon and lat must have same shape")
         shape = lon.shape
         lon, lat = lon.flatten(), lat.flatten()
 
-        xi, eta = self.projection.geo2cube(lon, lat, set_points_off_cube_to_nan=False)
-        if isinstance(ext_factor, int):
+        xi, eta = self.projection.geographic_to_cube(lon, lat, set_points_off_cube_to_nan=False)
+        if isinstance(extent_factor, int):
             ximin, ximax = (
-                self.xi_mesh.min() - ext_factor * self.dxi,
-                self.xi_mesh.max() + ext_factor * self.dxi,
+                self.xi_mesh.min() - extent_factor * self.dxi,
+                self.xi_mesh.max() + extent_factor * self.dxi,
             )
             etamin, etamax = (
-                self.eta_mesh.min() - ext_factor * self.deta,
-                self.eta_mesh.max() + ext_factor * self.deta,
+                self.eta_mesh.min() - extent_factor * self.deta,
+                self.eta_mesh.max() + extent_factor * self.deta,
             )
         else:
-            ximin, ximax = self.xi_mesh.min() * ext_factor, self.xi_mesh.max() * ext_factor
-            etamin, etamax = self.eta_mesh.min() * ext_factor, self.eta_mesh.max() * ext_factor
+            ximin, ximax = self.xi_mesh.min() * extent_factor, self.xi_mesh.max() * extent_factor
+            etamin, etamax = (
+                self.eta_mesh.min() * extent_factor,
+                self.eta_mesh.max() * extent_factor,
+            )
 
         return ((xi < ximax) & (xi > ximin) & (eta < etamax) & (eta > etamin)).reshape(shape)
 
-    def get_grid_boundaries(self, geocentric=True):
+    def geographic_boundaries(self, geocentric=True):
         """
         Get grid boundaries for plotting
 
@@ -963,7 +909,7 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
 
         Example:
         --------
-        for c in obj.get_grid_boundaries():
+        for c in obj.geographic_boundaries():
             lon, lat = c
             plot(lon, lat, 'k-', transform = ccrs.Geocentric())
         """
@@ -972,11 +918,11 @@ class RegionalCSGrid(SphericalRepresentation, StructuredSurfaceMesh):
         else:
             x, y = self.xi_mesh, self.eta_mesh
 
-        for i in range(self.NL + self.NW + 2):
-            if i < self.NL + 1:
+        for i in range(self.n_eta + self.n_xi + 2):
+            if i < self.n_eta + 1:
                 yield (x[i, :], y[i, :])
             else:
-                i = i - self.NL - 1
+                i = i - self.n_eta - 1
                 yield (x[:, i], y[:, i])
 
 
@@ -988,17 +934,17 @@ class RegionalCSOperators:
     operators against that immutable geometry.
     """
 
-    def __init__(self, grid):
-        if not isinstance(grid, RegionalCSGrid):
-            raise TypeError("grid must be a RegionalCSGrid")
-        self.grid = grid
+    def __init__(self, mesh):
+        if not isinstance(mesh, RegionalCSMesh):
+            raise TypeError("mesh must be a RegionalCSMesh")
+        self.mesh = mesh
 
     @property
     def signature(self):
         """Return the identity of the operator family and its grid."""
-        return ("REGIONAL_CS_OPERATORS", self.grid.signature)
+        return ("REGIONAL_CS_OPERATORS", self.mesh.signature)
 
-    def gradient_matrices(
+    def surface_gradient_matrices(
         self,
         stencil_size=1,
         *,
@@ -1024,20 +970,20 @@ class RegionalCSOperators:
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
-        grid = self.grid
+        grid = self.mesh
         if isinstance(stencil_size, bool) or not isinstance(stencil_size, (int, np.integer)):
             raise TypeError("stencil_size must be an integer")
         S = int(stencil_size)
         if S < 1:
             raise ValueError("stencil_size must be positive")
-        if min(grid.mesh_shape) < 2 * S + 1:
+        if min(grid.shape) < 2 * S + 1:
             raise ValueError(
                 "stencil_size requires at least 2*stencil_size+1 cells along each axis"
             )
         dxi = grid.dxi
         det = grid.deta
-        N = grid.NL
-        M = grid.NW
+        N = grid.n_eta
+        M = grid.n_xi
 
         D_xi = {"rows": [], "cols": [], "elements": []}
         D_et = {"rows": [], "cols": [], "elements": []}
@@ -1130,7 +1076,17 @@ class RegionalCSOperators:
         else:
             return np.array(Le.todense()), np.array(Ln.todense())
 
-    def divergence_matrix(self, stencil_size=1, *, sparse=True):
+    def surface_gradient_operator(self, stencil_size=1):
+        """Return the scalar-to-tangential-gradient linear map."""
+        east, north = self.surface_gradient_matrices(stencil_size=stencil_size, sparse=True)
+        matrix = scipy_sparse.vstack((east, north), format="csc")
+        return as_linear_map(
+            matrix,
+            input_shape=(self.mesh.size,),
+            output_shape=(2, self.mesh.size),
+        )
+
+    def surface_divergence_matrix(self, stencil_size=1, *, sparse=True):
         """
         Calculate the matrix that produces the divergence of a vector field
 
@@ -1151,7 +1107,7 @@ class RegionalCSOperators:
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
-        D_xi, D_eta = self.gradient_matrices(
+        D_xi, D_eta = self.surface_gradient_matrices(
             stencil_size=stencil_size, cube_coordinates=True, sparse=True
         )
         east_coeff, north_coeff, sqrt_g = self.surface_geometry()
@@ -1172,6 +1128,15 @@ class RegionalCSOperators:
         result = scipy_sparse.hstack((east, north), format="csc")
         return result if sparse else result.toarray()
 
+    def surface_divergence_operator(self, stencil_size=1):
+        """Return the tangential-vector-to-divergence linear map."""
+        matrix = self.surface_divergence_matrix(stencil_size=stencil_size, sparse=True)
+        return as_linear_map(
+            matrix,
+            input_shape=(2, self.mesh.size),
+            output_shape=(self.mesh.size,),
+        )
+
     def surface_geometry(self):
         """Return geographic dual-basis coefficients and ``sqrt(det(g))``.
 
@@ -1180,7 +1145,7 @@ class RegionalCSOperators:
         divergence operators, keeping those two constructions geometrically
         consistent.
         """
-        grid = self.grid
+        grid = self.mesh
         xi = grid.xi.reshape(-1)
         eta = grid.eta.reshape(-1)
 
@@ -1206,7 +1171,7 @@ class RegionalCSOperators:
         sqrt_g = np.sqrt(np.linalg.det(metric))
         return east_coeff, north_coeff, sqrt_g
 
-    def interpolate_scalar(self, lon, lat, values):
+    def interpolate_scalar(self, values, lon, lat):
         """
         Interpolate values of a cell-centred scalar field at the requested
         longitude/latitude locations. Bilinear interpolation uses only the
@@ -1215,24 +1180,24 @@ class RegionalCSOperators:
 
         Parameters
         ----------
+        values: array
+            2D array (or flattened) of the scalar field as defined on the CS grid
+            (dimensions must match)
         lon: array
             array of longitudes [degrees] - must have same shape as lat_
         lat: array
             array of latitudes [degrees] - must have same shape as lon_
-        values: array
-            2D array (or flattened) of the scalar field as defined on the CS grid
-            (dimensions must match)
 
         Returns
         -------
         Interpolated values of the 2D scalar field at the desired input (lon, lat)
         locations.
         """
-        grid = self.grid
+        grid = self.mesh
         lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
 
         # Remove points outside grid
-        inside = grid.ingrid(lon, lat)
+        inside = grid.contains(lon, lat)
         lon_ = lon[inside]
         lat_ = lat[inside]
 
@@ -1240,7 +1205,7 @@ class RegionalCSOperators:
         binnumber = grid.bin_index(lon_, lat_)
         i = binnumber[0].flatten()
         j = binnumber[1].flatten()
-        xi_obs, eta_obs = grid.projection.geo2cube(lon_.flatten(), lat_.flatten())
+        xi_obs, eta_obs = grid.projection.geographic_to_cube(lon_.flatten(), lat_.flatten())
         xi_grid = grid.xi[i, j]
         eta_grid = grid.eta[i, j]
         i_frac = (eta_obs - eta_grid) / grid.deta
@@ -1260,13 +1225,13 @@ class RegionalCSOperators:
         # boundary determined by the center location in the perimiter cells. For those
         # input points an extrapolation will be performed based on the bilinear
         # interpolation scheme (just evaluated outside the "box" of the 4 points).
-        small_i = i <= 0  # due to ingrid it must also be > -0.5
+        small_i = i <= 0  # due to contains it must also be > -0.5
         i[small_i] = 0.00001
-        small_j = j <= 0  # due to ingrid it must also be > -0.5
+        small_j = j <= 0  # due to contains it must also be > -0.5
         j[small_j] = 0.00001
-        large_i = i >= grid.shape[0] - 1  # due to ingrid it must also be > -0.5
+        large_i = i >= grid.shape[0] - 1  # due to contains it must also be > -0.5
         i[large_i] = grid.shape[0] - 1 - 0.00001
-        large_j = j >= grid.shape[1] - 1  # due to ingrid it must also be > -0.5
+        large_j = j >= grid.shape[1] - 1  # due to contains it must also be > -0.5
         j[large_j] = grid.shape[1] - 1 - 0.00001
 
         # Indices of the four nodes surrounding each observation/evaluation location
@@ -1291,7 +1256,7 @@ class RegionalCSOperators:
         ij4 = grid.flat_index(ifloor, jceil)
 
         # CS coordinates of observations/evaluation locations
-        xi_obs, eta_obs = grid.projection.geo2cube(lon_.flatten(), lat_.flatten())
+        xi_obs, eta_obs = grid.projection.geographic_to_cube(lon_.flatten(), lat_.flatten())
         # Bilinear interpolation: https://en.wikipedia.org/wiki/Bilinear_interpolation
         w1 = (xi4 - xi_obs) * (eta2 - eta_obs) / ((xi4 - xi1) * (eta2 - eta1))  # w11
         w2 = (xi4 - xi_obs) * (eta_obs - eta1) / ((xi4 - xi1) * (eta2 - eta1))  # w12
@@ -1322,26 +1287,27 @@ class RegionalCSOperators:
 
 
 @dataclass(frozen=True)
-class RegionalCSGridSpec:
-    """Versioned, consumer-neutral specification for a regional CS grid."""
+class RegionalCSMeshSpec:
+    """Versioned, consumer-neutral specification for a regional CS mesh."""
 
     position: tuple[float, float]
     orientation: tuple[float, float]
     length: float
     width: float
-    length_resolution: int | float
-    width_resolution: int | float
     radius: float
-    width_shift: float = 0.0
-    edges: tuple[tuple[float, ...], tuple[float, ...]] | None = None
-    schema: str = REGIONAL_CS_GRID_SCHEMA
-    version: int = REGIONAL_CS_GRID_SCHEMA_VERSION
+    shape: tuple[int, int] | None = None
+    cell_size: tuple[float, float] | None = None
+    xi_edges: tuple[float, ...] | None = None
+    eta_edges: tuple[float, ...] | None = None
+    xi_shift: float = 0.0
+    schema: str = REGIONAL_CS_MESH_SCHEMA
+    version: int = REGIONAL_CS_MESH_SCHEMA_VERSION
 
     def __post_init__(self):
-        if self.schema != REGIONAL_CS_GRID_SCHEMA:
-            raise ValueError(f"Unsupported regional-grid schema: {self.schema!r}")
-        if self.version != REGIONAL_CS_GRID_SCHEMA_VERSION:
-            raise ValueError(f"Unsupported regional-grid schema version: {self.version!r}")
+        if self.schema != REGIONAL_CS_MESH_SCHEMA:
+            raise ValueError(f"Unsupported regional-mesh schema: {self.schema!r}")
+        if self.version != REGIONAL_CS_MESH_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported regional-mesh schema version: {self.version!r}")
 
         position = self._coordinate_pair("position", self.position)
         orientation = self._coordinate_pair("orientation", self.orientation)
@@ -1361,20 +1327,25 @@ class RegionalCSGridSpec:
                 raise ValueError(f"{name} must be a positive finite number")
             object.__setattr__(self, name, value)
 
-        width_shift = float(self.width_shift)
-        if not np.isfinite(width_shift):
-            raise ValueError("width_shift must be finite")
-        object.__setattr__(self, "width_shift", width_shift)
+        xi_shift = float(self.xi_shift)
+        if not np.isfinite(xi_shift):
+            raise ValueError("xi_shift must be finite")
+        object.__setattr__(self, "xi_shift", xi_shift)
 
-        resolutions = (
-            self._resolution("length_resolution", self.length_resolution),
-            self._resolution("width_resolution", self.width_resolution),
-        )
-        if isinstance(resolutions[0], int) != isinstance(resolutions[1], int):
-            raise ValueError("length and width resolutions must use the same convention")
-        object.__setattr__(self, "length_resolution", resolutions[0])
-        object.__setattr__(self, "width_resolution", resolutions[1])
-        object.__setattr__(self, "edges", self._edges(self.edges))
+        shape = self._shape(self.shape)
+        cell_size = self._cell_size(self.cell_size)
+        xi_edges = self._edge_axis("xi_edges", self.xi_edges)
+        eta_edges = self._edge_axis("eta_edges", self.eta_edges)
+        explicit_edges = xi_edges is not None or eta_edges is not None
+        if explicit_edges and (xi_edges is None or eta_edges is None):
+            raise ValueError("xi_edges and eta_edges must be provided together")
+        mode_count = int(shape is not None) + int(cell_size is not None) + int(explicit_edges)
+        if mode_count != 1:
+            raise ValueError("Provide exactly one of shape, cell_size, or explicit edges")
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "cell_size", cell_size)
+        object.__setattr__(self, "xi_edges", xi_edges)
+        object.__setattr__(self, "eta_edges", eta_edges)
 
     @staticmethod
     def _coordinate_pair(name, values):
@@ -1387,59 +1358,70 @@ class RegionalCSGridSpec:
         return result
 
     @staticmethod
-    def _resolution(name, value):
-        if isinstance(value, (bool, np.bool_)):
-            raise TypeError(f"{name} must be an integer cell count or float cell size")
-        if isinstance(value, (int, np.integer)):
-            value = int(value)
-        elif isinstance(value, (float, np.floating)):
-            value = float(value)
-        else:
-            raise TypeError(f"{name} must be an integer cell count or float cell size")
-        if not np.isfinite(value) or value <= 0:
-            raise ValueError(f"{name} must be positive and finite")
-        return value
+    def _shape(value):
+        if value is None:
+            return None
+        if len(value) != 2 or any(
+            isinstance(item, (bool, np.bool_)) or not isinstance(item, (int, np.integer))
+            for item in value
+        ):
+            raise TypeError("shape must contain two integer cell counts")
+        result = tuple(int(item) for item in value)
+        if any(item <= 0 for item in result):
+            raise ValueError("shape cell counts must be positive")
+        return result
 
     @staticmethod
-    def _edges(edges):
-        if edges is None:
+    def _cell_size(value):
+        if value is None:
             return None
-        if len(edges) != 2:
-            raise ValueError("edges must contain xi and eta edge arrays")
-        result = tuple(tuple(float(value) for value in axis) for axis in edges)
-        for axis in result:
-            values = np.asarray(axis)
-            if values.size < 2 or not np.isfinite(values).all():
-                raise ValueError("each edge axis must contain at least two finite values")
-            if not np.all(np.diff(values) > 0):
-                raise ValueError("edge coordinates must be strictly increasing")
+        try:
+            result = tuple(float(item) for item in value)
+        except (TypeError, ValueError) as error:
+            raise TypeError("cell_size must contain two numbers") from error
+        if len(result) != 2 or not np.isfinite(result).all() or any(item <= 0 for item in result):
+            raise ValueError("cell_size must contain two positive finite values")
+        return result
+
+    @staticmethod
+    def _edge_axis(name, values):
+        if values is None:
+            return None
+        result = tuple(float(value) for value in values)
+        array = np.asarray(result)
+        if array.size < 2 or not np.isfinite(array).all():
+            raise ValueError(f"{name} must contain at least two finite values")
+        if not np.all(np.diff(array) > 0):
+            raise ValueError(f"{name} must be strictly increasing")
+        spacing = np.diff(array)
+        if not np.allclose(spacing, spacing[0], rtol=1e-12, atol=1e-15):
+            raise ValueError(f"{name} must be uniformly spaced")
         return result
 
     @classmethod
-    def from_grid(cls, grid):
-        """Create a specification from a canonical grid."""
-        if not isinstance(grid, RegionalCSGrid):
-            raise TypeError("grid must be a RegionalCSGrid")
-        edges = None
-        if grid.edges is not None:
-            edges = tuple(tuple(float(value) for value in axis) for axis in grid.edges)
+    def from_mesh(cls, mesh):
+        """Create a specification from a canonical mesh."""
+        if not isinstance(mesh, RegionalCSMesh):
+            raise TypeError("mesh must be a RegionalCSMesh")
+        explicit_edges = mesh.requested_shape is None and mesh.requested_cell_size is None
         return cls(
-            position=tuple(grid.projection.position),
-            orientation=tuple(grid.projection.orientation),
-            length=grid.length,
-            width=grid.width,
-            length_resolution=grid.length_resolution,
-            width_resolution=grid.width_resolution,
-            radius=grid.radius,
-            width_shift=grid.width_shift,
-            edges=edges,
+            position=tuple(mesh.projection.position),
+            orientation=tuple(mesh.projection.orientation),
+            length=mesh.length,
+            width=mesh.width,
+            radius=mesh.radius,
+            shape=mesh.requested_shape,
+            cell_size=mesh.requested_cell_size,
+            xi_edges=mesh.xi_edges if explicit_edges else None,
+            eta_edges=mesh.eta_edges if explicit_edges else None,
+            xi_shift=0.0 if explicit_edges else mesh.xi_shift,
         )
 
     @classmethod
-    def from_mapping(cls, metadata):
+    def from_dict(cls, metadata):
         """Parse the versioned canonical mapping format."""
         if not isinstance(metadata, Mapping):
-            raise TypeError("regional-grid metadata must be a mapping")
+            raise TypeError("regional-mesh metadata must be a mapping")
         projection = metadata.get("projection")
         if not isinstance(projection, Mapping):
             raise TypeError("projection metadata must be a mapping")
@@ -1450,14 +1432,15 @@ class RegionalCSGridSpec:
             orientation=projection.get("orientation"),
             length=metadata.get("length"),
             width=metadata.get("width"),
-            length_resolution=metadata.get("length_resolution"),
-            width_resolution=metadata.get("width_resolution"),
             radius=metadata.get("radius"),
-            width_shift=metadata.get("width_shift", 0.0),
-            edges=metadata.get("edges"),
+            shape=metadata.get("shape"),
+            cell_size=metadata.get("cell_size"),
+            xi_edges=metadata.get("xi_edges"),
+            eta_edges=metadata.get("eta_edges"),
+            xi_shift=metadata.get("xi_shift", 0.0),
         )
 
-    def to_mapping(self):
+    def to_dict(self):
         """Return the stable JSON-compatible representation."""
         return {
             "schema": self.schema,
@@ -1468,36 +1451,35 @@ class RegionalCSGridSpec:
             },
             "length": self.length,
             "width": self.width,
-            "length_resolution": self.length_resolution,
-            "width_resolution": self.width_resolution,
             "radius": self.radius,
-            "width_shift": self.width_shift,
-            "edges": None if self.edges is None else [list(axis) for axis in self.edges],
+            "shape": None if self.shape is None else list(self.shape),
+            "cell_size": None if self.cell_size is None else list(self.cell_size),
+            "xi_edges": None if self.xi_edges is None else list(self.xi_edges),
+            "eta_edges": None if self.eta_edges is None else list(self.eta_edges),
+            "xi_shift": self.xi_shift,
         }
 
-    def build(self):
-        """Build a regional cubed-sphere grid from this specification."""
-        edges = None
-        if self.edges is not None:
-            edges = tuple(np.asarray(axis) for axis in self.edges)
+    def to_mesh(self):
+        """Construct a regional cubed-sphere mesh from this specification."""
         projection = RegionalCSProjection(self.position, self.orientation)
-        return RegionalCSGrid(
+        return RegionalCSMesh(
             projection,
             self.length,
             self.width,
-            self.length_resolution,
-            self.width_resolution,
             radius=self.radius,
-            edges=edges,
-            width_shift=self.width_shift,
+            shape=self.shape,
+            cell_size=self.cell_size,
+            xi_edges=self.xi_edges,
+            eta_edges=self.eta_edges,
+            xi_shift=self.xi_shift,
         )
 
 
 __all__ = [
-    "REGIONAL_CS_GRID_SCHEMA",
-    "REGIONAL_CS_GRID_SCHEMA_VERSION",
-    "RegionalCSGrid",
-    "RegionalCSGridSpec",
+    "REGIONAL_CS_MESH_SCHEMA",
+    "REGIONAL_CS_MESH_SCHEMA_VERSION",
+    "RegionalCSMesh",
+    "RegionalCSMeshSpec",
     "RegionalCSOperators",
     "RegionalCSProjection",
 ]

@@ -11,9 +11,9 @@ import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 import numpy as np
 
-from kompe.cubed_sphere import cs_basis
+from kompe import GlobalCSProjection
 
-p = cs_basis.GlobalCSBasis(2)
+p = GlobalCSProjection()
 
 
 def geocentric_to_plate_carree_vector_components(east, north, latitude):
@@ -46,10 +46,10 @@ def test_projection():
     lon = np.rad2deg(np.arctan2(yy, xx))
     lat = np.rad2deg(np.arcsin(zz / rr))
 
-    block = p.block(lon, lat)
-    xi, eta, block = p.geo2cube(lon, lat, block)
+    block = p.face_index(lon, lat)
+    xi, eta, block = p.geographic_to_cube(lon, lat, block)
 
-    r, theta, phi = p.cube2spherical(xi, eta, r=rr, block=block)
+    r, theta, phi = p.cube_to_spherical(xi, eta, radius=rr, face=block)
     geo2cube2spherical_works = np.allclose(90 - np.rad2deg(theta) - lat, 0) & np.allclose(
         np.rad2deg(phi) - lon, 0
     )
@@ -60,7 +60,7 @@ def test_projection():
 
     assert geo2cube2spherical_works
 
-    x, y, z = p.cube2cartesian(xi, eta, r=rr, block=block)
+    x, y, z = p.cube_to_cartesian(xi, eta, radius=rr, face=block)
     geo2cube2cartesian_works = (
         np.allclose(x - xx, 0) & np.allclose(y - yy, 0) & np.allclose(z - zz, 0)
     )
@@ -76,11 +76,11 @@ def test_projection():
     N = xx.size
     Axyz = 2 * np.random.random((3, N)) - 1  # (3, N) random vector components
 
-    Pc = p.get_Pc(xi, eta, r=rr, block=block)
-    Pcinv = p.get_Pc(xi, eta, r=rr, block=block, inverse=True)
-    Ps = p.get_Ps(xi, eta, r=rr, block=block)
-    Psinv = p.get_Ps(xi, eta, r=rr, block=block, inverse=True)
-    Q = p.get_Q(lat, rr)
+    Pc = p.cartesian_to_cube_vector_matrix(xi, eta, radius=rr, face=block)
+    Pcinv = p.cube_to_cartesian_vector_matrix(xi, eta, radius=rr, face=block)
+    Ps = p.spherical_to_cube_vector_matrix(xi, eta, radius=rr, face=block)
+    Psinv = p.cube_to_spherical_vector_matrix(xi, eta, radius=rr, face=block)
+    Q = p.spherical_normalization_matrix(lat, rr)
 
     A = np.einsum("nij, nj -> ni", Pc, Axyz.T).T
     Axyz_ = np.einsum("nij, nj -> ni", Pcinv, A.T).T
@@ -144,12 +144,12 @@ def test_projection():
         C = "C" + str(i)
 
         # Plot spherical coordinates using cartopy.
-        r, theta, phi = p.cube2spherical(xi, eta, block=i)
+        r, theta, phi = p.cube_to_spherical(xi, eta, face=i)
         lo, la = np.rad2deg(phi), 90 - np.rad2deg(theta)
         lon, lat = np.rad2deg(phi).reshape(-1), 90 - np.rad2deg(theta).reshape(-1)
-        Ps_inv = p.get_Ps(xi, eta, r=1, block=i, inverse=True)
+        Ps_inv = p.cube_to_spherical_vector_matrix(xi, eta, radius=1, face=i)
         # Multiply Ps_inv by Q to get normalized vector components.
-        Q = p.get_Q(lat, r.reshape(-1))
+        Q = p.spherical_normalization_matrix(lat, r.reshape(-1))
         Ps_normalized = np.einsum("nij, njk -> nik", Q, Ps_inv)
 
         # Project in xi-direction.
@@ -195,10 +195,10 @@ def test_projection():
                 )
 
         # Plot Cartesian 3D coordinates.
-        x, y, z = p.cube2cartesian(xi, eta, block=i)
+        x, y, z = p.cube_to_cartesian(xi, eta, face=i)
         axxyz1.scatter(x, y, z, c=C, s=5)
         axxyz2.scatter(x, y, z, c=C, s=5)
-        Pc = p.get_Pc(xi, eta, r=1, block=i, inverse=True)
+        Pc = p.cube_to_cartesian_vector_matrix(xi, eta, radius=1, face=i)
 
         Ax, Ay, Az = np.einsum("nij, nj -> ni", Pc, Axis).T
         axxyz1.quiver(
@@ -257,13 +257,13 @@ def test_projection():
     Anorth = np.vstack((zeros, ones, zeros))
 
     for block in range(6):
-        _, theta_hd, phi_hd = p.cube2spherical(xihd, etahd, r=1, block=block)
+        _, theta_hd, phi_hd = p.cube_to_spherical(xihd, etahd, radius=1, face=block)
         la = 90 - np.rad2deg(theta_hd)
         lo = np.rad2deg(phi_hd)
 
-        r, theta, phi = p.cube2spherical(xi, eta, r=1, block=block)
-        Ps = p.get_Ps(xi, eta, r=1, block=block)
-        Q = p.get_Q(90 - np.rad2deg(theta), r, inverse=True)
+        r, theta, phi = p.cube_to_spherical(xi, eta, radius=1, face=block)
+        Ps = p.spherical_to_cube_vector_matrix(xi, eta, radius=1, face=block)
+        Q = p.spherical_normalization_matrix(90 - np.rad2deg(theta), r, inverse=True)
         Ps_normalized = np.einsum("nij, njk -> nik", Ps, Q)
 
         Ae = np.einsum("nij, nj -> ni", Ps_normalized, Aeast.T).T
@@ -298,11 +298,11 @@ def test_projection():
             # )
             for lo_ in np.r_[-180:180:30]:
                 la_ = np.linspace(-90, 90, 181)
-                f = p.block(lo_, la_)
+                f = p.face_index(lo_, la_)
                 la_ = la_[f == block]
 
                 la_[np.abs(la_) > 80] = np.nan
-                xi_, eta_, _ = p.geo2cube(lo_, la_, block)
+                xi_, eta_, _ = p.geographic_to_cube(lo_, la_, block)
                 ax.plot(xi_, eta_, zorder=0, linewidth=1, color="lightgrey")
 
     for ax in axes.reshape(-1):
@@ -334,7 +334,7 @@ def test_projection():
         C = "C" + str(i)
 
         # Plot spherical coordinates using cartopy.
-        r, theta, phi = p.cube2spherical(xi, eta, block=i)
+        r, theta, phi = p.cube_to_spherical(xi, eta, face=i)
         lo, la = np.rad2deg(phi), 90 - np.rad2deg(theta)
 
         for k in range(N):
@@ -355,7 +355,7 @@ def test_projection():
                 transform=ccrs.Geodetic(),
             )
 
-    r, theta, phi = p.cube2spherical(xi_, eta_, block=0)
+    r, theta, phi = p.cube_to_spherical(xi_, eta_, face=0)
     lo, la = np.rad2deg(phi), 90 - np.rad2deg(theta)
     for k in range(N + 2 * N_extra):
         ax.plot(

@@ -6,19 +6,22 @@ backend-neutral numerical layer is intentionally namespaced under
 
 ## Representations and meshes
 
-- `Grid`: immutable spherical sample points, optionally with area weights.
+- `SphericalGrid`: immutable spherical sample points, optionally with area weights.
 - `SHBasis`: real spherical-harmonic scalar and Helmholtz expansion.
 - `SECSBasis`: curl-free or divergence-free elementary-current expansion;
   construction requires an explicit `current_type`. Its current operator
   accepts `chunk_size` for bounded-memory forward and adjoint evaluation.
 - `GlobalCSBasis`: closed-sphere, cell-centred cubed-sphere expansion. Its
-  resolution `N` is required.
+  `cells_per_face` resolution is required.
 - `GlobalCSMesh`: immutable six-face geometry used by `GlobalCSBasis`.
-- `RegionalCSProjection`: rotated gnomonic coordinate chart.
-- `RegionalCSGrid`: structured bounded mesh with an explicit radius.
-- `RegionalCSGridSpec`: versioned serialization boundary for regional grids.
-- `RegionalCSOperators`: available as `grid.operators`; owns interpolation,
+- `GlobalCSProjection`: stateless six-face coordinate and component maps.
+- `RegionalCSProjection`: rotated regional gnomonic coordinate chart.
+- `RegionalCSMesh`: structured bounded mesh with an explicit radius.
+- `RegionalCSMeshSpec`: versioned serialization boundary for regional meshes.
+- `RegionalCSOperators`: available as `mesh.operators`; owns interpolation,
   gradients, divergence, and metric-density calculations.
+- `SolidHarmonicOperators`: regular/irregular radial continuation for an
+  `SHBasis`; these are not surface-basis operations.
 
 ## Analysis and synthesis
 
@@ -28,6 +31,12 @@ samples. `analyze_scalar` and `analyze_helmholtz` fit samples already on the
 bound grid. `analyze_scalar_samples` and `analyze_helmholtz_samples` accept
 external sample grids, optionally remapping through `grid_remap_basis`, and
 return batch-first coefficient rows.
+
+Matrix names state what they do and end in `_matrix`; structured equivalents
+end in `_operator`. For example, `scalar_synthesis_matrix` and
+`helmholtz_synthesis_operator` have the same semantic direction. Geometric
+component transformations spell out both directions instead of changing
+meaning through an `inverse` flag.
 
 The word *projection* in Kompe's type vocabulary refers to coordinate charts.
 Mean-free coefficient projections retain that mathematical name because they

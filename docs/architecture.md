@@ -8,19 +8,19 @@ belong to those consumers or to explicitly named compatibility modules.
 
 - `SphericalRepresentation` owns validated coefficient or sample metadata.
 - `SphericalBasis` identifies reconstructive representations.
-- `ScalarSynthesis` adds scalar evaluation on a target grid.
-- `SurfaceOperators` adds closed-surface gradient, Helmholtz, Laplacian, and
+- `ScalarBasis` adds scalar evaluation on a target grid.
+- `SurfaceDifferentialBasis` adds closed-surface gradient, Helmholtz, Laplacian, and
   gauge-aware Poisson capabilities.
 - `SECSBasis` is a `SphericalBasis` with scalar-potential, surface-current,
   and magnetic-field synthesis. Its required `current_type` gives one
   coefficient vector an explicit curl-free or divergence-free meaning. Its
   Green functions are distributional, so it does not pretend to have a square
   coefficient-space Laplacian.
-- `Grid` stores arbitrary evaluation points and does not imply
+- `SphericalGrid` stores arbitrary evaluation points and does not imply
   cells or topology.
 - `StructuredSurfaceMesh` describes cell-centred structured surface geometry.
-  `RegionalCSGrid` and `GlobalCSMesh` implement it.
-- `RegionalCSGrid` is bounded mesh geometry. Its composed
+  `RegionalCSMesh` and `GlobalCSMesh` implement it.
+- `RegionalCSMesh` is bounded mesh geometry. Its composed
   `RegionalCSOperators` owns interpolation, gradient, metric, and divergence
   operations. Boundary stencils act on that mesh; it is not a closed-surface
   basis.
@@ -51,9 +51,9 @@ constructed.
 Stateless gnomonic coordinates, metrics, and vector transformations are shared.
 `GlobalCSMesh` owns immutable six-face cell geometry, while `GlobalCSBasis`
 owns the expansion, cross-face stencils, remapping, and closed-sphere
-operators. `RegionalCSGrid` owns the rotated single-face mesh, while
+operators. `RegionalCSMesh` owns the rotated single-face mesh, while
 `RegionalCSOperators` composes that geometry into interpolation and
-differential operators for a bounded patch. `RegionalCSGridSpec` provides the
+differential operators for a bounded patch. `RegionalCSMeshSpec` provides the
 versioned JSON boundary. Consumer-specific object translation remains outside
 Kompe.
 

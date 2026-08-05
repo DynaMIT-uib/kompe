@@ -8,10 +8,10 @@ from kompe.core import SphericalRepresentation
 from kompe.math import array_fingerprint, content_fingerprint
 
 
-class Grid(SphericalRepresentation):
+class SphericalGrid(SphericalRepresentation):
     """A collection of spherical sample points without implied topology.
 
-    ``Grid`` is not a mesh: it does not require cells, neighbours, or
+    ``SphericalGrid`` is not a mesh: it does not require cells, neighbours, or
     boundaries.  Use :class:`kompe.StructuredSurfaceMesh` implementations for
     cell-based discretizations.
 
@@ -78,9 +78,9 @@ class Grid(SphericalRepresentation):
         self.lat = np.array(latitude, dtype=float, copy=True).reshape(-1)
         self.lon = np.array(longitude, dtype=float, copy=True).reshape(-1)
         if not np.all(np.isfinite(self.lat)) or not np.all(np.isfinite(self.lon)):
-            raise ValueError("Grid coordinates must be finite.")
+            raise ValueError("SphericalGrid coordinates must be finite.")
         if np.any(np.abs(self.lat) > 90.0):
-            raise ValueError("Grid latitude must be between -90 and 90 degrees.")
+            raise ValueError("SphericalGrid latitude must be between -90 and 90 degrees.")
         self.theta = 90.0 - self.lat
         self.phi = self.lon.copy()
 
@@ -104,7 +104,7 @@ class Grid(SphericalRepresentation):
     @property
     def kind(self):
         """Short identifier for grid representations."""
-        return "GRID"
+        return "SPHERICAL_GRID"
 
     @property
     def index_names(self):
@@ -172,15 +172,15 @@ class Grid(SphericalRepresentation):
         """Return whether another grid has the same coordinates."""
         if self is other:
             return True
-        if not isinstance(other, Grid):
+        if not isinstance(other, SphericalGrid):
             return False
         return self.hash == other.hash
 
     def __eq__(self, other):
         """Compare grids by their coordinate hashes."""
-        if not isinstance(other, Grid):
+        if not isinstance(other, SphericalGrid):
             return NotImplemented
         return self.same_as(other)
 
 
-__all__ = ["Grid"]
+__all__ = ["SphericalGrid"]

@@ -5,31 +5,25 @@ from importlib.metadata import PackageNotFoundError, version
 from kompe.constants import EARTH_RADIUS_M, MU0
 from kompe.core import (
     BasisView,
-    ScalarSynthesis,
+    ScalarBasis,
     SphericalBasis,
     SphericalRepresentation,
-    SurfaceOperators,
-    basis_kind,
-    is_basis_kind,
-    is_cs_basis,
-    is_secs_basis,
-    is_sh_basis,
+    SurfaceDifferentialBasis,
 )
 from kompe.cubed_sphere import (
-    REGIONAL_CS_GRID_SCHEMA,
-    REGIONAL_CS_GRID_SCHEMA_VERSION,
     GlobalCSBasis,
     GlobalCSMesh,
-    RegionalCSGrid,
-    RegionalCSGridSpec,
+    GlobalCSProjection,
+    RegionalCSMesh,
+    RegionalCSMeshSpec,
     RegionalCSOperators,
     RegionalCSProjection,
 )
-from kompe.grid import Grid
+from kompe.grid import SphericalGrid
 from kompe.mesh import StructuredSurfaceMesh
 from kompe.secs import SECSBasis
 from kompe.spherical_harmonics.sh_basis import SHBasis
-from kompe.spherical_harmonics.solid_harmonics import SolidHarmonics
+from kompe.spherical_harmonics.solid_harmonics import SolidHarmonicOperators
 from kompe.spherical_transform import SphericalTransform
 
 try:
@@ -40,29 +34,23 @@ except PackageNotFoundError:  # pragma: no cover - only an uninstalled source tr
 __all__ = [
     "EARTH_RADIUS_M",
     "MU0",
-    "REGIONAL_CS_GRID_SCHEMA",
-    "REGIONAL_CS_GRID_SCHEMA_VERSION",
     "BasisView",
     "GlobalCSBasis",
     "GlobalCSMesh",
-    "Grid",
-    "RegionalCSGrid",
-    "RegionalCSGridSpec",
+    "GlobalCSProjection",
+    "SphericalGrid",
+    "RegionalCSMesh",
+    "RegionalCSMeshSpec",
     "RegionalCSOperators",
     "RegionalCSProjection",
     "SECSBasis",
     "SHBasis",
-    "ScalarSynthesis",
-    "SolidHarmonics",
+    "ScalarBasis",
+    "SolidHarmonicOperators",
     "SphericalBasis",
     "SphericalRepresentation",
     "SphericalTransform",
     "StructuredSurfaceMesh",
-    "SurfaceOperators",
+    "SurfaceDifferentialBasis",
     "__version__",
-    "basis_kind",
-    "is_basis_kind",
-    "is_cs_basis",
-    "is_secs_basis",
-    "is_sh_basis",
 ]
