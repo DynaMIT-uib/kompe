@@ -836,6 +836,8 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         scalar_coeffs = np.linspace(0.0, 1.0, basis.index_length)
         scalar_values = transform.synthesize_scalar(scalar_coeffs)
         assert "jax" in type(scalar_values).__module__
+        assert to_numpy(scalar_values).dtype == np.dtype(np.float64)
+        assert to_numpy(transform.scalar_synthesis_matrix).dtype == np.dtype(np.float64)
         np.testing.assert_allclose(
             to_numpy(scalar_values), to_numpy(transform.scalar_synthesis_matrix) @ scalar_coeffs
         )
@@ -843,6 +845,8 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         vector_coeffs = np.vstack([scalar_coeffs, scalar_coeffs[::-1]])
         vector_values = transform.synthesize_helmholtz(vector_coeffs)
         assert "jax" in type(vector_values).__module__
+        assert to_numpy(vector_values).dtype == np.dtype(np.float64)
+        assert to_numpy(transform.helmholtz_synthesis_matrix).dtype == np.dtype(np.float64)
         np.testing.assert_allclose(
             to_numpy(vector_values),
             np.tensordot(to_numpy(transform.helmholtz_synthesis_matrix), vector_coeffs, 2),

@@ -792,6 +792,10 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
         assert "jax" in type(G).__module__
         assert "jax" in type(cs_basis._surface_laplacian()).__module__
         assert "jax" in type(laplacian_values).__module__
+        assert to_numpy(values).dtype == np.dtype(np.float64)
+        assert to_numpy(G).dtype == np.dtype(np.float64)
+        assert to_numpy(cs_basis._surface_laplacian()).dtype == np.dtype(np.float64)
+        assert to_numpy(laplacian_values).dtype == np.dtype(np.float64)
         np.testing.assert_allclose(
             to_numpy(laplacian_values), to_numpy(cs_basis._surface_laplacian()) @ to_numpy(values)
         )
