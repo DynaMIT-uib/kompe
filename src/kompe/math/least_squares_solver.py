@@ -307,7 +307,7 @@ class LeastSquaresSolver:
     VALID_PRECONDITIONERS: Final[tuple[str, ...]] = ("jacobi", "pinv")
 
     def __init__(
-        self, solver: str = "lsmr", tolerance: float = 1e-13, preconditioner: str | None = None
+        self, solver: str = "lsmr", tolerance: float = 1e-15, preconditioner: str | None = None
     ):
         if solver not in self.VALID_SOLVERS:
             raise ValueError(f"Solver must be one of {self.VALID_SOLVERS}")
