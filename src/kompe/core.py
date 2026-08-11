@@ -16,12 +16,6 @@ def _owned_readonly_array(values, *, dtype=None):
     return array
 
 
-def _backend_array(value, *hints):
-    """Return ``value`` on the backend implied by ``hints``."""
-    xp = get_array_module(*hints, value)
-    return xp.asarray(value)
-
-
 def _backend_stack(values, axis=0):
     """Stack arrays on their active backend."""
     xp = get_array_module(*values)
@@ -102,8 +96,8 @@ def _helmholtz_component_operator(size, component):
     )
 
 
-class SphericalRepresentation(ABC):
-    """Abstract metadata interface for spherical representations.
+class SphericalRepresentation:
+    """Validated metadata base for spherical representations.
 
     A representation defines a finite set of coordinates or coefficients
     used to store spherical data. Bases add function reconstruction and
@@ -151,26 +145,6 @@ class SphericalRepresentation(ABC):
             and self.coefficient_space_signature == other.coefficient_space_signature
         )
 
-    @property
-    @abstractmethod
-    def kind(self):
-        """Short identifier for the representation."""
-
-    @property
-    @abstractmethod
-    def index_names(self):
-        """Names of indices used in the representation."""
-
-    @property
-    @abstractmethod
-    def index_length(self):
-        """Total number of stored scalar values."""
-
-    @property
-    @abstractmethod
-    def index_arrays(self):
-        """Arrays of indices used in the representation."""
-
     def validate_metadata(self) -> None:
         """Validate initialized representation metadata."""
         missing = [name for name in self.required_attributes if getattr(self, name, None) is None]
@@ -181,13 +155,7 @@ class SphericalRepresentation(ABC):
             )
 
 
-class SphericalBasis(SphericalRepresentation):
-    """Abstract metadata interface for spherical bases."""
-
-    required_attributes = SphericalRepresentation.required_attributes
-
-
-class ScalarBasis(SphericalBasis):
+class ScalarBasis(SphericalRepresentation, ABC):
     """Basis capable of synthesizing scalar values on a spherical grid.
 
     This deliberately does not imply a closed surface, a coefficient-space
@@ -209,6 +177,12 @@ class ScalarBasis(SphericalBasis):
         return as_linear_map(
             matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
         )
+
+
+# Older consumers imported this name when every concrete basis already
+# implemented scalar evaluation. Keep that spelling without maintaining an
+# otherwise empty layer in the class hierarchy.
+SphericalBasis = ScalarBasis
 
 
 class SurfaceDifferentialBasis(ScalarBasis):
@@ -481,42 +455,6 @@ class BasisView(SurfaceDifferentialBasis):
         while isinstance(basis, BasisView):
             basis = basis.parent_basis
         return basis
-
-    @property
-    def kind(self):
-        """Short identifier for the basis."""
-        return self._kind
-
-    @kind.setter
-    def kind(self, value):
-        self._kind = value
-
-    @property
-    def index_names(self):
-        """Names of indices used in the basis."""
-        return self._index_names
-
-    @index_names.setter
-    def index_names(self, value):
-        self._index_names = tuple(value)
-
-    @property
-    def index_length(self):
-        """Total number of basis functions."""
-        return self._index_length
-
-    @index_length.setter
-    def index_length(self, value):
-        self._index_length = value
-
-    @property
-    def index_arrays(self):
-        """Arrays of indices used in the basis."""
-        return self._index_arrays
-
-    @index_arrays.setter
-    def index_arrays(self, value):
-        self._index_arrays = value
 
     def _slice_coefficient_operator(self, values, operator_name):
         """Slice a parent coefficient-space operator to this view."""

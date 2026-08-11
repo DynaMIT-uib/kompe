@@ -71,12 +71,11 @@ as thin translations to canonical Kompe kernels and `RegionalCSOperators`.
 ```text
 SphericalRepresentation
 ├── SphericalGrid                               unstructured sample points
-└── SphericalBasis
-    └── ScalarBasis
-        ├── SECSBasis                  Green-function/current synthesis
-        └── SurfaceDifferentialBasis
-            ├── SHBasis                global spectral basis
-            └── GlobalCSBasis          global six-face nodal basis
+└── ScalarBasis                                 (`SphericalBasis` compatibility name)
+    ├── SECSBasis                      Green-function/current synthesis
+    └── SurfaceDifferentialBasis
+        ├── SHBasis                    global spectral basis
+        └── GlobalCSBasis              global six-face nodal basis
 
 StructuredSurfaceMesh
 ├── RegionalCSMesh                     bounded single-face mesh

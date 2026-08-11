@@ -318,14 +318,6 @@ class LeastSquaresSolver:
             raise ValueError(f"Preconditioner must be one of {self.VALID_PRECONDITIONERS}")
         self.preconditioner_type = preconditioner
 
-        self._solve_methods: dict[str, Callable] = {
-            "svd": self._solve_svd,
-            "normal_solve": self._solve_normal_solve,
-            "normal_pinv": self._solve_normal_pinv,
-            "lsmr": self._solve_lsmr,
-            "cgls": self._solve_cgls,
-        }
-
     def solve(
         self,
         problem: LeastSquaresProblem,
@@ -342,7 +334,16 @@ class LeastSquaresSolver:
             dtype = problem.A[0].dtype if problem.A else np.float64
             return get_array_module().zeros(problem.solution_shape + rhs_shape, dtype=dtype)
 
-        solver_func = self._solve_methods[self.solver]
+        if self.solver == "svd":
+            solver_func = self._solve_svd
+        elif self.solver == "normal_solve":
+            solver_func = self._solve_normal_solve
+        elif self.solver == "normal_pinv":
+            solver_func = self._solve_normal_pinv
+        elif self.solver == "lsmr":
+            solver_func = self._solve_lsmr
+        else:
+            solver_func = self._solve_cgls
         solution_block = solver_func(problem, rhs_block, num_rhs, preconditioner_map, **kwargs)
         return solution_block.reshape(problem.solution_shape + rhs_shape)
 
@@ -357,11 +358,13 @@ class LeastSquaresSolver:
             return None
         if selected_type not in self.VALID_PRECONDITIONERS:
             raise ValueError(f"Preconditioner must be one of {self.VALID_PRECONDITIONERS}")
-        if self.solver == "cgls":
-            return self._build_normal_eq_preconditioner(problem, selected_type)
-        if self.solver == "lsmr":
-            return self._build_lsmr_preconditioner(problem, selected_type)
-        return None
+        if self.solver not in {"cgls", "lsmr"}:
+            return None
+        if selected_type == "jacobi":
+            return self._build_jacobi_preconditioner(
+                problem, square_root=self.solver == "lsmr"
+            )
+        return self._build_pinv_preconditioner(problem, squared=self.solver == "cgls")
 
     def build_response_solver(
         self, problem: LeastSquaresProblem, preconditioner: PreconditionerInput = None
@@ -596,28 +599,6 @@ class LeastSquaresSolver:
                 f"Preconditioner shape {preconditioner_map.shape} != expected {expected_shape}"
             )
         return preconditioner_map
-
-    def _build_normal_eq_preconditioner(
-        self, problem: LeastSquaresProblem, preconditioner_type: str
-    ) -> LinearMap:
-        if preconditioner_type == "jacobi":
-            return self._build_jacobi_preconditioner(problem, square_root=False)
-        if preconditioner_type == "pinv":
-            return self._build_pinv_preconditioner(problem, squared=True)
-        raise NotImplementedError(
-            f"Preconditioner '{preconditioner_type}' not implemented for CGLS solver."
-        )
-
-    def _build_lsmr_preconditioner(
-        self, problem: LeastSquaresProblem, preconditioner_type: str
-    ) -> LinearMap:
-        if preconditioner_type == "jacobi":
-            return self._build_jacobi_preconditioner(problem, square_root=True)
-        if preconditioner_type == "pinv":
-            return self._build_pinv_preconditioner(problem, squared=False)
-        raise NotImplementedError(
-            f"Preconditioner '{preconditioner_type}' not implemented for LSMR solver."
-        )
 
     def _build_jacobi_preconditioner(
         self, problem: LeastSquaresProblem, *, square_root: bool

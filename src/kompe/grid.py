@@ -85,7 +85,12 @@ class SphericalGrid(SphericalRepresentation):
         self.phi = self.lon.copy()
 
         self.size = self.lon.size
-        self._hash = None
+        self.kind = "SPHERICAL_GRID"
+        self.index_names = ("point",)
+        self.index_length = self.size
+        point_indices = np.arange(self.size)
+        point_indices.setflags(write=False)
+        self.index_arrays = (point_indices,)
 
         if area_weights is not None:
             self.area_weights = np.array(area_weights, dtype=float, copy=True).reshape(-1)
@@ -100,26 +105,6 @@ class SphericalGrid(SphericalRepresentation):
             self.area_weights.setflags(write=False)
 
         self.validate_metadata()
-
-    @property
-    def kind(self):
-        """Short identifier for grid representations."""
-        return "SPHERICAL_GRID"
-
-    @property
-    def index_names(self):
-        """Names of grid-value indices."""
-        return ("point",)
-
-    @property
-    def index_length(self):
-        """Number of scalar grid values."""
-        return self.size
-
-    @property
-    def index_arrays(self):
-        """Point indices for scalar grid values."""
-        return (np.arange(self.size),)
 
     @property
     def signature(self):
@@ -146,8 +131,8 @@ class SphericalGrid(SphericalRepresentation):
             return (self.signature, None)
         return (self.signature, array_fingerprint(self.area_weights, dtype="<f8"))
 
-    @classmethod
-    def coordinate_hash(cls, theta, phi):
+    @staticmethod
+    def coordinate_hash(theta, phi):
         """Return a hash for flattened spherical coordinates."""
         return content_fingerprint(
             {
@@ -156,7 +141,7 @@ class SphericalGrid(SphericalRepresentation):
             }
         )
 
-    @property
+    @cached_property
     def hash(self):
         """Deterministic hash for the flattened grid coordinates.
 
@@ -164,9 +149,7 @@ class SphericalGrid(SphericalRepresentation):
         that differ only by insignificant double-precision noise compare
         as equal.
         """
-        if self._hash is None:
-            self._hash = self.coordinate_hash(self.theta, self.phi)
-        return self._hash
+        return self.coordinate_hash(self.theta, self.phi)
 
     def same_as(self, other):
         """Return whether another grid has the same coordinates."""

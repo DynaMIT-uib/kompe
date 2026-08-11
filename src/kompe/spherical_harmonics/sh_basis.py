@@ -161,25 +161,24 @@ class SHBasis(SurfaceDifferentialBasis):
 
         self.kind = "SH"
         self.index_names = ("n", "m")
-        self.index_length = len(self.cnm.index_pairs) + len(self.snm.index_pairs)
+        self.index_length = self.cnm.n.size + self.snm.n.size
         self.index_arrays = (self.n, self.m)
         self.validate_metadata()
 
     def _init_coefficient_indices(self):
         """Build cosine/sine coefficient indices and filters."""
-        all_indices = SHIndices(self.max_degree, self.max_order)
-        self.index_pairs = tuple(all_indices.index_pairs)
-
-        self.cnm = SHIndices(self.max_degree, self.max_order)
-        self.cnm.index_pairs = tuple(
+        self.index_pairs = tuple(
+            (n, m)
+            for n in range(self.max_degree + 1)
+            for m in range(min(self.max_order, n) + 1)
+        )
+        self._index_map = {pair: index for index, pair in enumerate(self.index_pairs)}
+        self.cnm = SHIndices(
             pair for pair in self.index_pairs if pair[0] >= self.min_degree
         )
-        self.cnm.make_arrays()
-        self.snm = SHIndices(self.max_degree, self.max_order)
-        self.snm.index_pairs = tuple(
+        self.snm = SHIndices(
             pair for pair in self.index_pairs if pair[0] >= self.min_degree and pair[1] >= 1
         )
-        self.snm.make_arrays()
 
         cnm_pairs = set(self.cnm.index_pairs)
         snm_pairs = set(self.snm.index_pairs)
@@ -218,42 +217,6 @@ class SHBasis(SurfaceDifferentialBasis):
             int(self.min_degree),
             bool(self.quasi_normalized),
         )
-
-    @property
-    def kind(self):
-        """Short identifier for the basis."""
-        return self._kind
-
-    @kind.setter
-    def kind(self, value):
-        self._kind = value
-
-    @property
-    def index_names(self):
-        """Names of indices used in the basis."""
-        return self._index_names
-
-    @index_names.setter
-    def index_names(self, value):
-        self._index_names = tuple(value)
-
-    @property
-    def index_length(self):
-        """Total number of basis functions."""
-        return self._index_length
-
-    @index_length.setter
-    def index_length(self, value):
-        self._index_length = value
-
-    @property
-    def index_arrays(self):
-        """Arrays of indices used in the basis."""
-        return self._index_arrays
-
-    @index_arrays.setter
-    def index_arrays(self, value):
-        self._index_arrays = value
 
     @staticmethod
     def _grid_cache_key(grid):
@@ -653,17 +616,16 @@ class SHBasis(SurfaceDifferentialBasis):
         sin_theta, cos_theta = np.sin(theta), np.cos(theta)
         P = np.empty((theta.size, len(self.index_pairs)), dtype=np.float64)
         P[:, 0] = 1.0
-        index_map = {pair: i for i, pair in enumerate(self.index_pairs)}
         for nm in range(1, len(self.index_pairs)):
             n, m = self.index_pairs[nm]
             if n == m:
-                P[:, nm] = sin_theta * P[:, index_map[(n - 1, m - 1)]]
+                P[:, nm] = sin_theta * P[:, self._index_map[(n - 1, m - 1)]]
             else:
                 if n > m:
-                    P[:, nm] = cos_theta * P[:, index_map[(n - 1, m)]]
+                    P[:, nm] = cos_theta * P[:, self._index_map[(n - 1, m)]]
                 if n > m + 1:
                     Knm = ((n - 1) ** 2 - m**2) / ((2 * n - 1) * (2 * n - 3))
-                    P[:, nm] -= Knm * P[:, index_map[(n - 2, m)]]
+                    P[:, nm] -= Knm * P[:, self._index_map[(n - 2, m)]]
         return P
 
     def legendre_derivative(self, theta, P):
@@ -672,18 +634,17 @@ class SHBasis(SurfaceDifferentialBasis):
         sin_theta, cos_theta = np.sin(theta), np.cos(theta)
         dP = np.empty_like(P)
         dP[:, 0] = 0.0
-        index_map = {pair: i for i, pair in enumerate(self.index_pairs)}
         for nm in range(1, len(self.index_pairs)):
             n, m = self.index_pairs[nm]
             if n == m:
-                prev_idx = index_map[(n - 1, m - 1)]
+                prev_idx = self._index_map[(n - 1, m - 1)]
                 dP[:, nm] = sin_theta * dP[:, prev_idx] + cos_theta * P[:, prev_idx]
             else:
                 if n > m:
-                    prev_idx = index_map[(n - 1, m)]
+                    prev_idx = self._index_map[(n - 1, m)]
                     dP[:, nm] = cos_theta * dP[:, prev_idx] - sin_theta * P[:, prev_idx]
                 if n > m + 1:
-                    prev2_idx = index_map[(n - 2, m)]
+                    prev2_idx = self._index_map[(n - 2, m)]
                     Knm = ((n - 1) ** 2 - m**2) / ((2 * n - 1) * (2 * n - 3))
                     dP[:, nm] -= Knm * dP[:, prev2_idx]
         return dP

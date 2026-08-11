@@ -171,9 +171,9 @@ class CSGridRemapper:
     _shared_remap_matrix_cache_size: ClassVar[int] = 8
     _operator_cache_size: ClassVar[int] = 16
 
-    def __init__(self, basis, operator_cache=None):
+    def __init__(self, basis):
         self.basis = basis
-        self.operator_cache = OrderedDict() if operator_cache is None else operator_cache
+        self.operator_cache = OrderedDict()
 
     @classmethod
     def clear_shared_cache(cls):
@@ -199,14 +199,9 @@ class CSGridRemapper:
     def _store_operator(self, key, operator):
         """Store one operator while enforcing the per-basis cache limit."""
         self.operator_cache[key] = operator
-        move_to_end = getattr(self.operator_cache, "move_to_end", None)
-        if callable(move_to_end):
-            move_to_end(key)
+        self.operator_cache.move_to_end(key)
         while len(self.operator_cache) > self._operator_cache_size:
-            try:
-                self.operator_cache.popitem(last=False)
-            except TypeError:
-                self.operator_cache.popitem()
+            self.operator_cache.popitem(last=False)
 
     @staticmethod
     def grid_theta_phi(grid):

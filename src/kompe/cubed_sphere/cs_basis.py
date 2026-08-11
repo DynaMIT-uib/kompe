@@ -1,8 +1,4 @@
-"""Cubed sphere basis module.
-
-This module contains the global cubed-sphere surface basis.
-basis.
-"""
+"""Global cubed-sphere surface basis."""
 
 from collections import OrderedDict
 
@@ -111,15 +107,11 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         ValueError
             If ``cells_per_face`` is not a positive even number.
         """
-        self._kind = "CS"
-        self._index_names = None
-        self._index_length = None
-        self._index_arrays = None
+        self.kind = "CS"
         self._derivative_bundle = None
         self._laplacian_cache = {}
         self._laplacian_sparse_cache = {}
-        self._remap_operator_cache = OrderedDict()
-        self._grid_remapper = CSGridRemapper(self, self._remap_operator_cache)
+        self._grid_remapper = CSGridRemapper(self)
         self._finite_differences = CSFiniteDifferences(self)
         self._surface_matrix_cache = OrderedDict()
         self._surface_operator_cache = OrderedDict()
@@ -167,38 +159,6 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             "remap_operators": self._grid_remapper.cache_info(),
             "shared_remap_matrices": self._grid_remapper.shared_cache_info(),
         }
-
-    @property
-    def kind(self):
-        """Short identifier for the cubed-sphere basis."""
-        return self._kind
-
-    @property
-    def index_names(self):
-        """Names of indices used in the basis."""
-        return self._index_names
-
-    @index_names.setter
-    def index_names(self, value):
-        self._index_names = tuple(value)
-
-    @property
-    def index_length(self):
-        """Total number of native CS coefficients."""
-        return self._index_length
-
-    @index_length.setter
-    def index_length(self, value):
-        self._index_length = value
-
-    @property
-    def index_arrays(self):
-        """Arrays of native CS grid coordinates."""
-        return self._index_arrays
-
-    @index_arrays.setter
-    def index_arrays(self, value):
-        self._index_arrays = value
 
     @property
     def coefficient_space_signature(self):
@@ -376,7 +336,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     def _get_derivative_bundle(self):
         """Build native-grid angular derivative operators."""
         if self._derivative_bundle is None:
-            dxi, deta = self._differentiation_matrix(
+            dxi, deta = self._finite_differences.difference_matrix(
                 self.cells_per_face,
                 coordinate="both",
                 Ns=1,
@@ -414,7 +374,13 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             matrix = (
                 sp.eye(self.index_length, format="csr")
                 if native_grid
-                else self._scalar_interpolation_matrix(grid)
+                else self.interpolate_scalar(
+                    np.eye(self.index_length),
+                    self.mesh.theta,
+                    self.mesh.phi,
+                    grid.theta,
+                    grid.phi,
+                )
             )
             if hasattr(matrix, "toarray"):
                 matrix = matrix.toarray()
@@ -424,20 +390,6 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             raise ValueError(f'Invalid derivative "{derivative}".')
 
         return xp.asarray(matrix)
-
-    def _grid_to_cs_indices(self, grid):
-        """Return CS face and cell-center indices."""
-        xi, eta, block = self.mesh.projection.geographic_to_cube(grid.phi, 90 - grid.theta)
-        h = self.mesh.coordinate(1) - self.mesh.coordinate(0)
-        i = xi / h + (self.cells_per_face - 1) / 2
-        j = eta / h + (self.cells_per_face - 1) / 2
-        return block.reshape(-1), i.reshape(-1), j.reshape(-1)
-
-    def _scalar_interpolation_matrix(self, grid):
-        """Return the built-in scalar interpolation as a matrix."""
-        return self.interpolate_scalar(
-            np.eye(self.index_length), self.mesh.theta, self.mesh.phi, grid.theta, grid.phi
-        )
 
     def _interpolate_tangential_operator(self, tangential_operator, grid):
         """Interpolate native-grid tangential operators to ``grid``."""
@@ -599,48 +551,6 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         gauge = sp.csr_matrix(normalized_mean.reshape(1, n))
         return sparse_constrained_least_squares_map(
             self._sparse_laplacian_matrix(r), gauge, input_shape=(n,), output_shape=(n,)
-        )
-
-    def _differentiation_matrix(self, N, coordinate="xi", Ns=1, Ni=4, order=1):
-        """Get scalar field differentiation matrix.
-
-        Calculate matrix that differentiates a scalar field, defined on
-        a ``(6, N, N)`` grid, with respect to ``xi`` or ``eta``.
-
-        Parameters
-        ----------
-        N : int
-            Number of grid cells in each dimension on each block.
-        coordinate : string, {'xi', 'eta', 'both'}
-            Which coordinate to differentiate with respect to.
-        Ns : int, optional
-            Differentiation stencil size.
-        Ni : int, optional
-            Number of points to use for interpolation for points in the
-            stencil that fall on non-integer grid points on neighboring
-            blocks.
-        order : int, optional
-            Order of differentiation. Make sure that ``Ns >= order``.
-            Currently only first order differentiation is supported.
-
-        Returns
-        -------
-        D : sparse matrix
-            Sparse ``(6*N*N, 6*N*N)`` matrix that calculates the
-            derivative of a scalar field with respect to ``xi`` or
-            ``eta`` as ``derivative = D.dot(f)``, where ``f`` is the
-            scalar field.
-
-        Raises
-        ------
-        ValueError
-            If ``coordinate`` is not ``'xi'``, ``'eta'``, or ``'both'``.
-            If ``Ns`` is less than ``order``.
-        NotImplementedError
-            If ``order`` is not 1.
-        """
-        return self._finite_differences.difference_matrix(
-            N, coordinate=coordinate, Ns=Ns, Ni=Ni, order=order
         )
 
     def interpolate_vector_components(

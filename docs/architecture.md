@@ -7,11 +7,12 @@ belong to those consumers or to explicitly named compatibility modules.
 ## Representation hierarchy
 
 - `SphericalRepresentation` owns validated coefficient or sample metadata.
-- `SphericalBasis` identifies reconstructive representations.
-- `ScalarBasis` adds scalar evaluation on a target grid.
+- `ScalarBasis` adds scalar evaluation on a target grid. `SphericalBasis` is
+  retained as a compatibility spelling for the same class, rather than as an
+  empty intermediate abstraction.
 - `SurfaceDifferentialBasis` adds closed-surface gradient, Helmholtz, Laplacian, and
   gauge-aware Poisson capabilities.
-- `SECSBasis` is a `SphericalBasis` with scalar-potential, surface-current,
+- `SECSBasis` is a `ScalarBasis` with scalar-potential, surface-current,
   and magnetic-field synthesis. Its required `current_type` gives one
   coefficient vector an explicit curl-free or divergence-free meaning. Its
   Green functions are distributional, so it does not pretend to have a square

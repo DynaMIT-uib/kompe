@@ -43,6 +43,7 @@ def test_public_sphere_package_is_canonical():
     assert GlobalCSBasis is ConcreteCSBasis
     assert SHBasis is ConcreteSHBasis
     assert SphericalBasis is CoreBasis
+    assert SphericalBasis is kompe.ScalarBasis
     assert isinstance(kompe.__version__, str)
 
 
