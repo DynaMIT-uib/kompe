@@ -3,13 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from kompe.constants import EARTH_RADIUS_M, MU0
-from kompe.core import (
-    BasisView,
-    ScalarBasis,
-    SphericalBasis,
-    SphericalRepresentation,
-    SurfaceDifferentialBasis,
-)
+from kompe.core import ScalarBasis, SurfaceDifferentialBasis
 from kompe.cubed_sphere import (
     GlobalCSBasis,
     GlobalCSMesh,
@@ -34,7 +28,6 @@ except PackageNotFoundError:  # pragma: no cover - only an uninstalled source tr
 __all__ = [
     "EARTH_RADIUS_M",
     "MU0",
-    "BasisView",
     "GlobalCSBasis",
     "GlobalCSMesh",
     "GlobalCSProjection",
@@ -46,9 +39,7 @@ __all__ = [
     "SHBasis",
     "ScalarBasis",
     "SolidHarmonicOperators",
-    "SphericalBasis",
     "SphericalGrid",
-    "SphericalRepresentation",
     "SphericalTransform",
     "StructuredSurfaceMesh",
     "SurfaceDifferentialBasis",

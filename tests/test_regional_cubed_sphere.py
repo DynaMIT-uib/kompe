@@ -12,8 +12,8 @@ from kompe import (
     RegionalCSMeshSpec,
     RegionalCSOperators,
     RegionalCSProjection,
+    ScalarBasis,
     SHBasis,
-    SphericalRepresentation,
 )
 from kompe.cubed_sphere import REGIONAL_CS_MESH_SCHEMA, REGIONAL_CS_MESH_SCHEMA_VERSION
 from kompe.cubed_sphere.plot import RegionalCSPlotter
@@ -122,7 +122,7 @@ def test_regional_grid_has_canonical_units_metadata_and_roundtrip():
     projection = RegionalCSProjection((20.0, 70.0), [0.3, 0.7])
     grid = RegionalCSMesh(projection, 1800.0, 1400.0, shape=(18, 14), radius=6371.2)
 
-    assert not isinstance(grid, SphericalRepresentation)
+    assert not isinstance(grid, ScalarBasis)
     assert grid.signature[0] == "REGIONAL_CS_MESH"
     np.testing.assert_allclose(grid.cell_centers.theta, (90.0 - grid.lat).reshape(-1))
     np.testing.assert_allclose(grid.cell_centers.phi, grid.lon.reshape(-1))

@@ -4,11 +4,10 @@ from functools import cached_property
 
 import numpy as np
 
-from kompe.core import SphericalRepresentation
 from kompe.math import array_fingerprint, content_fingerprint
 
 
-class SphericalGrid(SphericalRepresentation):
+class SphericalGrid:
     """A collection of spherical sample points without implied topology.
 
     ``SphericalGrid`` is not a mesh: it does not require cells, neighbours, or
@@ -106,15 +105,22 @@ class SphericalGrid(SphericalRepresentation):
 
         self.validate_metadata()
 
+    def validate_metadata(self):
+        """Validate the sample layout used by stored gridded fields."""
+        missing = [
+            name
+            for name in ("kind", "index_names", "index_length", "index_arrays")
+            if getattr(self, name, None) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"SphericalGrid is missing sample metadata: {', '.join(missing)}."
+            )
+
     @property
     def signature(self):
         """Return a stable signature for this grid."""
         return (type(self).__module__, type(self).__qualname__, self.hash)
-
-    @property
-    def coefficient_space_signature(self):
-        """Return the grid-value compatibility signature."""
-        return self.signature
 
     @cached_property
     def exact_coordinate_signature(self):

@@ -1,4 +1,4 @@
-"""Spherical representation and basis interface utilities."""
+"""Spherical basis interface utilities."""
 
 from abc import ABC, abstractmethod
 
@@ -96,19 +96,19 @@ def _helmholtz_component_operator(size, component):
     )
 
 
-class SphericalRepresentation:
-    """Validated metadata base for spherical representations.
+class ScalarBasis(ABC):
+    """Basis capable of synthesizing scalar values on a spherical grid.
 
-    A representation defines a finite set of coordinates or coefficients
-    used to store spherical data. Bases add function reconstruction and
-    operator capabilities on top of this shared metadata.
+    This deliberately does not imply a closed surface, a coefficient-space
+    Laplacian, or Helmholtz gauge semantics. Green-function bases such as
+    SECS can implement scalar synthesis without making those stronger claims.
     """
 
     required_attributes = ("kind", "index_names", "index_length", "index_arrays")
 
     @property
     def signature(self):
-        """Return a stable cache signature for this representation."""
+        """Return a stable cache signature for this basis."""
         parts = [type(self).__module__, type(self).__qualname__, self.kind]
         for name in (
             "max_degree",
@@ -141,27 +141,18 @@ class SphericalRepresentation:
     def coefficients_are_compatible_with(self, other):
         """Return whether coefficient vectors share operators."""
         return (
-            isinstance(other, SphericalRepresentation)
+            isinstance(other, ScalarBasis)
             and self.coefficient_space_signature == other.coefficient_space_signature
         )
 
     def validate_metadata(self) -> None:
-        """Validate initialized representation metadata."""
+        """Validate initialized basis metadata."""
         missing = [name for name in self.required_attributes if getattr(self, name, None) is None]
         if missing:
             joined = ", ".join(missing)
             raise ValueError(
-                f"{type(self).__name__} is missing representation metadata: {joined}."
+                f"{type(self).__name__} is missing basis metadata: {joined}."
             )
-
-
-class ScalarBasis(SphericalRepresentation, ABC):
-    """Basis capable of synthesizing scalar values on a spherical grid.
-
-    This deliberately does not imply a closed surface, a coefficient-space
-    Laplacian, or Helmholtz gauge semantics. Green-function bases such as
-    SECS can implement scalar synthesis without making those stronger claims.
-    """
 
     @abstractmethod
     def scalar_evaluation_matrix(self, grid, derivative=None):
@@ -177,12 +168,6 @@ class ScalarBasis(SphericalRepresentation, ABC):
         return as_linear_map(
             matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
         )
-
-
-# Older consumers imported this name when every concrete basis already
-# implemented scalar evaluation. Keep that spelling without maintaining an
-# otherwise empty layer in the class hierarchy.
-SphericalBasis = ScalarBasis
 
 
 class SurfaceDifferentialBasis(ScalarBasis):

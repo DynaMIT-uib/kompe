@@ -7,9 +7,10 @@ public interfaces with an accompanying migration note.
 
 ## Unreleased
 
-- Make `SphericalBasis` a compatibility name for `ScalarBasis` instead of an
-  empty extra hierarchy layer; existing imports and `isinstance` checks keep
-  working.
+- Remove the empty `SphericalBasis` and `SphericalRepresentation` aliases;
+  `ScalarBasis` is the direct coefficient-basis interface.
+- Remove coefficient-space aliases from `SphericalGrid`; compare point grids
+  directly with `same_as()`.
 - Use Python's standard cached-property mechanism for lazy spherical-transform
   matrices, operators, and least-squares problems while retaining `clear_cache()`.
 - Keep sample-analysis branches beside the workflow they control, and dispatch

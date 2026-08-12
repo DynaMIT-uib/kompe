@@ -6,15 +6,14 @@ from scipy.sparse import csr_matrix
 
 import kompe
 from kompe import (
-    BasisView,
     GlobalCSBasis,
+    ScalarBasis,
     SHBasis,
     SolidHarmonicOperators,
-    SphericalBasis,
     SphericalGrid,
-    SphericalRepresentation,
     SurfaceDifferentialBasis,
 )
+from kompe.core import BasisView
 from kompe.math import (
     JAX_AVAILABLE,
     LinearMap,
@@ -36,14 +35,16 @@ from kompe.spherical_transform import (
 
 def test_public_sphere_package_is_canonical():
     """Spherical basis types are available from the public package."""
-    from kompe.core import SphericalBasis as CoreBasis
     from kompe.cubed_sphere.cs_basis import GlobalCSBasis as ConcreteCSBasis
     from kompe.spherical_harmonics.sh_basis import SHBasis as ConcreteSHBasis
 
     assert GlobalCSBasis is ConcreteCSBasis
     assert SHBasis is ConcreteSHBasis
-    assert SphericalBasis is CoreBasis
-    assert SphericalBasis is kompe.ScalarBasis
+    assert ScalarBasis is kompe.ScalarBasis
+    assert "BasisView" not in kompe.__all__
+    assert not hasattr(kompe, "BasisView")
+    assert not hasattr(kompe, "SphericalBasis")
+    assert not hasattr(kompe, "SphericalRepresentation")
     assert isinstance(kompe.__version__, str)
 
 
@@ -52,9 +53,9 @@ def test_concrete_bases_implement_basis_interface():
     sh_basis = SHBasis(3, 3)
     cs_basis = GlobalCSBasis(4)
 
-    assert isinstance(sh_basis, SphericalBasis)
+    assert isinstance(sh_basis, ScalarBasis)
     assert isinstance(sh_basis, SurfaceDifferentialBasis)
-    assert isinstance(cs_basis, SphericalBasis)
+    assert isinstance(cs_basis, ScalarBasis)
     assert isinstance(cs_basis, SurfaceDifferentialBasis)
     assert is_noop_linear_map(cs_basis.scalar_evaluation_operator(cs_basis.native_grid))
     assert not is_noop_linear_map(sh_basis.scalar_evaluation_operator(cs_basis.native_grid))
@@ -65,13 +66,16 @@ def test_concrete_bases_implement_basis_interface():
     cs_basis.validate_metadata()
 
 
-def test_grid_and_bases_are_spherical_representations():
-    """Grids and bases share the spherical representation root."""
+def test_grids_are_separate_from_coefficient_bases():
+    """A sample grid does not pretend to own coefficient-space metadata."""
     grid = SphericalGrid(theta=np.array([90.0]), phi=np.array([0.0]))
 
-    assert isinstance(grid, SphericalRepresentation)
-    assert isinstance(SHBasis(1, 1), SphericalRepresentation)
-    assert not isinstance(grid, SphericalBasis)
+    assert not isinstance(grid, ScalarBasis)
+    assert isinstance(SHBasis(1, 1), ScalarBasis)
+    assert grid.index_names == ("point",)
+    assert grid.index_length == grid.size
+    assert not hasattr(grid, "coefficient_space_signature")
+    assert not hasattr(grid, "coefficients_are_compatible_with")
 
 
 def test_solid_harmonics_are_separate_from_surface_bases():
@@ -133,9 +137,7 @@ def test_grid_hash_matches_equivalent_coordinates():
     assert first.hash == second.hash
     assert first.same_as(second)
     assert first == second
-    assert first.coefficients_are_compatible_with(second)
     assert not first.same_as(different)
-    assert not first.coefficients_are_compatible_with(different)
 
 
 def test_grid_owns_immutable_unambiguous_coordinates():
@@ -977,7 +979,7 @@ def test_csbasis_reuses_native_operator_cache():
 def test_incomplete_basis_subclass_is_rejected():
     """Subclasses must declare the required metadata fields."""
 
-    class IncompleteBasis(SphericalBasis):
+    class IncompleteBasis(ScalarBasis):
         kind = "incomplete"
 
     with pytest.raises(TypeError):

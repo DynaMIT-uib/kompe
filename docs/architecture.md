@@ -4,12 +4,10 @@ The dependency rule is strict: `kompe` may depend on general numerical
 libraries, but never on PynaMIT, Lompe, or secsy. Consumer-specific wrappers
 belong to those consumers or to explicitly named compatibility modules.
 
-## Representation hierarchy
+## Basis, grid, and mesh roles
 
-- `SphericalRepresentation` owns validated coefficient or sample metadata.
-- `ScalarBasis` adds scalar evaluation on a target grid. `SphericalBasis` is
-  retained as a compatibility spelling for the same class, rather than as an
-  empty intermediate abstraction.
+- `ScalarBasis` owns validated coefficient metadata and scalar evaluation on
+  a target grid without an empty intermediate hierarchy layer.
 - `SurfaceDifferentialBasis` adds closed-surface gradient, Helmholtz, Laplacian, and
   gauge-aware Poisson capabilities.
 - `SECSBasis` is a `ScalarBasis` with scalar-potential, surface-current,
@@ -17,8 +15,9 @@ belong to those consumers or to explicitly named compatibility modules.
   coefficient vector an explicit curl-free or divergence-free meaning. Its
   Green functions are distributional, so it does not pretend to have a square
   coefficient-space Laplacian.
-- `SphericalGrid` stores arbitrary evaluation points and does not imply
-  cells or topology.
+- `SphericalGrid` stores arbitrary evaluation points and the simple sample
+  layout needed for gridded field storage. It does not expose coefficient-space
+  compatibility, inherit basis behavior, or imply cells or topology.
 - `StructuredSurfaceMesh` describes cell-centred structured surface geometry.
   `RegionalCSMesh` and `GlobalCSMesh` implement it.
 - `RegionalCSMesh` is bounded mesh geometry. Its composed

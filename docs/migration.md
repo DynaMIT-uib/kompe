@@ -11,20 +11,17 @@ import kompe
 basis = kompe.GlobalCSBasis(cells_per_face=16)
 ```
 
-The sole retained PynaMIT class spelling is
-`pynamit.BasisEvaluator`, a thin subclass of `kompe.SphericalTransform`. There is no
-general `pynamit.math` facade and no general spherical re-export surface.
+PynaMIT has no parallel spherical facade: use `kompe.SphericalTransform`
+directly. There is no general `pynamit.math` facade or spherical re-export surface.
 `KOMPE_USE_JAX` and `KOMPE_LEAST_SQUARES_SOLVER` are the only numerical
 environment settings.
 
 Historical `SphericalTransform.project_scalar` and `project_helmholtz` calls
 become `analyze_scalar_samples` and `analyze_helmholtz_samples`; the
 `projection_basis` argument becomes `analysis_basis`. This keeps coordinate
-projections distinct from coefficient analysis. The evaluator properties `G`
-and `G_helmholtz` remain on that PynaMIT subclass for collaborator
-compatibility. They return Kompe's `scalar_synthesis_matrix` and
-`helmholtz_synthesis_matrix`, respectively. No other short matrix aliases are
-part of either public API.
+projections distinct from coefficient analysis. Use `scalar_synthesis_matrix`
+and `helmholtz_synthesis_matrix` for the former short matrix spellings `G` and
+`G_helmholtz`.
 
 ## Lompe
 
@@ -69,13 +66,13 @@ as thin translations to canonical Kompe kernels and `RegionalCSOperators`.
 ## Representation choice
 
 ```text
-SphericalRepresentation
-├── SphericalGrid                               unstructured sample points
-└── ScalarBasis                                 (`SphericalBasis` compatibility name)
-    ├── SECSBasis                      Green-function/current synthesis
-    └── SurfaceDifferentialBasis
-        ├── SHBasis                    global spectral basis
-        └── GlobalCSBasis              global six-face nodal basis
+SphericalGrid                           unstructured sample points
+
+ScalarBasis
+├── SECSBasis                           Green-function/current synthesis
+└── SurfaceDifferentialBasis
+    ├── SHBasis                         global spectral basis
+    └── GlobalCSBasis                   global six-face nodal basis
 
 StructuredSurfaceMesh
 ├── RegionalCSMesh                     bounded single-face mesh
@@ -88,7 +85,7 @@ GlobalCSBasis.mesh ──► GlobalCSMesh
 functions have distributional Laplacians at their poles, so pretending it has
 the same square coefficient-space Laplacian and mean-free Poisson semantics as
 SH or global CS would make the interface less honest. It is nevertheless a
-first-class representation with signatures, scalar synthesis, canonical
+first-class basis with signatures, scalar synthesis, canonical
 surface-current operators, two-component Helmholtz synthesis, and magnetic
 field synthesis. Construction requires `current_type="curl_free"` or
 `current_type="divergence_free"`; this prevents a scalar coefficient vector

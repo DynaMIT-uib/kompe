@@ -40,8 +40,7 @@ libraries are consumers or compatibility facades.
          PynaMIT    Lompe    secsy compatibility API
 ```
 
-PynaMIT imports Kompe directly and retains only its historical
-`BasisEvaluator` spelling. The legacy secsy function names and class spellings
+PynaMIT imports Kompe directly. Legacy secsy function names and class spellings
 remain in secsy rather than becoming aliases in Kompe. Lompe consumes the
 canonical regional mesh directly and translates historical serialized grids
 at its own package boundary.
