@@ -113,9 +113,7 @@ class SphericalGrid:
             if getattr(self, name, None) is None
         ]
         if missing:
-            raise ValueError(
-                f"SphericalGrid is missing sample metadata: {', '.join(missing)}."
-            )
+            raise ValueError(f"SphericalGrid is missing sample metadata: {', '.join(missing)}.")
 
     @property
     def signature(self):

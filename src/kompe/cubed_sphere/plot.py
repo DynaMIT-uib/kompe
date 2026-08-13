@@ -91,9 +91,7 @@ class RegionalCSPlotter:
             elif gridtype == "km":
                 km_res = kwargs.pop(
                     "km_res",
-                    np.round(
-                        self.grid.radius * (self.grid.xi_max + self.grid.eta_max) // 5, -2
-                    ),
+                    np.round(self.grid.radius * (self.grid.xi_max + self.grid.eta_max) // 5, -2),
                 )
                 self.add_km_grid(km_res, **kwargs)
             else:

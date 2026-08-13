@@ -168,14 +168,10 @@ class SHBasis(SurfaceDifferentialBasis):
     def _init_coefficient_indices(self):
         """Build cosine/sine coefficient indices and filters."""
         self.index_pairs = tuple(
-            (n, m)
-            for n in range(self.max_degree + 1)
-            for m in range(min(self.max_order, n) + 1)
+            (n, m) for n in range(self.max_degree + 1) for m in range(min(self.max_order, n) + 1)
         )
         self._index_map = {pair: index for index, pair in enumerate(self.index_pairs)}
-        self.cnm = SHIndices(
-            pair for pair in self.index_pairs if pair[0] >= self.min_degree
-        )
+        self.cnm = SHIndices(pair for pair in self.index_pairs if pair[0] >= self.min_degree)
         self.snm = SHIndices(
             pair for pair in self.index_pairs if pair[0] >= self.min_degree and pair[1] >= 1
         )

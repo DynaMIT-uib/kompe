@@ -361,9 +361,7 @@ class LeastSquaresSolver:
         if self.solver not in {"cgls", "lsmr"}:
             return None
         if selected_type == "jacobi":
-            return self._build_jacobi_preconditioner(
-                problem, square_root=self.solver == "lsmr"
-            )
+            return self._build_jacobi_preconditioner(problem, square_root=self.solver == "lsmr")
         return self._build_pinv_preconditioner(problem, squared=self.solver == "cgls")
 
     def build_response_solver(

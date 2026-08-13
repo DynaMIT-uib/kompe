@@ -150,9 +150,7 @@ class ScalarBasis(ABC):
         missing = [name for name in self.required_attributes if getattr(self, name, None) is None]
         if missing:
             joined = ", ".join(missing)
-            raise ValueError(
-                f"{type(self).__name__} is missing basis metadata: {joined}."
-            )
+            raise ValueError(f"{type(self).__name__} is missing basis metadata: {joined}.")
 
     @abstractmethod
     def scalar_evaluation_matrix(self, grid, derivative=None):

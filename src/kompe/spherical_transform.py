@@ -540,9 +540,7 @@ class SphericalTransform:
         if self.reg_lambda is None:
             return None
         if not hasattr(self.basis, "n"):
-            raise NotImplementedError(
-                "Degree-weighted Helmholtz regularization requires basis.n."
-            )
+            raise NotImplementedError("Degree-weighted Helmholtz regularization requires basis.n.")
         weights = np.broadcast_to(
             _helmholtz_surface_smoothness_weights(self.basis.n),
             (2, self.basis.index_length),
