@@ -301,7 +301,7 @@ def test_spherical_transform_analyzes_tangential_grid_values():
 
     np.testing.assert_allclose(actual[0], expected.reshape(-1), atol=1e-10)
     np.testing.assert_allclose(direct, expected, atol=1e-10)
-    assert not hasattr(transform, "_helmholtz_analysis_operator")
+    assert "helmholtz_analysis_operator" not in transform.__dict__
 
 
 def test_spherical_transform_batches_direct_analysis():
@@ -340,8 +340,8 @@ def test_spherical_transform_least_squares_use_operator_properties():
 
     assert scalar_problem.A[0] is transform.scalar_synthesis_operator
     assert helmholtz_problem.A[0] is transform.helmholtz_synthesis_operator
-    assert not hasattr(transform, "_scalar_synthesis_matrix")
-    assert not hasattr(transform, "_helmholtz_synthesis_matrix")
+    assert "scalar_synthesis_matrix" not in transform.__dict__
+    assert "helmholtz_synthesis_matrix" not in transform.__dict__
 
 
 def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch):
@@ -377,8 +377,8 @@ def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch)
         transform.synthesize_scalar(scalar_coeffs, derivative="phi"), phi @ scalar_coeffs
     )
     np.testing.assert_allclose(transform.synthesize_helmholtz(vector_coeffs), expected_helmholtz)
-    assert not hasattr(transform, "_scalar_synthesis_matrix")
-    assert not hasattr(transform, "_helmholtz_synthesis_matrix")
+    assert "scalar_synthesis_matrix" not in transform.__dict__
+    assert "helmholtz_synthesis_matrix" not in transform.__dict__
 
 
 def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
@@ -754,7 +754,7 @@ def test_full_mean_sh_helmholtz_analysis_retains_rank_deficient_fallback():
     grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
     transform = SphericalTransform(basis, grid)
 
-    assert transform._optimized_helmholtz_analysis_operator() is None
+    assert transform._optimized_helmholtz_analysis_operator is None
     assert transform.helmholtz_analysis_operator.shape == (2 * basis.index_length, 2 * grid.size)
 
 
@@ -777,7 +777,7 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
     expected = basis.project_helmholtz_mean_free(expected)
 
     assert operator._cached_dense(np) is None
-    assert transform._helmholtz_least_squares_problem is None
+    assert "helmholtz_least_squares_problem" not in transform.__dict__
     np.testing.assert_allclose(actual, expected, rtol=2e-11, atol=2e-11)
     np.testing.assert_allclose(api_actual, actual)
     np.testing.assert_allclose(basis.scalar_mean(actual), np.zeros(2), atol=2e-14)

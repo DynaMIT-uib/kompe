@@ -1,4 +1,4 @@
-"""Spherical representation and basis interface utilities."""
+"""Spherical basis interface utilities."""
 
 from abc import ABC, abstractmethod
 
@@ -14,12 +14,6 @@ def _owned_readonly_array(values, *, dtype=None):
     array = np.array(values, dtype=dtype, copy=True)
     array.setflags(write=False)
     return array
-
-
-def _backend_array(value, *hints):
-    """Return ``value`` on the backend implied by ``hints``."""
-    xp = get_array_module(*hints, value)
-    return xp.asarray(value)
 
 
 def _backend_stack(values, axis=0):
@@ -102,19 +96,19 @@ def _helmholtz_component_operator(size, component):
     )
 
 
-class SphericalRepresentation(ABC):
-    """Abstract metadata interface for spherical representations.
+class ScalarBasis(ABC):
+    """Basis capable of synthesizing scalar values on a spherical grid.
 
-    A representation defines a finite set of coordinates or coefficients
-    used to store spherical data. Bases add function reconstruction and
-    operator capabilities on top of this shared metadata.
+    This deliberately does not imply a closed surface, a coefficient-space
+    Laplacian, or Helmholtz gauge semantics. Green-function bases such as
+    SECS can implement scalar synthesis without making those stronger claims.
     """
 
     required_attributes = ("kind", "index_names", "index_length", "index_arrays")
 
     @property
     def signature(self):
-        """Return a stable cache signature for this representation."""
+        """Return a stable cache signature for this basis."""
         parts = [type(self).__module__, type(self).__qualname__, self.kind]
         for name in (
             "max_degree",
@@ -147,53 +141,16 @@ class SphericalRepresentation(ABC):
     def coefficients_are_compatible_with(self, other):
         """Return whether coefficient vectors share operators."""
         return (
-            isinstance(other, SphericalRepresentation)
+            isinstance(other, ScalarBasis)
             and self.coefficient_space_signature == other.coefficient_space_signature
         )
 
-    @property
-    @abstractmethod
-    def kind(self):
-        """Short identifier for the representation."""
-
-    @property
-    @abstractmethod
-    def index_names(self):
-        """Names of indices used in the representation."""
-
-    @property
-    @abstractmethod
-    def index_length(self):
-        """Total number of stored scalar values."""
-
-    @property
-    @abstractmethod
-    def index_arrays(self):
-        """Arrays of indices used in the representation."""
-
     def validate_metadata(self) -> None:
-        """Validate initialized representation metadata."""
+        """Validate initialized basis metadata."""
         missing = [name for name in self.required_attributes if getattr(self, name, None) is None]
         if missing:
             joined = ", ".join(missing)
-            raise ValueError(
-                f"{type(self).__name__} is missing representation metadata: {joined}."
-            )
-
-
-class SphericalBasis(SphericalRepresentation):
-    """Abstract metadata interface for spherical bases."""
-
-    required_attributes = SphericalRepresentation.required_attributes
-
-
-class ScalarBasis(SphericalBasis):
-    """Basis capable of synthesizing scalar values on a spherical grid.
-
-    This deliberately does not imply a closed surface, a coefficient-space
-    Laplacian, or Helmholtz gauge semantics. Green-function bases such as
-    SECS can implement scalar synthesis without making those stronger claims.
-    """
+            raise ValueError(f"{type(self).__name__} is missing basis metadata: {joined}.")
 
     @abstractmethod
     def scalar_evaluation_matrix(self, grid, derivative=None):
@@ -481,42 +438,6 @@ class BasisView(SurfaceDifferentialBasis):
         while isinstance(basis, BasisView):
             basis = basis.parent_basis
         return basis
-
-    @property
-    def kind(self):
-        """Short identifier for the basis."""
-        return self._kind
-
-    @kind.setter
-    def kind(self, value):
-        self._kind = value
-
-    @property
-    def index_names(self):
-        """Names of indices used in the basis."""
-        return self._index_names
-
-    @index_names.setter
-    def index_names(self, value):
-        self._index_names = tuple(value)
-
-    @property
-    def index_length(self):
-        """Total number of basis functions."""
-        return self._index_length
-
-    @index_length.setter
-    def index_length(self, value):
-        self._index_length = value
-
-    @property
-    def index_arrays(self):
-        """Arrays of indices used in the basis."""
-        return self._index_arrays
-
-    @index_arrays.setter
-    def index_arrays(self, value):
-        self._index_arrays = value
 
     def _slice_coefficient_operator(self, values, operator_name):
         """Slice a parent coefficient-space operator to this view."""

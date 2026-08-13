@@ -1,5 +1,7 @@
 """Tests for regional cubed-sphere geometry and differential operators."""
 
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 from scipy import sparse
@@ -10,14 +12,92 @@ from kompe import (
     RegionalCSMeshSpec,
     RegionalCSOperators,
     RegionalCSProjection,
+    ScalarBasis,
     SHBasis,
-    SphericalRepresentation,
 )
 from kompe.cubed_sphere import REGIONAL_CS_MESH_SCHEMA, REGIONAL_CS_MESH_SCHEMA_VERSION
+from kompe.cubed_sphere.plot import RegionalCSPlotter
 
 
 def _longitude_error(actual, expected):
     return (np.asarray(actual) - np.asarray(expected) + 180.0) % 360.0 - 180.0
+
+
+def test_regional_plotter_uses_grid_resolution_options(monkeypatch):
+    axis = Mock()
+    grid = Mock(xi_min=-1.0, xi_max=1.0, eta_min=-1.0, eta_max=1.0, radius=6371.2)
+    spherical_grid = {}
+    km_grid = {}
+
+    monkeypatch.setattr(
+        RegionalCSPlotter,
+        "add_spherical_grid",
+        lambda self, **kwargs: spherical_grid.update(kwargs),
+    )
+    monkeypatch.setattr(
+        RegionalCSPlotter,
+        "add_km_grid",
+        lambda self, resolution, **kwargs: km_grid.update(resolution=resolution, **kwargs),
+    )
+
+    RegionalCSPlotter(axis, grid, gridtype="geo", lat_res=20, lon_res=45)
+    RegionalCSPlotter(axis, grid, gridtype="km", km_res=250)
+
+    np.testing.assert_array_equal(spherical_grid["lat_levels"], np.arange(-70, 90, 20))
+    np.testing.assert_array_equal(spherical_grid["lon_levels"], np.arange(0, 360, 45))
+    assert km_grid["resolution"] == 250
+
+
+def test_regional_plotter_rejects_unimplemented_grid_options():
+    axis = Mock()
+    grid = Mock(xi_min=-1.0, xi_max=1.0, eta_min=-1.0, eta_max=1.0)
+
+    with pytest.raises(NotImplementedError, match="Local-time"):
+        RegionalCSPlotter(axis, grid, lt=True)
+    with pytest.raises(ValueError, match="gridtype"):
+        RegionalCSPlotter(axis, grid, gridtype="apex")
+
+
+def test_regional_plotter_text_can_override_plot_limits(capsys):
+    plotter = object.__new__(RegionalCSPlotter)
+    plotter.ax = Mock()
+    plotter.grid = Mock()
+    plotter.grid.projection.geographic_to_cube.return_value = (0.25, -0.5)
+    plotter.grid.contains.return_value = False
+    plotted_text = object()
+    plotter.ax.text.return_value = plotted_text
+
+    assert plotter.text(10.0, 20.0, "outside") is None
+    assert "outside plot limit" in capsys.readouterr().out
+    assert plotter.text(10.0, 20.0, "outside", ignore_limits=True) is plotted_text
+    plotter.ax.text.assert_called_once_with(0.25, -0.5, "outside")
+
+
+def test_km_grid_samples_each_axis_from_its_own_limits():
+    differential_calls = []
+
+    def differential_elements(xi, eta, *steps, **kwargs):
+        differential_calls.append((xi, eta))
+        return np.ones_like(xi), np.ones_like(eta)
+
+    plotter = object.__new__(RegionalCSPlotter)
+    plotter.ax = Mock()
+    plotter.grid = Mock(
+        xi_min=-0.4,
+        xi_max=0.4,
+        eta_min=-0.1,
+        eta_max=0.1,
+        length=1000.0,
+        width=400.0,
+        radius=6371.2,
+    )
+    plotter.grid.projection.differential_elements.side_effect = differential_elements
+
+    plotter.add_km_grid(100.0)
+
+    xi_for_eta_gridlines = differential_calls[2][0]
+    assert np.min(xi_for_eta_gridlines) == pytest.approx(2 * plotter.grid.xi_min)
+    assert np.max(xi_for_eta_gridlines) > 1.9 * plotter.grid.xi_max
 
 
 @pytest.mark.parametrize("orientation", [0.0, 37.0, [0.6, 0.8]])
@@ -42,7 +122,7 @@ def test_regional_grid_has_canonical_units_metadata_and_roundtrip():
     projection = RegionalCSProjection((20.0, 70.0), [0.3, 0.7])
     grid = RegionalCSMesh(projection, 1800.0, 1400.0, shape=(18, 14), radius=6371.2)
 
-    assert not isinstance(grid, SphericalRepresentation)
+    assert not isinstance(grid, ScalarBasis)
     assert grid.signature[0] == "REGIONAL_CS_MESH"
     np.testing.assert_allclose(grid.cell_centers.theta, (90.0 - grid.lat).reshape(-1))
     np.testing.assert_allclose(grid.cell_centers.phi, grid.lon.reshape(-1))

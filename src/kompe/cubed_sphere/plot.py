@@ -36,14 +36,12 @@ class RegionalCSPlotter:
             gridtype : str or None
                 Determines which grid lines that are added to the csplot
                 'geo' adds a geographic lon,lat grid
-                'dipole' adds a magnetic dipole lon,lat grid
-                'apex' adds a magnetic apex lon lat grid
                 'km' adds gridlines with equal physical distance in km
                 'cs' adds a cubed sphere xi,eta grid
                 Default is None (no grid)
             lt : bool
-                If lt is True, lon is replaced with local time.
-                Default is False.
+                Local-time grid labels are not implemented. Passing True raises
+                ``NotImplementedError``.
             lat_levels : array_like
                 Where to plot latitudinal grid parallels in spherical grids. If not provided, default values are used.
             lat_res : int
@@ -71,64 +69,19 @@ class RegionalCSPlotter:
         self.ax.set_ylim((self.grid.eta_min, self.grid.eta_max))
 
         # Select gridtype
-        if "gridtype" in kwargs:
-            gridtype = kwargs.pop("gridtype")
-            if gridtype not in ["geo", "km", "cs"]:
-                print(
-                    "gridtype must be 'geo', 'km' or 'cs' to be added. 'dipole' and 'apex' will soon be available."
-                )
-                gridtype = None
-        else:
-            gridtype = None
+        gridtype = kwargs.pop("gridtype", None)
+        if gridtype not in {None, "geo", "km", "cs"}:
+            raise ValueError("gridtype must be 'geo', 'km', 'cs', or None.")
 
         # Longitude or local time
-        if "lt" in kwargs:
-            lt = bool(kwargs.pop("lt"))
-            print("'lt' not implemented yet.")
-        else:
-            lt = False
+        lt = bool(kwargs.pop("lt", False))
+        if lt:
+            raise NotImplementedError("Local-time grid labels are not implemented.")
 
         # Add grid
         if gridtype is not None:
-            # Set default grid linewidth
-            if "linewidth" not in kwargs:
-                kwargs["linewidth"] = 0.5
-
-            # Set default grid color
-            if "color" not in kwargs:
-                kwargs["color"] = "lightgrey"
-
-            # Set latitudinal grid resolution
-            if "lat_levels" in kwargs:
-                lat_levels = kwargs.pop("lat_levels")
-            elif "lat_res" in kwargs:
-                lat_res = kwargs.pop("lat_res")
-                lat_levels = np.arange(-90, 90, lat_res)[1:]
-            else:  # Default resolution is 10 degrees
-                lat_levels = np.arange(-90, 90, 10)[1:]
-
-            # Set longitidinal grid resolution
-            if "lon_levels" in kwargs:
-                lon_levels = kwargs.pop("lon_levels")
-            elif "lon_res" in kwargs:
-                lon_res = kwargs.pop("lon_levels")
-                if lt:
-                    lon_levels = np.arange(0, 24, lon_res)
-                else:
-                    lon_levels = np.arange(0, 360, lon_res)
-            else:  # Default res is 30 degrees / 2 hours
-                if lt:
-                    lon_levels = np.r_[0:240:2]
-                else:
-                    lon_levels = np.r_[0:360:30]
-
-            # Set grid resolution in 'km' grid
-            if "km_levels" in kwargs:
-                km_levels = kwargs.pop("km_levels")
-            else:  # Default res depends on cs grid size
-                km_levels = np.round(
-                    self.grid.radius * (self.grid.xi_max + self.grid.eta_max) // 5, -2
-                )
+            kwargs.setdefault("linewidth", 0.5)
+            kwargs.setdefault("color", "lightgrey")
 
             # Add the selected grid
             if gridtype == "cs":
@@ -136,8 +89,20 @@ class RegionalCSPlotter:
                 self.ax.set_ylabel("$\\eta$")
                 self.ax.grid(**kwargs)
             elif gridtype == "km":
-                self.add_km_grid(km_levels, **kwargs)
+                km_res = kwargs.pop(
+                    "km_res",
+                    np.round(self.grid.radius * (self.grid.xi_max + self.grid.eta_max) // 5, -2),
+                )
+                self.add_km_grid(km_res, **kwargs)
             else:
+                if "lat_levels" in kwargs:
+                    lat_levels = kwargs.pop("lat_levels")
+                else:
+                    lat_levels = np.arange(-90, 90, kwargs.pop("lat_res", 10))[1:]
+                if "lon_levels" in kwargs:
+                    lon_levels = kwargs.pop("lon_levels")
+                else:
+                    lon_levels = np.arange(0, 360, kwargs.pop("lon_res", 30))
                 self.add_spherical_grid(
                     lat_levels=lat_levels,
                     lon_levels=lon_levels,
@@ -174,7 +139,8 @@ class RegionalCSPlotter:
         gridtype : str, optional
             Which coordinate system to add. The default is 'geo'.
         lt : bool, optional
-            If lt is True, lon is replaced with local time. The default is False.
+            Local-time grid labels are not implemented. Passing True raises
+            ``NotImplementedError``.
         **kwargs : dict
             Line2D properties.
 
@@ -184,13 +150,17 @@ class RegionalCSPlotter:
 
         """
 
+        if gridtype != "geo":
+            raise ValueError("Only geographic spherical grids are implemented.")
+        if lt:
+            raise NotImplementedError("Local-time grid labels are not implemented.")
+
         ## Latitudinal parallels
 
         lon = np.linspace(0, 360, 361) % 360  # Longitidunal locations
 
         # Convert to cs coordinates
-        if gridtype == "geo":
-            xi, eta = self.grid.projection.geographic_to_cube(*np.meshgrid(lon, lat_levels))
+        xi, eta = self.grid.projection.geographic_to_cube(*np.meshgrid(lon, lat_levels))
 
         # Plot the grid lines
         self.ax.plot(xi.T, eta.T, **kwargs)
@@ -198,12 +168,8 @@ class RegionalCSPlotter:
         ## Longitudinal meridians
         lat = np.linspace(-90, 90, 181)  # Latitudinal locations
 
-        if lt:  # Convert lon_levels from lt to longitude
-            pass
-
         # Convert to cs coordinates
-        if gridtype == "geo":
-            xi, eta = self.grid.projection.geographic_to_cube(*np.meshgrid(lon_levels, lat))
+        xi, eta = self.grid.projection.geographic_to_cube(*np.meshgrid(lon_levels, lat))
 
         # Plot the grid
         self.ax.plot(xi, eta, **kwargs)
@@ -223,10 +189,8 @@ class RegionalCSPlotter:
         )  # Move tick location from mean to between meridians
 
         # Add the latitudinal ticks
-        [
+        for x, y in zip(lon_pos[lon_count > count_min], lat_levels[lon_count > count_min]):
             self.text(x, y, str(int(y)), horizontalalignment="center", verticalalignment="center")
-            for x, y in zip(lon_pos[lon_count > count_min], lat_levels[lon_count > count_min])
-        ]
 
         iii = self.grid.contains(*np.meshgrid(lon_levels, lat))  # points in csgrid
         lat_mean = np.nanmean(
@@ -239,10 +203,8 @@ class RegionalCSPlotter:
         )  # Move ticks from mean to between parallels
 
         # Add the longitudinal ticks
-        [
+        for x, y in zip(lon_levels[lat_count > count_min], lat_pos[lat_count > count_min]):
             self.text(x, y, str(int(x)), horizontalalignment="center", verticalalignment="center")
-            for x, y in zip(lon_levels[lat_count > count_min], lat_pos[lat_count > count_min])
-        ]
 
     def add_km_grid(self, resolution, **kwargs):
         """
@@ -317,20 +279,18 @@ class RegionalCSPlotter:
         ind = (xi_tick >= self.grid.xi_min) & (xi_tick <= self.grid.xi_max)
         xi_tick = xi_tick[ind]
         km_tick = km_tick[ind]
-        [
+        for x, label in zip(xi_tick, km_tick):
             self.ax.text(
-                xi_tick[i],
+                x,
                 eta_tick,
-                str(int(km_tick[i])),
+                str(int(label)),
                 horizontalalignment="center",
                 verticalalignment="top",
             )
-            for i in range(len(xi_tick))
-        ]
 
         ## eta gridlines
 
-        xi = np.arange(self.grid.eta_min * 2, self.grid.eta_max * 2, csres)
+        xi = np.arange(self.grid.xi_min * 2, self.grid.xi_max * 2, csres)
         # eta(xi) for eta>0
         eta = np.arange(0, self.grid.eta_max * 1.1, csres)
 
@@ -348,7 +308,7 @@ class RegionalCSPlotter:
             )
         eta_pos = np.array(eta_pos)
 
-        # xi(eta) for xi<0
+        # eta(xi) for eta<0
         eta = np.arange(0, self.grid.eta_min * 1.1, -csres)
 
         diff = self.grid.projection.differential_elements(
@@ -383,16 +343,14 @@ class RegionalCSPlotter:
         ind = (eta_tick >= self.grid.eta_min) & (eta_tick <= self.grid.eta_max)
         eta_tick = eta_tick[ind]
         km_tick = km_tick[ind]
-        [
+        for y, label in zip(eta_tick, km_tick):
             self.ax.text(
                 xi_tick,
-                eta_tick[i],
-                str(int(km_tick[i])),
+                y,
+                str(int(label)),
                 horizontalalignment="right",
                 verticalalignment="center",
             )
-            for i in range(len(eta_tick))
-        ]
 
     def text(self, lon, lat, text, ignore_limits=False, **kwargs):
         """
@@ -407,7 +365,7 @@ class RegionalCSPlotter:
         text : str
             The text.
         ignore_limits : bool, optional
-            If True, text outside the plot limits are ignored. The default is False.
+            If True, allow text outside the plot limits. The default is False.
         **kwargs : text properties
             Passed to matplotlib.pyplot.text
 
@@ -420,10 +378,9 @@ class RegionalCSPlotter:
 
         xi, eta = self.grid.projection.geographic_to_cube(lon, lat)
 
-        if self.grid.contains(lon, lat):
+        if self.grid.contains(lon, lat) or ignore_limits:
             return self.ax.text(xi, eta, text, **kwargs)
-        else:
-            print('text outside plot limit - set "ignore_limits = True" to override')
+        print('text outside plot limit - set "ignore_limits = True" to override')
 
     def plot(self, lon, lat, **kwargs):
         """

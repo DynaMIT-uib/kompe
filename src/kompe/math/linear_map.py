@@ -248,7 +248,10 @@ class LinearMap:
 
     def __matmul__(self, other: Any) -> Any:
         """Apply to arrays or compose with another operator."""
-        if not scipy.sparse.issparse(other) and not _looks_like_operator(other):
+        looks_like_operator = isinstance(other, (LinearMap, ScipyLinearOperator)) or hasattr(
+            other, "matvec"
+        )
+        if not scipy.sparse.issparse(other) and not looks_like_operator:
             arr = asarray(other)
             if arr.ndim == 1:
                 return self.matvec(arr)
@@ -578,10 +581,6 @@ class LinearMap:
             rmatmat=rmatmat,
             dtype=self.dtype,
         )
-
-
-def _looks_like_operator(value: Any) -> bool:
-    return isinstance(value, (LinearMap, ScipyLinearOperator)) or hasattr(value, "matvec")
 
 
 def _runtime_array_module(*values: Any) -> Any:

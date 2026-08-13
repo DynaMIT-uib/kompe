@@ -1,4 +1,4 @@
-"""SHIndices and Schmidt quasi-normalization helpers."""
+"""Spherical-harmonic index and normalization helpers."""
 
 import math
 
@@ -6,63 +6,17 @@ import numpy as np
 
 
 class SHIndices:
-    """Container for (n,m) index pairs."""
+    """The paired arrays used by cosine or sine SH coefficients."""
 
-    def __init__(self, max_degree: int, max_order: int):
-        index_pairs = []
-        for n in range(max_degree + 1):
-            for m in range(min(max_order, n) + 1):
-                index_pairs.append((n, m))
+    def __init__(self, index_pairs):
         self.index_pairs = tuple(index_pairs)
-        self.make_arrays()
-
-    def __getitem__(self, position):
-        """Get item(s) from the SHIndices."""
-        if position == "n":
-            return [ip[0] for ip in self.index_pairs]
-        if position == "m":
-            return [ip[1] for ip in self.index_pairs]
-        return self.index_pairs[position]
-
-    def __iter__(self):
-        """Iterate over the SHIndices."""
-        yield from self.index_pairs
-
-    def __len__(self):
-        """Return length of the SHIndices."""
-        return len(self.index_pairs)
-
-    def __repr__(self):
-        """Return string representation of the SHIndices."""
-        return "".join(["n, m\n"] + [str(p)[1:-1] + "\n" for p in self.index_pairs])[:-1]
-
-    def __str__(self):
-        """Return string representation of the SHIndices."""
-        return self.__repr__()
-
-    def set_Nmin(self, min_degree: int):
-        """Set minimum degree min_degree."""
-        self.index_pairs = tuple([p for p in self.index_pairs if p[0] >= min_degree])
-        self.make_arrays()
-        return self
-
-    def set_Mmin(self, Mmin: int):
-        """Set minimum absolute order Mmin."""
-        self.index_pairs = tuple([p for p in self.index_pairs if abs(p[1]) >= Mmin])
-        self.make_arrays()
-        return self
-
-    def make_arrays(self):
-        """Create n and m arrays from index pairs."""
-        if len(self.index_pairs) > 0:
+        if self.index_pairs:
             arr = np.array(self.index_pairs, dtype=int)
             self.n = arr[:, 0].reshape(1, -1)
             self.m = arr[:, 1].reshape(1, -1)
         else:
-            self.n = np.array([]).reshape(1, -1)
-            self.m = np.array([]).reshape(1, -1)
-        # convenience map for fast lookups (avoid repeated list.index)
-        self._index_map = {pair: i for i, pair in enumerate(self.index_pairs)}
+            self.n = np.empty((1, 0), dtype=int)
+            self.m = np.empty((1, 0), dtype=int)
 
 
 def schmidt_quasi_normalization_factors(max_degree: int, max_order: int):

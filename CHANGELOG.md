@@ -5,6 +5,23 @@ All notable changes to Kompe will be recorded here.
 The project follows semantic versioning. Until 1.0, minor releases may refine
 public interfaces with an accompanying migration note.
 
+## Unreleased
+
+- Remove the empty `SphericalBasis` and `SphericalRepresentation` aliases;
+  `ScalarBasis` is the direct coefficient-basis interface.
+- Remove coefficient-space aliases from `SphericalGrid`; compare point grids
+  directly with `same_as()`.
+- Use Python's standard cached-property mechanism for lazy spherical-transform
+  matrices, operators, and least-squares problems while retaining `clear_cache()`.
+- Keep sample-analysis branches beside the workflow they control, and dispatch
+  fixed least-squares solvers and preconditioners directly instead of through
+  single-use helpers and a per-instance method registry.
+- Store concrete representation metadata as ordinary validated attributes
+  instead of repeating abstract-property boilerplate in every grid and basis.
+- Reduce spherical-harmonic index setup to the coefficient pairs and arrays it
+  actually uses, and reuse the degree/order lookup during recurrence evaluation.
+- Remove unused cubed-sphere and backend helpers.
+
 ## 0.2.0
 
 - Establish a uniform public vocabulary: projections own continuous charts,

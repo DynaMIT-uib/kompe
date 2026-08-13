@@ -68,27 +68,11 @@ class SECSBasis(ScalarBasis):
         self.radius = radius
         self.constant = constant
         self.current_type = current_type
+        self.kind = "SECS"
+        self.index_names = ("latitude", "longitude")
+        self.index_length = self.poles.size
+        self.index_arrays = (self.poles.lat, self.poles.lon)
         self.validate_metadata()
-
-    @property
-    def kind(self):
-        """Short identifier for SECS representations."""
-        return "SECS"
-
-    @property
-    def index_names(self):
-        """Names of pole-coordinate metadata arrays."""
-        return ("latitude", "longitude")
-
-    @property
-    def index_length(self):
-        """Number of elementary systems."""
-        return self.poles.size
-
-    @property
-    def index_arrays(self):
-        """Pole latitude and longitude arrays in degrees."""
-        return self.poles.lat, self.poles.lon
 
     @property
     def signature(self):
