@@ -37,12 +37,27 @@ them.
 New saved grids use the versioned `RegionalCSMeshSpec.to_dict()` format.
 The adapter continues to accept historical `L`/`W`/`Lres`/`Wres` dictionaries,
 but that vocabulary is not part of Kompe's current public serialization API.
+In those dictionaries explicit `edges` are already the final geometry, matching
+the historical secsy behavior, so an accompanying `wshift` is ignored.
 Differential and interpolation operations are accessed through
 `mesh.operators`. Canonical construction uses descriptive names and requires
 an explicit radius, for example
 `RegionalCSMesh(projection, length, width, radius=radius,
-cell_size=(eta_size, xi_size))` or an explicit integer
+xi_cell_size=xi_size, eta_cell_size=eta_size)` or an explicit integer
 `shape=(n_eta, n_xi)`.
+
+Regional `surface_gradient_*` and `surface_divergence_*` operators now use
+Kompe's canonical `(theta, phi)` component order. Older regional code treated
+the same arrays as `(east, north)`; convert with `east = phi` and
+`north = -theta`. Use `coordinate_derivative_matrices()` for `(xi, eta)`
+partials instead of the former `cube_coordinates=True` mode.
+
+Global-CS direct vector interpolation is now `interpolate_vector()` in
+`(theta, phi, radial)` order. The old east/north
+`interpolate_vector_components()` entry point is removed. Physical chart
+transforms are `enu_to_cube_vector_matrix()` and
+`cube_to_enu_vector_matrix()`; the former public unnormalized spherical
+component and normalization matrices are now internal implementation details.
 
 Lompe does not own a spherical-harmonic representation or transform. It calls
 `ppigrf` for the reference geomagnetic field; that external model is based on

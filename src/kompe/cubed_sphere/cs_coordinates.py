@@ -22,21 +22,30 @@ def delta(xi, eta):
     return 1 + np.tan(xi) ** 2 + np.tan(eta) ** 2
 
 
+def surface_metric_tensor(xi, eta, r=1):
+    """Return covariant metric tensors on cubed-sphere faces."""
+    xi, eta, r = map(np.ravel, np.broadcast_arrays(xi, eta, r))
+    X = np.tan(xi)
+    Y = np.tan(eta)
+    sec2_xi = 1 + X**2
+    sec2_eta = 1 + Y**2
+    metric_delta = 1 + X**2 + Y**2
+    common = r**2 * sec2_xi * sec2_eta / metric_delta**2
+
+    metric = np.empty((xi.size, 2, 2))
+    metric[:, 0, 0] = common * sec2_xi
+    metric[:, 0, 1] = -common * X * Y
+    metric[:, 1, 0] = metric[:, 0, 1]
+    metric[:, 1, 1] = common * sec2_eta
+    return metric
+
+
 def metric_tensor(xi, eta, r=1, covariant=True):
     """Return cubed-sphere metric tensors."""
     xi, eta, r = map(np.ravel, np.broadcast_arrays(xi, eta, r))
-    metric_delta = delta(xi, eta)
-
     g = np.empty((xi.size, 3, 3))
-    g[:, 0, 0] = r**2 / (np.cos(xi) ** 4 * np.cos(eta) ** 2 * metric_delta**2)
-    g[:, 0, 1] = (
-        -(r**2) * np.tan(xi) * np.tan(eta) / (np.cos(xi) ** 2 * np.cos(eta) ** 2 * metric_delta**2)
-    )
+    g[:, :2, :2] = surface_metric_tensor(xi, eta, r)
     g[:, 0, 2] = 0
-    g[:, 1, 0] = (
-        -(r**2) * np.tan(xi) * np.tan(eta) / (np.cos(xi) ** 2 * np.cos(eta) ** 2 * metric_delta**2)
-    )
-    g[:, 1, 1] = r**2 / (np.cos(xi) ** 2 * np.cos(eta) ** 4 * metric_delta**2)
     g[:, 1, 2] = 0
     g[:, 2, 0] = 0
     g[:, 2, 1] = 0
@@ -163,4 +172,5 @@ __all__ = [
     "delta",
     "geo_to_cube",
     "metric_tensor",
+    "surface_metric_tensor",
 ]

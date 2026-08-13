@@ -84,12 +84,6 @@ class SphericalGrid:
         self.phi = self.lon.copy()
 
         self.size = self.lon.size
-        self.kind = "SPHERICAL_GRID"
-        self.index_names = ("point",)
-        self.index_length = self.size
-        point_indices = np.arange(self.size)
-        point_indices.setflags(write=False)
-        self.index_arrays = (point_indices,)
 
         if area_weights is not None:
             self.area_weights = np.array(area_weights, dtype=float, copy=True).reshape(-1)
@@ -103,22 +97,16 @@ class SphericalGrid:
         if hasattr(self, "area_weights"):
             self.area_weights.setflags(write=False)
 
-        self.validate_metadata()
-
-    def validate_metadata(self):
-        """Validate the sample layout used by stored gridded fields."""
-        missing = [
-            name
-            for name in ("kind", "index_names", "index_length", "index_arrays")
-            if getattr(self, name, None) is None
-        ]
-        if missing:
-            raise ValueError(f"SphericalGrid is missing sample metadata: {', '.join(missing)}.")
-
-    @property
+    @cached_property
     def signature(self):
         """Return a stable signature for this grid."""
-        return (type(self).__module__, type(self).__qualname__, self.hash)
+        coordinates = content_fingerprint(
+            {
+                "theta": np.asarray(self.theta, dtype="<f4"),
+                "phi": np.asarray(self.phi, dtype="<f4"),
+            }
+        )
+        return (type(self).__module__, type(self).__qualname__, coordinates)
 
     @cached_property
     def exact_coordinate_signature(self):
@@ -135,39 +123,30 @@ class SphericalGrid:
             return (self.signature, None)
         return (self.signature, array_fingerprint(self.area_weights, dtype="<f8"))
 
-    @staticmethod
-    def coordinate_hash(theta, phi):
-        """Return a hash for flattened spherical coordinates."""
-        return content_fingerprint(
-            {
-                "theta": np.asarray(theta, dtype="<f4").reshape(-1),
-                "phi": np.asarray(phi, dtype="<f4").reshape(-1),
-            }
-        )
-
-    @cached_property
-    def hash(self):
-        """Deterministic hash for the flattened grid coordinates.
-
-        Coordinates are quantized to float32 before hashing so grids
-        that differ only by insignificant double-precision noise compare
-        as equal.
-        """
-        return self.coordinate_hash(self.theta, self.phi)
-
     def same_as(self, other):
         """Return whether another grid has the same coordinates."""
         if self is other:
             return True
         if not isinstance(other, SphericalGrid):
             return False
-        return self.hash == other.hash
+        return self.signature == other.signature
 
     def __eq__(self, other):
-        """Compare grids by their coordinate hashes."""
+        """Compare grids by their coordinate signatures."""
         if not isinstance(other, SphericalGrid):
             return NotImplemented
         return self.same_as(other)
+
+    def __repr__(self):
+        """Summarize this point grid for interactive inspection."""
+        weights = ", area_weights=True" if hasattr(self, "area_weights") else ""
+        if self.size == 0:
+            return f"SphericalGrid(size=0{weights})"
+        return (
+            f"SphericalGrid(size={self.size}, "
+            f"lat_range=({self.lat.min():g}, {self.lat.max():g}), "
+            f"lon_range=({self.lon.min():g}, {self.lon.max():g}){weights})"
+        )
 
 
 __all__ = ["SphericalGrid"]

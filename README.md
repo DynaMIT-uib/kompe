@@ -91,13 +91,18 @@ mesh = RegionalCSMesh(
     shape=(14, 18),
 )
 
-east_gradient, north_gradient = mesh.operators.surface_gradient_matrices(sparse=True)
+theta_gradient, phi_gradient = mesh.operators.surface_gradient_matrices(sparse=True)
 divergence = mesh.operators.surface_divergence_matrix(sparse=True)
 
 metadata = mesh.to_spec().to_dict()
 restored = RegionalCSMesh.from_spec(metadata)
 assert restored.signature == mesh.signature
 ```
+
+When physical resolution is more natural than a cell count, name the two
+directions explicitly: `xi_cell_size` is parallel to the projection orientation
+and `eta_cell_size` is perpendicular to it. This avoids reversing the physical
+axes to match the array shape's `(eta, xi)` order.
 
 Install the numerical core with `pip install kompe`. JAX acceleration is an
 optional extra: `pip install "kompe[jax]"`. Select it with

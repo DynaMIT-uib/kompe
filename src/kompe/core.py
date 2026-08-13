@@ -182,6 +182,33 @@ class SurfaceDifferentialBasis(ScalarBasis):
     def _surface_laplacian(self, r=1.0):
         """Return the scalar surface Laplacian operator."""
 
+    def scalar_fields_are_mean_free_by_construction(self):
+        """Return whether the coefficient space omits the constant mode."""
+        return False
+
+    @property
+    def scalar_mean_weights(self):
+        """Return coefficient weights for the physical surface mean."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define scalar surface-mean weights."
+        )
+
+    def project_scalar_mean_free(self, coeffs):
+        """Project scalar coefficients to zero mean when the basis requires it."""
+        if not self.scalar_fields_are_mean_free_by_construction():
+            raise NotImplementedError(
+                f"{type(self).__name__} must define its scalar mean-free projection."
+            )
+        return coeffs
+
+    def project_helmholtz_mean_free(self, coeffs):
+        """Project both Helmholtz potentials to zero mean."""
+        if not self.scalar_fields_are_mean_free_by_construction():
+            raise NotImplementedError(
+                f"{type(self).__name__} must define its Helmholtz mean-free projection."
+            )
+        return coeffs
+
     def surface_gradient_matrix(self, grid):
         """Return ``[d_theta, sin(theta)^-1 d_phi]`` on a surface."""
         return _backend_stack(
@@ -342,6 +369,7 @@ class BasisView(SurfaceDifferentialBasis):
         self._view_name = str(view_name)
         self._coefficient_space_signature = coefficient_space_signature
         self._related_basis_cache = {}
+        self.mean_free = parent_basis.scalar_fields_are_mean_free_by_construction()
 
         self.kind = parent_basis.kind
         self.index_names = tuple(parent_basis.index_names)
@@ -357,6 +385,13 @@ class BasisView(SurfaceDifferentialBasis):
             setattr(self, name, value)
 
         self.validate_metadata()
+
+    def __repr__(self):
+        """Summarize the viewed coefficient space."""
+        return (
+            f"BasisView(kind={self.kind!r}, view_name={self._view_name!r}, "
+            f"index_length={self.index_length})"
+        )
 
     @staticmethod
     def _normalize_coefficient_indices(parent_basis, coefficient_indices):
@@ -495,31 +530,12 @@ class BasisView(SurfaceDifferentialBasis):
 
     def scalar_fields_are_mean_free_by_construction(self):
         """Return whether scalar coefficients omit the mean term."""
-        return bool(getattr(self, "mean_free", False))
-
-    def scalar_index_length(self, mean_free=None):
-        """Return scalar coefficient count."""
-        return int(self.scalar_degrees(mean_free=mean_free).size)
-
-    def scalar_degrees(self, mean_free=None):
-        """Return harmonic degrees for the requested scalar space."""
-        basis = self.with_mean_free(self.mean_free if mean_free is None else bool(mean_free))
-        return basis.n
-
-    def scalar_orders(self, mean_free=None):
-        """Return harmonic orders for the requested scalar space."""
-        basis = self.with_mean_free(self.mean_free if mean_free is None else bool(mean_free))
-        return basis.m
-
-    def scalar_index_arrays(self, mean_free=None):
-        """Return scalar index arrays for the requested scalar space."""
-        basis = self.with_mean_free(self.mean_free if mean_free is None else bool(mean_free))
-        return basis.n, basis.m
+        return self.mean_free
 
     def with_mean_free(self, mean_free):
         """Return a compatible mean-free/full basis when available."""
         target_mean_free = bool(mean_free)
-        if bool(getattr(self, "mean_free", False)) == target_mean_free:
+        if self.mean_free == target_mean_free:
             return self
         if hasattr(self.parent_basis, "with_mean_free"):
             return self.parent_basis.with_mean_free(target_mean_free)

@@ -21,7 +21,6 @@ from kompe.math.least_squares_solver import (
     get_default_least_squares_solver,
 )
 from kompe.math.linear_map import (
-    LinearMap,
     as_linear_map,
     diagonal_linear_map,
     is_noop_linear_map,
@@ -85,10 +84,7 @@ def _helmholtz_surface_smoothness_weights(degree):
 
 def _representation_signature(representation):
     """Return a cache key for an evaluable representation."""
-    signature = getattr(representation, "signature", None)
-    if signature is not None:
-        return signature
-    return getattr(representation, "coefficient_space_signature", id(representation))
+    return representation.signature
 
 
 def _owned_explicit_weights(values):
@@ -275,6 +271,13 @@ class SphericalTransform:
         self.use_persistent_evaluation_cache = bool(use_persistent_evaluation_cache)
 
         self._input_transforms = OrderedDict()
+
+    def __repr__(self):
+        """Summarize the bound basis, grid, and analysis policy."""
+        return (
+            f"SphericalTransform(basis={self.basis!r}, grid={self.grid!r}, "
+            f"area_weighted={self.area_weighted}, reg_lambda={self.reg_lambda!r})"
+        )
 
     def clear_cache(self):
         """Discard matrices, operators, factorizations, and input transforms."""
@@ -468,8 +471,7 @@ class SphericalTransform:
 
     def _factorized_helmholtz_analysis_operator(self):
         """Factor analysis when both potentials omit their gauges."""
-        mean_free = getattr(self.basis, "scalar_fields_are_mean_free_by_construction", None)
-        if not callable(mean_free) or not mean_free():
+        if not self.basis.scalar_fields_are_mean_free_by_construction():
             return None
 
         theta_matrix = self.theta_derivative_matrix
@@ -711,23 +713,22 @@ class SphericalTransform:
         pinv_rtol,
     ):
         """Analyze one scalar or Helmholtz field batch."""
-        normalize_values = (
-            self.normalize_helmholtz_samples if helmholtz else self.normalize_scalar_samples
-        )
-        value_batch = normalize_values(values, input_grid)
+        if helmholtz:
+            value_batch = self.normalize_helmholtz_samples(values, input_grid)
+        else:
+            value_batch = self.normalize_scalar_samples(values, input_grid)
         direct_analysis = isinstance(analysis_basis, SurfaceDifferentialBasis) and not callable(
             getattr(analysis_basis, "scalar_grid_remap_operator", None)
         )
-        analyze = "analyze_helmholtz" if helmholtz else "analyze_scalar"
 
         if direct_analysis:
-            if self.basis is not analysis_basis:
-                compatible = getattr(self.basis, "coefficients_are_compatible_with", None)
-                if not callable(compatible) or not compatible(analysis_basis):
-                    raise ValueError(
-                        "Direct analysis basis is not coefficient-compatible with the "
-                        "transform basis."
-                    )
+            if (
+                self.basis is not analysis_basis
+                and not self.basis.coefficients_are_compatible_with(analysis_basis)
+            ):
+                raise ValueError(
+                    "Direct analysis basis is not coefficient-compatible with the transform basis."
+                )
             analysis_transform = self._get_input_transform(
                 analysis_basis,
                 input_grid,
@@ -744,7 +745,10 @@ class SphericalTransform:
                 else self._remap_batch_to_grid(value_batch, input_grid, helmholtz=helmholtz)
             )
 
-        coeffs = getattr(analysis_transform, analyze)(grid_values)
+        if helmholtz:
+            coeffs = analysis_transform.analyze_helmholtz(grid_values)
+        else:
+            coeffs = analysis_transform.analyze_scalar(grid_values)
         return self._analysis_coefficients_to_rows(
             coeffs, batch_size=value_batch.shape[0], helmholtz=helmholtz
         )
@@ -798,24 +802,6 @@ class SphericalTransform:
             operator = self.scalar_synthesis_operator
 
         return operator.matvec(coeffs).reshape(operator.output_shape)
-
-    def compose_scalar_synthesis_matrix(self, operator):
-        """Contract the scalar-grid matrix with an operator."""
-        if not isinstance(operator, LinearMap) and getattr(operator, "ndim", None) not in (
-            None,
-            1,
-            2,
-        ):
-            raise ValueError("operator must be a vector, matrix, or LinearMap.")
-        try:
-            op = as_linear_map(operator, output_shape=(self.basis.index_length,))
-        except ValueError as exc:
-            raise ValueError("operator must be a vector, matrix, or LinearMap.") from exc
-
-        xp = get_array_module(self.scalar_synthesis_matrix, *op.backend_context)
-        scalar_synthesis_matrix = xp.asarray(self.scalar_synthesis_matrix)
-        product_adjoint = op.rmatmat(xp.swapaxes(xp.conjugate(scalar_synthesis_matrix), -2, -1))
-        return xp.swapaxes(xp.conjugate(product_adjoint), -2, -1)
 
     @staticmethod
     def normalize_scalar_samples(values, input_grid):

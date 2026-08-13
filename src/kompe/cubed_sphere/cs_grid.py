@@ -87,6 +87,10 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             object.__setattr__(self, name, _owned_readonly_array(getattr(self, name)))
         self.validate_mesh_metadata()
 
+    def __repr__(self):
+        """Summarize the global mesh without printing its arrays."""
+        return f"GlobalCSMesh(cells_per_face={self.cells_per_face}, size={self.size})"
+
     @property
     def signature(self):
         """Stable mesh identity for operators and caches."""
@@ -328,27 +332,16 @@ class CSGridRemapper:
         xi_source, eta_source, block_source = basis.mesh.projection.geographic_to_cube(
             phi, 90 - theta
         )
-        source_ps = basis.mesh.projection.spherical_to_cube_vector_matrix(
+        source_transform = basis.mesh.projection.enu_to_cube_vector_matrix(
             xi_source, eta_source, radius=1, face=block_source
         )
-        source_q = basis.mesh.projection.spherical_normalization_matrix(
-            90 - theta, 1, inverse=True
-        )
-        source_transform = np.einsum("nij,njk->nik", source_ps, source_q)
 
         xi_target, eta_target, block_target = basis.mesh.projection.geographic_to_cube(
             phi_target, 90 - theta_target
         )
-        _, theta_out, _ = basis.mesh.projection.cube_to_spherical(
-            xi_target, eta_target, block_target, degrees=True
-        )
-        target_q = basis.mesh.projection.spherical_normalization_matrix(
-            90 - theta_out, 1, inverse=False
-        )
-        target_ps_inv = basis.mesh.projection.cube_to_spherical_vector_matrix(
+        target_transform = basis.mesh.projection.cube_to_enu_vector_matrix(
             xi_target, eta_target, radius=1, face=block_target
         )
-        target_transform = np.einsum("nij,njk->nik", target_q, target_ps_inv)
 
         n_source = theta.size
         n_target = theta_target.size
@@ -430,10 +423,10 @@ class CSGridRemapper:
             )
         return self.operator_cache[key]
 
-    def interpolate_vector_components(
-        self, u_east, u_north, u_r, theta, phi, theta_target, phi_target, **kwargs
+    def interpolate_vector(
+        self, u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
     ):
-        """Interpolate spherical vector components through CS panels."""
+        """Interpolate canonical spherical vectors through CS panels."""
         basis = self.basis
         theta_target, phi_target = np.broadcast_arrays(theta_target, phi_target)
         target_shape = theta_target.shape
@@ -444,22 +437,26 @@ class CSGridRemapper:
         source_shape = theta.shape
         theta, phi = theta.reshape(-1), phi.reshape(-1)
 
-        u_east = np.asarray(u_east)
-        u_north = np.asarray(u_north)
-        u_r = np.asarray(u_r)
-        if u_east.shape[: len(source_shape)] == source_shape:
-            value_shape = u_east.shape[len(source_shape) :]
-            u_east_values = u_east.reshape((theta.size,) + value_shape)
-            u_north_values = u_north.reshape((theta.size,) + value_shape)
-            u_r_values = u_r.reshape((theta.size,) + value_shape)
+        u_theta = np.asarray(u_theta)
+        u_phi = np.asarray(u_phi)
+        u_radial = np.asarray(u_radial)
+        if u_theta.shape[: len(source_shape)] == source_shape:
+            value_shape = u_theta.shape[len(source_shape) :]
+            u_theta_values = u_theta.reshape((theta.size,) + value_shape)
+            u_phi_values = u_phi.reshape((theta.size,) + value_shape)
+            u_radial_values = u_radial.reshape((theta.size,) + value_shape)
         else:
-            u_east_values, u_north_values, u_r_values, theta_b, phi_b = np.broadcast_arrays(
-                u_east, u_north, u_r, theta.reshape(source_shape), phi.reshape(source_shape)
+            u_theta_values, u_phi_values, u_radial_values, theta_b, phi_b = np.broadcast_arrays(
+                u_theta,
+                u_phi,
+                u_radial,
+                theta.reshape(source_shape),
+                phi.reshape(source_shape),
             )
             value_shape = ()
-            u_east_values = u_east_values.reshape(-1)
-            u_north_values = u_north_values.reshape(-1)
-            u_r_values = u_r_values.reshape(-1)
+            u_theta_values = u_theta_values.reshape(-1)
+            u_phi_values = u_phi_values.reshape(-1)
+            u_radial_values = u_radial_values.reshape(-1)
             theta = theta_b.reshape(-1)
             phi = phi_b.reshape(-1)
 
@@ -467,17 +464,11 @@ class CSGridRemapper:
         position = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)))
 
         u_xi, u_eta, u_block = basis.mesh.projection.geographic_to_cube(phi, 90 - theta)
-        spherical_to_panel = basis.mesh.projection.spherical_to_cube_vector_matrix(
+        geographic_to_panel = basis.mesh.projection.enu_to_cube_vector_matrix(
             u_xi, u_eta, radius=1, face=u_block
         )
-        geographic_to_spherical = basis.mesh.projection.spherical_normalization_matrix(
-            90 - theta, 1, inverse=True
-        )
-        geographic_to_panel = np.einsum(
-            "nij,njk->nik", spherical_to_panel, geographic_to_spherical
-        )
-        spherical_values = np.stack([u_east_values, u_north_values, u_r_values], axis=1)
-        panel_values = np.einsum("nij,nj...->ni...", geographic_to_panel, spherical_values)
+        enu_values = np.stack([u_phi_values, -u_theta_values, u_radial_values], axis=1)
+        panel_values = np.einsum("nij,nj...->ni...", geographic_to_panel, enu_values)
 
         interpolated_panel = np.empty((block.size, 3) + value_shape, dtype=np.float64)
         for block_index in range(6):
@@ -508,20 +499,17 @@ class CSGridRemapper:
                 **kwargs,
             )
 
-        _, theta_out, _ = basis.mesh.projection.cube_to_spherical(xi, eta, block, degrees=True)
-        spherical_to_geographic = basis.mesh.projection.spherical_normalization_matrix(
-            90 - theta_out, 1, inverse=False
-        )
-        panel_to_spherical = basis.mesh.projection.cube_to_spherical_vector_matrix(
+        panel_to_geographic = basis.mesh.projection.cube_to_enu_vector_matrix(
             xi, eta, radius=1, face=block
         )
-        panel_to_geographic = np.einsum(
-            "nij,njk->nik", spherical_to_geographic, panel_to_spherical
-        )
-        interpolated = np.einsum("nij,nj...->ni...", panel_to_geographic, interpolated_panel)
+        interpolated_enu = np.einsum("nij,nj...->ni...", panel_to_geographic, interpolated_panel)
         return tuple(
-            interpolated[:, component].reshape(target_shape + value_shape)
-            for component in range(3)
+            component.reshape(target_shape + value_shape)
+            for component in (
+                -interpolated_enu[:, 1],
+                interpolated_enu[:, 0],
+                interpolated_enu[:, 2],
+            )
         )
 
     def interpolate_scalar(self, scalar, theta, phi, theta_target, phi_target, **kwargs):

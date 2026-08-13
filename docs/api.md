@@ -12,14 +12,25 @@ backend-neutral numerical layer is intentionally namespaced under
   construction requires an explicit `current_type`. Its current operator
   accepts `chunk_size` for bounded-memory forward and adjoint evaluation.
 - `GlobalCSBasis`: closed-sphere, cell-centred cubed-sphere expansion. Its
-  `cells_per_face` resolution is required.
+  `cells_per_face` resolution is required. `interpolate_vector()` accepts and
+  returns canonical `(theta, phi, radial)` components.
 - `GlobalCSMesh`: immutable six-face geometry used by `GlobalCSBasis`.
-- `GlobalCSProjection`: stateless six-face coordinate and component maps.
+- `GlobalCSProjection`: stateless six-face coordinate and component maps. Its
+  physical vector transforms explicitly map ENU components to and from local
+  `(xi, eta, radial)` components.
 - `RegionalCSProjection`: rotated regional gnomonic coordinate chart.
 - `RegionalCSMesh`: structured bounded mesh with an explicit radius.
 - `RegionalCSMeshSpec`: versioned serialization boundary for regional meshes.
+
+`RegionalCSMesh(..., shape=(n_eta, n_xi))` follows NumPy array order. When
+specifying physical resolution, use the named `xi_cell_size=` and
+`eta_cell_size=` keywords; xi is parallel to the projection orientation and eta
+is perpendicular to it. `RegionalCSMesh.from_edges(...)` is the exact-geometry
+constructor used by serialization and derived meshes.
 - `RegionalCSOperators`: available as `mesh.operators`; owns interpolation,
-  gradients, divergence, and metric-density calculations.
+  gradients, and divergence. Its public surface
+  vectors use `(theta, phi)`; `coordinate_derivative_matrices()` explicitly
+  exposes derivatives with respect to the local `(xi, eta)` chart.
 - `SolidHarmonicOperators`: regular/irregular radial continuation for an
   `SHBasis`; these are not surface-basis operations.
 

@@ -1,30 +1,19 @@
-"""Code for working with cubed sphere projection in in a limited region.
-A cubed sphere grid is a grid that is defined via the projection of a circumscribed
-cube onto a sphere. The great advantage of this grid is that it avoids any pole
-problem, and that there is not a large variation in spatial resolution across the
-grid. The disadvantage is that it is non-orthogonal, which means that differential
-operators change. The purpose of this script is to take care of that problem.
+"""Regional geometry and operators on one rotated cubed-sphere face.
 
-This code only implements a grid on (part of) one side of the cube. The purpose
-is to use it for regional data analyses such as SECS, and potentially simple
-modelling. The code uses the equations for the north pole side of the cube
+``RegionalCSProjection`` rotates the requested geographic centre and orientation
+onto the north face of the shared global cubed-sphere chart. ``RegionalCSMesh``
+discretizes a bounded patch of that face, and ``RegionalCSOperators`` applies the
+corresponding non-orthogonal metric, interpolation, gradient, and divergence.
 
-The grid and associated math is completely based on:
-C. Ronchi, R. Iacono, P.S. Paolucci, The “Cubed Sphere”: A New Method for the
-Solution of Partial Differential Equations in Spherical Geometry, Journal of
-Computational Physics, Volume 124, Issue 1, 1996, Pages 93-114,
-https://doi.org/10.1006/jcph.1996.0047.
-
-KML, May 2020
-Updates:
-- June 2021: Made differentiation matrix sparse + arbitrary stencil
-- October 2021: Fixed issue with xi and eta not going in expected direction
+The geometry follows C. Ronchi, R. Iacono, and P. S. Paolucci, *The Cubed
+Sphere: A New Method for the Solution of Partial Differential Equations in
+Spherical Geometry*, J. Comput. Phys. 124 (1996), 93–114.
 """
 
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cached_property
+from pathlib import Path
 
 import numpy as np
 from scipy import sparse as scipy_sparse
@@ -36,14 +25,112 @@ from kompe.mesh import StructuredSurfaceMesh
 
 from . import cs_vectors, diffutils, spherical
 
-d2r = np.pi / 180
-
-datapath = (
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data") + os.sep
-)
+_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 
 REGIONAL_CS_MESH_SCHEMA = "kompe.regional_cs_mesh"
 REGIONAL_CS_MESH_SCHEMA_VERSION = 1
+_NORTH_FACE = 4
+
+
+def _rotate_spherical_coordinates(lon, lat, rotation):
+    """Rotate spherical coordinates with a Cartesian rotation matrix."""
+    lon, lat = np.broadcast_arrays(np.asarray(lon, dtype=float), np.asarray(lat, dtype=float))
+    shape = lon.shape
+    lon = np.deg2rad(lon.reshape(-1))
+    lat = np.deg2rad(lat.reshape(-1))
+    xyz = np.column_stack(
+        (
+            np.cos(lat) * np.cos(lon),
+            np.cos(lat) * np.sin(lon),
+            np.sin(lat),
+        )
+    )
+    rotated = np.einsum("ij,nj->ni", rotation, xyz)
+    rotated_lon = np.rad2deg(np.arctan2(rotated[:, 1], rotated[:, 0]))
+    rotated_lat = np.rad2deg(np.arctan2(rotated[:, 2], np.hypot(rotated[:, 0], rotated[:, 1])))
+    return rotated_lon.reshape(shape), rotated_lat.reshape(shape)
+
+
+def _interpolation_axis(position, first_center, spacing, count):
+    """Return neighbouring indices and fractions on one uniform cell-centre axis."""
+    if count == 1:
+        index = np.zeros(position.size, dtype=int)
+        return index, index, np.zeros(position.size)
+    coordinate = (position - first_center) / spacing
+    lower = np.clip(np.floor(coordinate).astype(int), 0, count - 2)
+    return lower, lower + 1, coordinate - lower
+
+
+def _coordinate_pair(name, values):
+    """Return a pair of finite floating-point coordinates."""
+    try:
+        result = tuple(float(value) for value in values)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must contain two numbers") from error
+    if len(result) != 2 or not np.isfinite(result).all():
+        raise ValueError(f"{name} must contain two finite numbers")
+    return result
+
+
+def _mesh_shape(value):
+    """Return a positive ``(n_eta, n_xi)`` mesh shape."""
+    if value is None:
+        return None
+    if len(value) != 2 or any(
+        isinstance(item, (bool, np.bool_)) or not isinstance(item, (int, np.integer))
+        for item in value
+    ):
+        raise TypeError("shape must contain two integer cell counts")
+    result = tuple(int(item) for item in value)
+    if any(item <= 0 for item in result):
+        raise ValueError("shape cell counts must be positive")
+    return result
+
+
+def _positive_cell_size(name, value):
+    """Return one positive finite physical cell size."""
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must be a number") from error
+    if not np.isfinite(result) or result <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return result
+
+
+def _cell_size_pair(value):
+    """Normalize the persisted ``(eta, xi)`` cell-size representation."""
+    if value is None:
+        return None
+    try:
+        eta_cell_size, xi_cell_size = value
+    except (TypeError, ValueError) as error:
+        raise TypeError("cell_size must contain two numbers") from error
+    return (
+        _positive_cell_size("eta cell size", eta_cell_size),
+        _positive_cell_size("xi cell size", xi_cell_size),
+    )
+
+
+def _uniform_edge_axis(name, values):
+    """Return one strictly increasing, uniformly spaced edge axis."""
+    if values is None:
+        return None
+    try:
+        result = tuple(float(value) for value in values)
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must contain numbers") from error
+    array = np.asarray(result)
+    if array.size < 2 or not np.isfinite(array).all():
+        raise ValueError(f"{name} must contain at least two finite values")
+    if not np.all(np.diff(array) > 0):
+        raise ValueError(f"{name} must be strictly increasing")
+    spacing = np.diff(array)
+    if not np.allclose(spacing, spacing[0], rtol=1e-12, atol=1e-15):
+        raise ValueError(f"{name} must be uniformly spaced")
+    return result
 
 
 class RegionalCSProjection:
@@ -64,9 +151,9 @@ class RegionalCSProjection:
             Pair of values for longitude and latitude [deg]
         orientation: scalar or 2-element array-like
             orientation of the cube surface.
-            if scalar: angle in degrees, that defines the the xi axis: orientation = 0 / 180
+            if scalar: angle in degrees that defines the xi axis: orientation = 0 / 180
             implies a xi axis in the east-west direction, positive towards east / west.
-            orientation = 90 / 270 impliex a xi axis towards north / south.
+            orientation = 90 / 270 implies a xi axis towards north / south.
             if 2-element array-like: The elements denote the eastward and northward components
             of a vector that is aligned with the xi axis.
         """
@@ -90,24 +177,31 @@ class RegionalCSProjection:
             if self.orientation.size != 1:
                 raise ValueError("orientation must be either scalar or have 2 elements")
             angle = float(self.orientation.reshape(-1)[0])
-            self.orientation = np.array([np.cos(angle * d2r), np.sin(angle * d2r)])
-        v = np.array([self.orientation[0], self.orientation[1], 0]).reshape((1, 3))
+            angle = np.deg2rad(angle)
+            self.orientation = np.array([np.cos(angle), np.sin(angle)])
+        orientation_enu = np.array([self.orientation[0], self.orientation[1], 0]).reshape((1, 3))
 
-        self.lon0, self.lat0 = position
+        self.lon0, self.lat0 = self.position
+        longitude = np.deg2rad(self.lon0)
+        latitude = np.deg2rad(self.lat0)
 
-        # the z axis of local coordinat system described in geocentric coords:
+        # Local radial direction, expressed in geographic ECEF coordinates.
         self.z = np.array(
             [
-                np.cos(self.lat0 * d2r) * np.cos(self.lon0 * d2r),
-                np.cos(self.lat0 * d2r) * np.sin(self.lon0 * d2r),
-                np.sin(self.lat0 * d2r),
+                np.cos(latitude) * np.cos(longitude),
+                np.cos(latitude) * np.sin(longitude),
+                np.sin(latitude),
             ]
         )
 
-        # the x axis is the orientation described in ECEF coords:
-        self.y = spherical.enu_to_ecef(v, np.array(self.lon0), np.array(self.lat0)).flatten()
+        # On the north face, increasing xi follows the local Cartesian y axis.
+        self.y = spherical.enu_to_ecef(
+            orientation_enu,
+            np.array(self.lon0),
+            np.array(self.lat0),
+        ).flatten()
 
-        # the y axis completes the system:
+        # Complete the right-handed local Cartesian frame.
         self.x = np.cross(self.y, self.z)
 
         # define rotation matrices for rotations between local and geocentric:
@@ -128,6 +222,13 @@ class RegionalCSProjection:
             values.setflags(write=False)
             setattr(self, name, values)
 
+    def __repr__(self):
+        """Summarize the regional chart for interactive inspection."""
+        return (
+            f"RegionalCSProjection(position={tuple(map(float, self.position))}, "
+            f"orientation={tuple(map(float, self.orientation))})"
+        )
+
     @property
     def signature(self):
         """Return immutable projection identity for grids and caches."""
@@ -137,11 +238,11 @@ class RegionalCSProjection:
             tuple(float(value) for value in self.orientation),
         )
 
-    def geographic_to_cube(self, lon, lat, set_points_off_cube_to_nan=False):
+    def geographic_to_cube(self, lon, lat):
         """Convert from geocentric coordinates to cube coords (xi, eta)
 
-        Input parameters must have same shape. Output will have same shape.
-        Points that are outside the cube surface will be nans
+        Inputs are broadcast together and output has the resulting shape.
+        Points on the opposite hemisphere of the local projection are NaN.
 
         Parameters
         ----------
@@ -149,61 +250,64 @@ class RegionalCSProjection:
             geocentric longitude(s) [deg] to convert to cube coords
         lat: array:
             geocentric latitude(s) [deg] to convert to cube coords.
-        set_points_off_cube_to_nan : bool (optional)
-            set to True if points that are not on the cube should be
-            set to nan (default is False).
-
         Returns
         -------
         xi: array
             xi, as defined in Ronchi et al, after lon, lat have been
-            converted to local coordinates. Unit is radians [-pi/4, pi/4]
+            converted to local coordinates. Unit is radians.
         eta: array
             eta, as defined in Ronchi et al., after lon, lat have been
-            converted to local coordinates. Unit is radians [-pi/4, pi/4]
+            converted to local coordinates. Unit is radians.
 
         """
         lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
         local_lon, local_lat = self.geographic_to_local(lon, lat)
-        xi, eta, _ = cs_coordinates.geo_to_cube(local_lon, local_lat, block=4)
+        xi, eta, _ = cs_coordinates.geo_to_cube(
+            local_lon,
+            local_lat,
+            block=_NORTH_FACE,
+        )
 
-        invalid = local_lat < 0
-        if set_points_off_cube_to_nan:
-            invalid = invalid | (np.deg2rad(90 - local_lat) > np.pi / 4)
-        return np.where(invalid, np.nan, xi), np.where(invalid, np.nan, eta)
+        on_local_hemisphere = local_lat >= 0
+        return (
+            np.where(on_local_hemisphere, xi, np.nan),
+            np.where(on_local_hemisphere, eta, np.nan),
+        )
 
     def cube_to_geographic(self, xi, eta):
         """Convert from cube coordinates (xi, eta) to geocentric (lon, lat)
 
-        Input parameters must have same shape. Output will have same shape.
-        Points that are outside the cube surface will be nans
+        Inputs are broadcast together and output has the resulting shape.
 
         Parameters
         ----------
-        lon: array
-            geocentric longitude(s) [deg] to convert to cube coords
-        lat: array:
-            geocentric latitude(s) [deg] to convert to cube coords.
+        xi: array
+            Cubed-sphere xi coordinate(s) [rad].
+        eta: array
+            Cubed-sphere eta coordinate(s) [rad].
 
         Returns
         -------
-        xi: array
-            xi, as defined in Ronchi et al., after lon, lat have been
-            converted to local coordinates. Unit is radians [-pi/4, pi/4]
-        eta: array
-            eta, as defined in Ronchi et al., after lon, lat have been
-            converted to local coordinates. Unit is radians [-pi/4, pi/4]
+        lon: array
+            Geocentric longitude(s) [deg].
+        lat: array
+            Geocentric latitude(s) [deg].
 
 
         """
         xi, eta = np.broadcast_arrays(np.asarray(xi, dtype=float), np.asarray(eta, dtype=float))
-        _, theta, phi = cs_coordinates.cube_to_spherical(xi, eta, block=4, deg=True)
+        _, theta, phi = cs_coordinates.cube_to_spherical(
+            xi,
+            eta,
+            block=_NORTH_FACE,
+            deg=True,
+        )
         return self.local_to_geographic(phi, 90 - theta)
 
-    def geographic_to_local(self, lon, lat, reverse=False):
+    def geographic_to_local(self, lon, lat):
         """Convert from geocentric coordinates to local coordinates
 
-        lon and lat must have the same shape. Shapes are preserved in output.
+        Inputs are broadcast together and output has the resulting shape.
 
         Parameters
         ----------
@@ -211,10 +315,6 @@ class RegionalCSProjection:
             array of longitudes [deg]
         lat: array-like
             array of latitudes [deg]
-        reverse: bool, optional
-            set to False (default) if you want to rate from geocentric to local,
-            set to True if you want the opposite rotation
-
         Returns
         -------
         lon: array-like
@@ -222,27 +322,12 @@ class RegionalCSProjection:
         lat: array-like
             array of latitudes [deg] in new coordinate system
         """
-        assert lat.shape == lon.shape
-        shape = lat.shape
+        return _rotate_spherical_coordinates(lon, lat, self.R_geo2local)
 
-        # set up ECEF position vectors, and rotate using rotation matrices
-        lat, lon = np.array(lat).flatten() * d2r, np.array(lon).flatten() * d2r
-        r = np.vstack((np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)))
-        if reverse:
-            r_ = self.R_local2geo.dot(r)
-        else:
-            r_ = self.R_geo2local.dot(r)
-
-        # calcualte spherical coords:
-        newlat = np.arcsin(r_[2]) / d2r
-        newlon = np.arctan2(r_[1], r_[0]) / d2r
-
-        return (newlon.reshape(shape), newlat.reshape(shape))
-
-    def local_to_geographic(self, lon, lat, reverse=False):
+    def local_to_geographic(self, lon, lat):
         """Convert from local coordinates to geocentric coordinates
 
-        lon and lat must have the same shape. Shapes are preserved in output
+        Inputs are broadcast together and output has the resulting shape.
 
         Parameters
         ----------
@@ -250,10 +335,6 @@ class RegionalCSProjection:
             array of longitudes [deg]
         lat: array-like
             array of latitudes [deg]
-        reverse: bool, optional
-            set to False (default) if you want to rate from local to geocentric,
-            set to True if you want the opposite rotation
-
         Returns
         -------
         lon: array-like
@@ -261,14 +342,8 @@ class RegionalCSProjection:
         lat: array-like
             array of latitudes [deg] in new coordinate system
 
-        Note
-        ----
-        See self.geographic_to_local for implementation
         """
-        if reverse:
-            return self.geographic_to_local(lon, lat)
-        else:
-            return self.geographic_to_local(lon, lat, reverse=True)
+        return _rotate_spherical_coordinates(lon, lat, self.R_local2geo)
 
     def local_to_geographic_enu_rotation(self, lon, lat):
         """Calculate rotation matrices that transform local ENU to geocentric ENU
@@ -290,47 +365,24 @@ class RegionalCSProjection:
             upward component is the same in the two coordinate systems.
             N is the size of lon and lat (they will be flattened)
         """
-        th = (90 - np.array(lat).flatten()) * d2r
-        ph = np.array(lon).flatten() * d2r
+        lon, lat = map(np.ravel, np.broadcast_arrays(lon, lat))
+        geographic_lon, geographic_lat = self.local_to_geographic(lon, lat)
+        local_east = spherical.enu_to_ecef(np.tile((1.0, 0.0, 0.0), (lon.size, 1)), lon, lat)
+        local_north = spherical.enu_to_ecef(np.tile((0.0, 1.0, 0.0), (lon.size, 1)), lon, lat)
+        geographic_east = spherical.ecef_to_enu(
+            np.einsum("ij,nj->ni", self.R_local2geo, local_east),
+            geographic_lon,
+            geographic_lat,
+        )[:, :2]
+        geographic_north = spherical.ecef_to_enu(
+            np.einsum("ij,nj->ni", self.R_local2geo, local_north),
+            geographic_lon,
+            geographic_lat,
+        )[:, :2]
+        return np.stack((geographic_east, geographic_north), axis=2)
 
-        # from ENU to ECEF:
-        e_R = np.vstack((-np.sin(ph), np.cos(ph), np.zeros_like(ph))).T  # (N, 3)
-        n_R = np.vstack(
-            (-np.cos(th) * np.cos(ph), -np.cos(th) * np.sin(ph), np.sin(th))
-        ).T  # (N, 3)
-        u_R = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th))).T  # (N, 3)
-
-        R_enulocal2eceflocal = np.stack((e_R, n_R, u_R), axis=2)  # (N, 3, 3) with e n u in columns
-
-        # from local to geocentric:
-        lon_G, lat_G = self.local_to_geographic(lon, lat)
-        th = (90 - lat_G) * d2r
-        ph = lon_G * d2r
-
-        e_G = np.vstack((-np.sin(ph), np.cos(ph), np.zeros_like(ph))).T  # (N, 3)
-        n_G = np.vstack(
-            (-np.cos(th) * np.cos(ph), -np.cos(th) * np.sin(ph), np.sin(th))
-        ).T  # (N, 3)
-        u_G = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th))).T  # (N, 3)
-
-        R_ecefgeo2enugeo = np.stack((e_G, n_G, u_G), axis=1)  # (N, 3, 3) with e n u in rows
-
-        # Combine:
-        R_enulocal2ecefgeo = np.einsum("ij , njk -> nik", self.R_local2geo, R_enulocal2eceflocal)
-        R_enulocal2enugeo = np.einsum("nij, njk -> nik", R_ecefgeo2enugeo, R_enulocal2ecefgeo)
-
-        # the result should describe a 2D rotation matrix:
-        assert np.all(np.isclose(R_enulocal2enugeo[:, 2, 2], 1, atol=1e-6))
-        assert np.all(np.isclose(R_enulocal2enugeo[:, 2, np.array([0, 1])], 0, atol=1e-6))
-        assert np.all(np.isclose(R_enulocal2enugeo[:, np.array([0, 1]), 2], 0, atol=1e-6))
-        return R_enulocal2enugeo[:, :2, :2]  # (N, 2, 2)
-
-    def geographic_vector_to_cube(self, east, north, lon, lat, return_xi_eta=True):
-        """Calculate vector components projected on cube
-
-        Perfor vector rotation from geographic system to cube
-        system, using self.local_to_geographic_enu_rotation and equation
-        (14) of Ronchi et al.
+    def geographic_vector_to_cube(self, east, north, lon, lat):
+        """Project geographic tangent vectors into cube-coordinate components.
 
         Parameters
         ----------
@@ -342,16 +394,11 @@ class RegionalCSProjection:
             Array of N longitudes that represent vector positions
         lat: array-like
             Array of N latitudes that represent vector positions
-        return_xi_eta: bool, optional
-            set to False to return only the vector components. If True
-            (default), returning the xi, eta coordinates corresponding
-            to (lon, lat) as well.
-
         Returns
         -------
-        xi: array-like  (if return_xi_eta is True)
+        xi: array-like
             N element array of xi coordinates
-        eta: array-like (if return_xi_eta is True)
+        eta: array-like
             N element array of eta coordinates
         Axi: array-like
             N element array of vector components in xi direction
@@ -359,49 +406,28 @@ class RegionalCSProjection:
             N element array of vector components in eta direction
 
         """
-        east, north, lon, lat = [np.array(x).flatten() for x in [east, north, lon, lat]]
-        Ageo = np.vstack((east, north)).T
-
-        # rotation from geo to local:
-        local_lon, local_lat = self.geographic_to_local(lon, lat)
-        R_enu_global2local = self.local_to_geographic_enu_rotation(local_lon, local_lat)
-        Alocal = np.einsum("nji, nj->ni", R_enu_global2local, Ageo).T
-
-        # rearrange to south, east instead of east, north:
-        Alocal = np.vstack((-Alocal[1], Alocal[0])).T
-
-        # calculate the parameters used in transformation matrix:
+        east, north, lon, lat = map(
+            np.ravel,
+            np.broadcast_arrays(east, north, lon, lat),
+        )
         xi, eta = self.geographic_to_cube(lon, lat)
-        X = np.tan(-xi)
-        Y = np.tan(-eta)
-        delta = 1 + X**2 + Y**2
-        C = np.sqrt(1 + X**2)
-        D = np.sqrt(1 + Y**2)
-        dd = np.sqrt(delta - 1)
+        geographic_ecef = spherical.enu_to_ecef(
+            np.column_stack((east, north, np.zeros_like(east))),
+            lon,
+            lat,
+        )
+        local_ecef = np.einsum("ij,nj->ni", self.R_geo2local, geographic_ecef)
+        cube_matrix = cs_vectors._cartesian_to_cube_matrix(
+            xi,
+            eta,
+            r=1.0,
+            block=_NORTH_FACE,
+        )
+        cube = np.einsum("nij,nj->ni", cube_matrix, local_ecef)
+        return xi, eta, cube[:, 0], cube[:, 1]
 
-        # calculate transformation matrix elements:
-        R = np.empty((east.size, 2, 2))
-        R[:, 0, 0] = -D * X / dd
-        R[:, 0, 1] = D * Y / dd / np.sqrt(delta)
-        R[:, 1, 0] = -C * Y / dd
-        R[:, 1, 1] = -C * X / dd / np.sqrt(delta)
-
-        # rotate and return
-        Acube = np.einsum("nij, nj->ni", R, Alocal).T
-
-        # components in xi and eta directions:
-        Axi, Aeta = Acube[0], Acube[1]
-        if return_xi_eta:
-            return xi, eta, Axi, Aeta
-        else:
-            return Axi, Aeta
-
-    def cube_vector_to_geographic(self, Axi, Aeta, xi, eta, return_lon_lat=True):
-        """Calculate vector components projected on cube
-
-        Perfor vector rotation from cube system to geographic
-        system, using self.local_to_geographic_enu_rotation and equation
-        (14) of Ronchi et al.
+    def cube_vector_to_geographic(self, Axi, Aeta, xi, eta):
+        """Convert cube-coordinate tangent components to geographic ENU.
 
         Parameters
         ----------
@@ -413,16 +439,11 @@ class RegionalCSProjection:
             Array of N xi coords that represent vector positions
         eta: array-like
             Array of N eta coords that represent vector positions
-        return_lon_lat: bool, optional
-            set to False to return only the vector components. If True
-            (default), returning the lon, lat coordinates corresponding
-            to (xi, eta) as well.
-
         Returns
         -------
-        lon: array-like (if return_lon_lat is True)
+        lon: array-like
             N element array of lon coordinates
-        lat: array-like (if return_lon_lat is True)
+        lat: array-like
             N element array of lat coordinates
         east: array-like
             N element array of vector components in east direction
@@ -430,46 +451,26 @@ class RegionalCSProjection:
             N element array of vector components in north direction
 
         """
-        Axi, Aeta, xi, eta = [np.array(x).flatten() for x in [Axi, Aeta, xi, eta]]
-        Acube = np.vstack((Axi, Aeta)).T
-
-        # calculate the parameters used in transformation matrix:
-        X = np.tan(-xi)
-        Y = np.tan(-eta)
-        delta = 1 + X**2 + Y**2
-        C = np.sqrt(1 + X**2)
-        D = np.sqrt(1 + Y**2)
-        dd = np.sqrt(delta - 1)
-
-        # calculate transformation matrix elements:
-        R = np.empty((Axi.size, 2, 2))
-        R[:, 0, 0] = -D * X / dd
-        R[:, 0, 1] = D * Y / dd / np.sqrt(delta)
-        R[:, 1, 0] = -C * Y / dd
-        R[:, 1, 1] = -C * X / dd / np.sqrt(delta)
-
-        # rotate and return
-        Alocal = np.einsum("nji, nj->ni", R, Acube).T
-
-        # rearrange to east, north instead of south, east:
-        Alocal = np.vstack((Alocal[1], -Alocal[0])).T
-
-        # rotation from local to geo:
+        Axi, Aeta, xi, eta = map(
+            np.ravel,
+            np.broadcast_arrays(Axi, Aeta, xi, eta),
+        )
         lon, lat = self.cube_to_geographic(xi, eta)
-        local_lon, local_lat = self.geographic_to_local(lon, lat)
-        R_enu_global2local = self.local_to_geographic_enu_rotation(local_lon, local_lat)
-        Ageo = np.einsum("nij, nj->ni", R_enu_global2local, Alocal).T
-
-        # components in east, north directions:
-        east, north = Ageo[0], Ageo[1]
-        if return_lon_lat:
-            return lon, lat, east, north
-        else:
-            return east, north
+        cube = np.column_stack((Axi, Aeta, np.zeros_like(Axi)))
+        cartesian_matrix = cs_vectors._cube_to_cartesian_matrix(
+            xi,
+            eta,
+            r=1.0,
+            block=_NORTH_FACE,
+        )
+        local_ecef = np.einsum("nij,nj->ni", cartesian_matrix, cube)
+        geographic_ecef = np.einsum("ij,nj->ni", self.R_local2geo, local_ecef)
+        geographic = spherical.ecef_to_enu(geographic_ecef, lon, lat)
+        return lon, lat, geographic[:, 0], geographic[:, 1]
 
     def projected_coastlines(self, resolution="50m"):
         """Generate coastlines in projected coordinates"""
-        coastlines = np.load(datapath + "coastlines_" + resolution + ".npz")
+        coastlines = np.load(_DATA_PATH / f"coastlines_{resolution}.npz")
         for key in coastlines:
             lat, lon = coastlines[key]
             yield self.geographic_to_cube(lon, lat)
@@ -512,16 +513,13 @@ class RegionalCSProjection:
             Area(s) of surface element(s), in steradians or in
             squared units of ``radius``
         """
-        X = np.tan(xi)
-        Y = np.tan(eta)
-        delta = 1 + X**2 + Y**2
-        C = np.sqrt(1 + X**2)
-        D = np.sqrt(1 + Y**2)
+        xi, eta, dxi, deta, radius = np.broadcast_arrays(xi, eta, dxi, deta, radius)
+        metric = cs_coordinates.surface_metric_tensor(xi, eta, r=radius).reshape(xi.shape + (2, 2))
 
-        dlxi = radius * D * dxi / (delta * np.cos(xi) ** 2)
-        dleta = radius * C * deta / (delta * np.cos(eta) ** 2)
-
-        dS = radius**2 * deta * dxi / (delta ** (3.0 / 2) * np.cos(xi) ** 2 * np.cos(eta) ** 2)
+        dlxi = np.sqrt(metric[..., 0, 0]) * dxi
+        dleta = np.sqrt(metric[..., 1, 1]) * deta
+        area_scale = np.sqrt(metric[..., 0, 0] * metric[..., 1, 1] - metric[..., 0, 1] ** 2)
+        dS = area_scale * dxi * deta
 
         return dlxi, dleta, dS
 
@@ -536,6 +534,8 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         radius,
         shape=None,
         cell_size=None,
+        xi_cell_size=None,
+        eta_cell_size=None,
         xi_edges=None,
         eta_edges=None,
         xi_shift=0.0,
@@ -566,18 +566,23 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         shape: tuple of int, optional
             Number of cells along the ``(eta, xi)`` axes.
         cell_size: tuple of float, optional
-            Target physical cell sizes along the ``(eta, xi)`` axes. The final
-            uniform spacing is adjusted slightly so the requested extent is exact.
+            Persisted ``(eta, xi)`` form of the physical cell sizes. Interactive
+            code should prefer the explicitly named cell-size parameters below.
+        xi_cell_size, eta_cell_size: float, optional
+            Target physical cell sizes parallel and perpendicular to the projection
+            orientation, respectively. The final uniform spacing is adjusted slightly
+            so the requested extent is exact. Both values must be provided together.
         xi_edges, eta_edges: array-like, optional
-            Explicit uniformly spaced computational-coordinate edges in radians.
+            Exact uniformly spaced computational-coordinate edges in radians. Prefer
+            :meth:`from_edges` when constructing a mesh this way.
         xi_shift: float, optional
             Physical displacement along the xi axis, in the same units as ``radius``.
 
         Notes
         -----
-        Provide exactly one construction mode: ``shape``, ``cell_size``, or both
-        explicit edge arrays. Keeping cell counts and physical cell sizes in
-        separate parameters avoids the historical int-versus-float ambiguity.
+        Provide exactly one construction mode: ``shape``, one cell-size form, or
+        both explicit edge arrays. Explicit physical-axis names avoid depending on
+        NumPy's ``(eta, xi)`` array-axis order when specifying resolution.
 
         """
         if not isinstance(projection, RegionalCSProjection):
@@ -585,16 +590,28 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         for name, value in (("length", length), ("width", width), ("radius", radius)):
             if not np.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a positive finite number")
-        shape = RegionalCSMeshSpec._shape(shape)
-        cell_size = RegionalCSMeshSpec._cell_size(cell_size)
-        xi_edges = RegionalCSMeshSpec._edge_axis("xi_edges", xi_edges)
-        eta_edges = RegionalCSMeshSpec._edge_axis("eta_edges", eta_edges)
+        shape = _mesh_shape(shape)
+        cell_size = _cell_size_pair(cell_size)
+        xi_cell_size = _positive_cell_size("xi_cell_size", xi_cell_size)
+        eta_cell_size = _positive_cell_size("eta_cell_size", eta_cell_size)
+        named_cell_sizes = xi_cell_size is not None or eta_cell_size is not None
+        if named_cell_sizes and (xi_cell_size is None or eta_cell_size is None):
+            raise ValueError("xi_cell_size and eta_cell_size must be provided together")
+        if cell_size is not None and named_cell_sizes:
+            raise ValueError("Use either cell_size or named xi/eta cell sizes, not both")
+        if named_cell_sizes:
+            cell_size = (eta_cell_size, xi_cell_size)
+        xi_edges = _uniform_edge_axis("xi_edges", xi_edges)
+        eta_edges = _uniform_edge_axis("eta_edges", eta_edges)
         explicit_edges = xi_edges is not None or eta_edges is not None
         if explicit_edges and (xi_edges is None or eta_edges is None):
             raise ValueError("xi_edges and eta_edges must be provided together")
         mode_count = int(shape is not None) + int(cell_size is not None) + int(explicit_edges)
         if mode_count != 1:
-            raise ValueError("Provide exactly one of shape, cell_size, or explicit edges")
+            raise ValueError(
+                "Provide exactly one resolution mode: shape, named xi/eta cell sizes, "
+                "persisted cell_size, or explicit edges"
+            )
         if not np.isfinite(xi_shift):
             raise ValueError("xi_shift must be finite")
 
@@ -645,7 +662,7 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         # xi, eta coordinates of cell corners:
         self.xi_mesh, self.eta_mesh = np.meshgrid(xi_edge, eta_edge, indexing="xy")
 
-        # lon, lat coordiantes of cell corners:
+        # lon, lat coordinates of cell corners:
         self.lon_mesh, self.lat_mesh = self.projection.cube_to_geographic(
             self.xi_mesh, self.eta_mesh
         )
@@ -656,12 +673,11 @@ class RegionalCSMesh(StructuredSurfaceMesh):
 
         # geocentric lon, lat [deg] of grid points:
         self.lon, self.lat = self.projection.cube_to_geographic(self.xi, self.eta)
-        self.local_lon, self.local_lat = self.projection.geographic_to_local(self.lon, self.lat)
 
         # set size and shape
         self._shape = tuple(int(length) for length in self.lat.shape)
 
-        # calcualte cell area
+        # calculate cell area
         self._cell_areas = self.projection.differential_elements(
             self.xi, self.eta, self.dxi, self.deta, radius=self.radius
         )[2]
@@ -686,14 +702,35 @@ class RegionalCSMesh(StructuredSurfaceMesh):
             "eta",
             "lon",
             "lat",
-            "local_lon",
-            "local_lat",
             "_cell_areas",
         ):
             values = np.array(getattr(self, name), copy=True)
             values.setflags(write=False)
             setattr(self, name, values)
         self.validate_mesh_metadata()
+
+    @classmethod
+    def from_edges(cls, projection, xi_edges, eta_edges, *, radius):
+        """Construct a mesh from exact computational-coordinate edges.
+
+        This is the natural boundary for saved geometry and for algorithms that
+        derive one mesh from another. Ordinary interactive use should normally
+        specify physical ``length`` and ``width`` together with either ``shape``
+        or explicit physical cell sizes.
+        """
+        xi_edges = _uniform_edge_axis("xi_edges", xi_edges)
+        eta_edges = _uniform_edge_axis("eta_edges", eta_edges)
+        radius = float(radius)
+        if not np.isfinite(radius) or radius <= 0:
+            raise ValueError("radius must be a positive finite number")
+        return cls(
+            projection,
+            radius * np.tan(xi_edges[-1] - xi_edges[0]),
+            radius * np.tan(eta_edges[-1] - eta_edges[0]),
+            radius=radius,
+            xi_edges=xi_edges,
+            eta_edges=eta_edges,
+        )
 
     @property
     def shape(self):
@@ -734,19 +771,14 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         return spec.to_mesh()
 
     def __repr__(self):
-        """String representation"""
-        th0, th1 = 2 * self.xi.max() / d2r, 2 * self.eta.max() / d2r
-        orientation = self.projection.orientation.flatten()[:2]  # east, north components
-        lon, lat = (
-            self.projection.lon0,
-            self.projection.lat0,
+        """Summarize the regional mesh for interactive inspection."""
+        centre_lon, centre_lat = self.projection.cube_to_geographic(
+            (self.xi_min + self.xi_max) / 2,
+            (self.eta_min + self.eta_max) / 2,
         )
-
         return (
-            f"{self.shape[0]} x {self.shape[1]} cubed sphere grid\n"
-            + f"Centered at lon, lat = {lon:.1f}, {lat:.1f}\n"
-            + f"Orientation: {orientation[0]:.2f} east, {orientation[1]:.2f} north, \n"
-            + f"Extent: ~{th0:.1f} x {th1:.1f} degrees central angle"
+            f"RegionalCSMesh(shape={self.shape}, center=({float(centre_lon):.1f}, "
+            f"{float(centre_lat):.1f}), radius={self.radius:g})"
         )
 
     def flat_index(self, eta_index, xi_index):
@@ -807,7 +839,7 @@ class RegionalCSMesh(StructuredSurfaceMesh):
             by lon, lat are in each grid cell. Same shape as self.lat
             and self.lon
         """
-        lon, lat = lon.flatten(), lat.flatten()
+        lon, lat = map(np.ravel, np.broadcast_arrays(lon, lat))
         xi, eta = self.projection.geographic_to_cube(lon, lat)
 
         xi_edges, eta_edges = self.xi_mesh[0, :], self.eta_mesh[:, 0]
@@ -840,8 +872,8 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         ----
         Points that are outside the grid will be given index -1
         """
-        lon, lat = lon.flatten(), lat.flatten()
-        xi, eta = self.projection.geographic_to_cube(lon, lat, set_points_off_cube_to_nan=False)
+        lon, lat = map(np.ravel, np.broadcast_arrays(lon, lat))
+        xi, eta = self.projection.geographic_to_cube(lon, lat)
 
         xi_edges, eta_edges = self.xi_mesh[0, :], self.eta_mesh[:, 0]
 
@@ -854,7 +886,7 @@ class RegionalCSMesh(StructuredSurfaceMesh):
 
         return (i, j)
 
-    def contains(self, lon, lat, extent_factor=1.0):
+    def contains(self, lon, lat, *, margin_cells=0):
         """
         Determine if lon, lat are inside grid boundaries or not.
 
@@ -864,39 +896,21 @@ class RegionalCSMesh(StructuredSurfaceMesh):
             array of longitudes [degrees] - must have same shape as lat
         lat: array
             array of latitudes [degrees] - must have same shape as lon
-        extent_factor: float or int, optional
-            Set extent_factor to a positive/negative float to extend/contract
-            ``self.length`` and ``self.width`` by the given factor to include/exclude
-            points that are outside/inside the grid. If provided as
-            positive/negative int, it will extend/contract the region as
-            multiples of the grid spacing.
+        margin_cells: float, optional
+            Number of cell widths by which to extend the boundary. Negative
+            values contract it.
 
         Returns
         -------
         array of bools with shape of lon and lat
         """
-        lat, lon = np.array(lat), np.array(lon)
-        if lon.shape != lat.shape:
-            raise ValueError("RegionalCSMesh.contains: lon and lat must have same shape")
+        lon, lat = np.broadcast_arrays(lon, lat)
         shape = lon.shape
-        lon, lat = lon.flatten(), lat.flatten()
-
-        xi, eta = self.projection.geographic_to_cube(lon, lat, set_points_off_cube_to_nan=False)
-        if isinstance(extent_factor, int):
-            ximin, ximax = (
-                self.xi_mesh.min() - extent_factor * self.dxi,
-                self.xi_mesh.max() + extent_factor * self.dxi,
-            )
-            etamin, etamax = (
-                self.eta_mesh.min() - extent_factor * self.deta,
-                self.eta_mesh.max() + extent_factor * self.deta,
-            )
-        else:
-            ximin, ximax = self.xi_mesh.min() * extent_factor, self.xi_mesh.max() * extent_factor
-            etamin, etamax = (
-                self.eta_mesh.min() * extent_factor,
-                self.eta_mesh.max() * extent_factor,
-            )
+        xi, eta = self.projection.geographic_to_cube(lon.reshape(-1), lat.reshape(-1))
+        ximin = self.xi_min - margin_cells * self.dxi
+        ximax = self.xi_max + margin_cells * self.dxi
+        etamin = self.eta_min - margin_cells * self.deta
+        etamax = self.eta_max + margin_cells * self.deta
 
         return ((xi < ximax) & (xi > ximin) & (eta < etamax) & (eta > etamin)).reshape(shape)
 
@@ -944,29 +958,14 @@ class RegionalCSOperators:
         """Return the identity of the operator family and its grid."""
         return ("REGIONAL_CS_OPERATORS", self.mesh.signature)
 
-    def surface_gradient_matrices(
-        self,
-        stencil_size=1,
-        *,
-        cube_coordinates=False,
-        sparse=True,
-    ):
-        """
-        Calculate the matrix that produces the derivative in the
-        eastward and northward directions of a scalar field
-        defined on self
-
-        set return_dxi_deta to True to return the matrices that
-        differentiate in cubed sphere coordinates instead of geo
+    def coordinate_derivative_matrices(self, stencil_size=1, *, sparse=True):
+        """Return partial-derivative matrices with respect to xi and eta.
 
         Parameters
         ----------
         stencil_size: int, optional
             Stencil size. Default is 1, in which case derivatives will be calculated
             with a 3-point stencil. With S = 2, a 5-point stencil will be used. etc.
-        cube_coordinates: bool, optional
-            Set to True if you want matrices that differentiate in the xi / eta
-            directions instead of east /  north
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
@@ -981,12 +980,12 @@ class RegionalCSOperators:
                 "stencil_size requires at least 2*stencil_size+1 cells along each axis"
             )
         dxi = grid.dxi
-        det = grid.deta
+        deta = grid.deta
         N = grid.n_eta
         M = grid.n_xi
 
         D_xi = {"rows": [], "cols": [], "elements": []}
-        D_et = {"rows": [], "cols": [], "elements": []}
+        D_eta = {"rows": [], "cols": [], "elements": []}
 
         # index arrays (0 to N, M)
         i_arr = np.arange(N)
@@ -1002,9 +1001,9 @@ class RegionalCSOperators:
         i_dy, j_dy = ii.T[:, S:-S], jj.T[:, S:-S]
 
         for ll in range(len(points)):
-            D_et["rows"].append(grid.flat_index(i_dx, j_dx))
-            D_et["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
-            D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
+            D_eta["rows"].append(grid.flat_index(i_dx, j_dx))
+            D_eta["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
+            D_eta["elements"].append(np.full(i_dx.size, coefficients[ll] / deta))
 
             D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
             D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
@@ -1019,9 +1018,9 @@ class RegionalCSOperators:
             i_dy, j_dy = ii.T[:, kk], jj.T[:, kk]
 
             for ll in range(len(points)):
-                D_et["rows"].append(grid.flat_index(i_dx, j_dx))
-                D_et["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
-                D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
+                D_eta["rows"].append(grid.flat_index(i_dx, j_dx))
+                D_eta["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
+                D_eta["elements"].append(np.full(i_dx.size, coefficients[ll] / deta))
 
                 D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
                 D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
@@ -1034,52 +1033,60 @@ class RegionalCSOperators:
             i_dy, j_dy = ii.T[:, -(kk + 1)], jj.T[:, -(kk + 1)]
 
             for ll in range(len(points)):
-                D_et["rows"].append(grid.flat_index(i_dx, j_dx))
-                D_et["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
-                D_et["elements"].append(np.full(i_dx.size, coefficients[ll] / det))
+                D_eta["rows"].append(grid.flat_index(i_dx, j_dx))
+                D_eta["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
+                D_eta["elements"].append(np.full(i_dx.size, coefficients[ll] / deta))
 
                 D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
                 D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
                 D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
 
         D_xi = {key: np.hstack(D_xi[key]) for key in D_xi}
-        D_et = {key: np.hstack(D_et[key]) for key in D_et}
+        D_eta = {key: np.hstack(D_eta[key]) for key in D_eta}
 
         D_xi = scipy_sparse.csc_matrix(
             (D_xi["elements"], (D_xi["rows"], D_xi["cols"])), shape=(N * M, N * M)
         )
-        D_et = scipy_sparse.csc_matrix(
-            (D_et["elements"], (D_et["rows"], D_et["cols"])), shape=(N * M, N * M)
+        D_eta = scipy_sparse.csc_matrix(
+            (D_eta["elements"], (D_eta["rows"], D_eta["cols"])), shape=(N * M, N * M)
         )
 
-        if cube_coordinates:
-            if sparse:
-                return D_xi, D_et
-            else:
-                return np.array(D_xi.todense()), np.array(D_et.todense())
+        if sparse:
+            return D_xi, D_eta
+        return D_xi.toarray(), D_eta.toarray()
+
+    def surface_gradient_matrices(self, stencil_size=1, *, sparse=True):
+        """Return scalar-gradient matrices in ``(theta, phi)`` order.
+
+        ``theta`` points south and ``phi`` points east. The matrices act on
+        flattened cell-centred scalar values.
+        """
+        D_xi, D_eta = self.coordinate_derivative_matrices(
+            stencil_size=stencil_size,
+            sparse=True,
+        )
 
         # A scalar gradient is a covector.  Convert its coordinate partials
         # through the exact dual basis of the embedded cubed-sphere surface.
         # This remains well-defined at the projection centre and avoids the
         # 0/0 terms in the historical Ronchi-equation implementation.
-        east_coeff, north_coeff, _ = self.surface_geometry()
-        Le = (
-            scipy_sparse.diags(east_coeff[:, 0]) @ D_xi
-            + scipy_sparse.diags(east_coeff[:, 1]) @ D_et
+        theta_coeff, phi_coeff, _ = self._surface_geometry
+        D_theta = (
+            scipy_sparse.diags(theta_coeff[:, 0]) @ D_xi
+            + scipy_sparse.diags(theta_coeff[:, 1]) @ D_eta
         )
-        Ln = (
-            scipy_sparse.diags(north_coeff[:, 0]) @ D_xi
-            + scipy_sparse.diags(north_coeff[:, 1]) @ D_et
+        D_phi = (
+            scipy_sparse.diags(phi_coeff[:, 0]) @ D_xi
+            + scipy_sparse.diags(phi_coeff[:, 1]) @ D_eta
         )
         if sparse:
-            return Le, Ln
-        else:
-            return np.array(Le.todense()), np.array(Ln.todense())
+            return D_theta, D_phi
+        return D_theta.toarray(), D_phi.toarray()
 
     def surface_gradient_operator(self, stencil_size=1):
         """Return the scalar-to-tangential-gradient linear map."""
-        east, north = self.surface_gradient_matrices(stencil_size=stencil_size, sparse=True)
-        matrix = scipy_sparse.vstack((east, north), format="csc")
+        theta, phi = self.surface_gradient_matrices(stencil_size=stencil_size, sparse=True)
+        matrix = scipy_sparse.vstack((theta, phi), format="csc")
         return as_linear_map(
             matrix,
             input_shape=(self.mesh.size,),
@@ -1090,10 +1097,10 @@ class RegionalCSOperators:
         """
         Calculate the matrix that produces the divergence of a vector field
 
-        The returned 2N x N matrix operates on a 1D array that represents a
+        The returned N x 2N matrix operates on a 1D array that represents a
         vector field. The array must be of length 2N, where N is the number
-        of grid cells. The first N elements are the eastward components and
-        the last N are the northward components.
+        of grid cells. The first N elements are the southward ``theta``
+        components and the last N are the eastward ``phi`` components.
 
         Note - this code is based on equations (12) and (23) of Ronchi. The
         'matrification' is explained in my regional data analysis document;
@@ -1107,25 +1114,26 @@ class RegionalCSOperators:
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
-        D_xi, D_eta = self.surface_gradient_matrices(
-            stencil_size=stencil_size, cube_coordinates=True, sparse=True
+        D_xi, D_eta = self.coordinate_derivative_matrices(
+            stencil_size=stencil_size,
+            sparse=True,
         )
-        east_coeff, north_coeff, sqrt_g = self.surface_geometry()
+        theta_coeff, phi_coeff, sqrt_g = self._surface_geometry
 
         # In curvilinear coordinates,
         # div(V) = 1/sqrt(g) * partial_a(sqrt(g) V^a).
-        # The dual-basis coefficients convert geographic east/north vector
+        # The dual-basis coefficients convert spherical theta/phi vector
         # components into the contravariant components V^xi and V^eta.
         inv_sqrt_g = scipy_sparse.diags(1 / sqrt_g)
-        east = inv_sqrt_g @ (
-            D_xi @ scipy_sparse.diags(sqrt_g * east_coeff[:, 0])
-            + D_eta @ scipy_sparse.diags(sqrt_g * east_coeff[:, 1])
+        theta = inv_sqrt_g @ (
+            D_xi @ scipy_sparse.diags(sqrt_g * theta_coeff[:, 0])
+            + D_eta @ scipy_sparse.diags(sqrt_g * theta_coeff[:, 1])
         )
-        north = inv_sqrt_g @ (
-            D_xi @ scipy_sparse.diags(sqrt_g * north_coeff[:, 0])
-            + D_eta @ scipy_sparse.diags(sqrt_g * north_coeff[:, 1])
+        phi = inv_sqrt_g @ (
+            D_xi @ scipy_sparse.diags(sqrt_g * phi_coeff[:, 0])
+            + D_eta @ scipy_sparse.diags(sqrt_g * phi_coeff[:, 1])
         )
-        result = scipy_sparse.hstack((east, north), format="csc")
+        result = scipy_sparse.hstack((theta, phi), format="csc")
         return result if sparse else result.toarray()
 
     def surface_divergence_operator(self, stencil_size=1):
@@ -1137,10 +1145,11 @@ class RegionalCSOperators:
             output_shape=(self.mesh.size,),
         )
 
-    def surface_geometry(self):
-        """Return geographic dual-basis coefficients and ``sqrt(det(g))``.
+    @cached_property
+    def _surface_geometry(self):
+        """Return spherical dual-basis coefficients and ``sqrt(det(g))``.
 
-        The returned east and north arrays have columns for the xi and eta
+        The returned theta and phi arrays have columns for the xi and eta
         contravariant directions.  They serve both scalar-gradient and vector-
         divergence operators, keeping those two constructions geometrically
         consistent.
@@ -1149,12 +1158,20 @@ class RegionalCSOperators:
         xi = grid.xi.reshape(-1)
         eta = grid.eta.reshape(-1)
 
-        # Columns 0 and 1 of the inverse coordinate transform are the physical
-        # tangent vectors d(position)/dxi and d(position)/deta in local ECEF.
-        jacobian_local = cs_vectors.pc(xi, eta, r=grid.radius, block=4, inverse=True)[:, :, :2]
-        jacobian_geo = np.einsum("ij,njk->nik", grid.projection.R_local2geo, jacobian_local)
-        metric = np.einsum("nki,nkj->nij", jacobian_geo, jacobian_geo)
-        dual_basis = np.einsum("nki,nij->nkj", jacobian_geo, np.linalg.inv(metric))
+        # Rows 0 and 1 are the dual basis vectors grad(xi) and grad(eta)
+        # in local Cartesian coordinates.
+        dual_basis_local = cs_vectors._cartesian_to_cube_matrix(
+            xi,
+            eta,
+            r=grid.radius,
+            block=_NORTH_FACE,
+        )[:, :2, :].transpose(0, 2, 1)
+        dual_basis = np.einsum(
+            "ij,njk->nik",
+            grid.projection.R_local2geo,
+            dual_basis_local,
+        )
+        metric = cs_coordinates.surface_metric_tensor(xi, eta, r=grid.radius)
 
         lon = np.deg2rad(grid.lon.reshape(-1))
         lat = np.deg2rad(grid.lat.reshape(-1))
@@ -1169,7 +1186,7 @@ class RegionalCSOperators:
         east_coeff = np.einsum("nk,nkj->nj", east, dual_basis)
         north_coeff = np.einsum("nk,nkj->nj", north, dual_basis)
         sqrt_g = np.sqrt(np.linalg.det(metric))
-        return east_coeff, north_coeff, sqrt_g
+        return -north_coeff, east_coeff, sqrt_g
 
     def interpolate_scalar(self, values, lon, lat):
         """
@@ -1195,93 +1212,46 @@ class RegionalCSOperators:
         """
         grid = self.mesh
         lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
-
-        # Remove points outside grid
-        inside = grid.contains(lon, lat)
-        lon_ = lon[inside]
-        lat_ = lat[inside]
-
-        # Get i,j index of each evaluation location, as a float
-        binnumber = grid.bin_index(lon_, lat_)
-        i = binnumber[0].flatten()
-        j = binnumber[1].flatten()
-        xi_obs, eta_obs = grid.projection.geographic_to_cube(lon_.flatten(), lat_.flatten())
-        xi_grid = grid.xi[i, j]
-        eta_grid = grid.eta[i, j]
-        i_frac = (eta_obs - eta_grid) / grid.deta
-        j_frac = (xi_obs - xi_grid) / grid.dxi
-        i = i + i_frac
-        j = j + j_frac
-
-        # Handle issue with machine precission causing points to end up in wrong place
-        # using floor/ceil if specifying to evaluate very close to the grid loations
-        # used in the interpolation
-        close_i = np.isclose(np.round(i), i, atol=1e-14)
-        i[close_i] = np.round(i)[close_i] + 1e-14
-        close_j = np.isclose(np.round(j), j, atol=1e-14)
-        j[close_j] = np.round(j)[close_j] + 1e-14
-
-        # Handle input points falling within the perimiter cells, but outside the
-        # boundary determined by the center location in the perimiter cells. For those
-        # input points an extrapolation will be performed based on the bilinear
-        # interpolation scheme (just evaluated outside the "box" of the 4 points).
-        small_i = i <= 0  # due to contains it must also be > -0.5
-        i[small_i] = 0.00001
-        small_j = j <= 0  # due to contains it must also be > -0.5
-        j[small_j] = 0.00001
-        large_i = i >= grid.shape[0] - 1  # due to contains it must also be > -0.5
-        i[large_i] = grid.shape[0] - 1 - 0.00001
-        large_j = j >= grid.shape[1] - 1  # due to contains it must also be > -0.5
-        j[large_j] = grid.shape[1] - 1 - 0.00001
-
-        # Indices of the four nodes surrounding each observation/evaluation location
-        ifloor = np.floor(i).astype(int)
-        iceil = np.ceil(i).astype(int)
-        jfloor = np.floor(j).astype(int)
-        jceil = np.ceil(j).astype(int)
-
-        # CS coordinates and 1D indices of these points
-        xi1 = grid.xi[ifloor, jfloor]
-        eta1 = grid.eta[ifloor, jfloor]
-        ij1 = grid.flat_index(ifloor, jfloor)
-        # xi2 = grid.xi[iceil,jfloor] # We dont need all 4 the xi-eta coords. since their
-        # coordinates will be the pairwise similar
-        eta2 = grid.eta[iceil, jfloor]
-        ij2 = grid.flat_index(iceil, jfloor)
-        # xi3 = grid.xi[iceil,jceil]
-        # eta3 = grid.eta[iceil,jceil]
-        ij3 = grid.flat_index(iceil, jceil)
-        xi4 = grid.xi[ifloor, jceil]
-        # eta4 = grid.eta[ifloor,jceil]
-        ij4 = grid.flat_index(ifloor, jceil)
-
-        # CS coordinates of observations/evaluation locations
-        xi_obs, eta_obs = grid.projection.geographic_to_cube(lon_.flatten(), lat_.flatten())
-        # Bilinear interpolation: https://en.wikipedia.org/wiki/Bilinear_interpolation
-        w1 = (xi4 - xi_obs) * (eta2 - eta_obs) / ((xi4 - xi1) * (eta2 - eta1))  # w11
-        w2 = (xi4 - xi_obs) * (eta_obs - eta1) / ((xi4 - xi1) * (eta2 - eta1))  # w12
-        w3 = (xi_obs - xi1) * (eta_obs - eta1) / ((xi4 - xi1) * (eta2 - eta1))  # w22
-        w4 = (xi_obs - xi1) * (eta2 - eta_obs) / ((xi4 - xi1) * (eta2 - eta1))  # w21
-
         scalar_values = np.asarray(values).reshape(-1)
         if scalar_values.size != grid.size:
             raise ValueError(
                 f"values must contain {grid.size} grid values; got {scalar_values.size}"
             )
-        interpolated_ = (
-            w1 * scalar_values[ij1]
-            + w2 * scalar_values[ij2]
-            + w3 * scalar_values[ij3]
-            + w4 * scalar_values[ij4]
+        xi, eta = grid.projection.geographic_to_cube(lon.reshape(-1), lat.reshape(-1))
+        coordinate_tolerance = 32 * np.finfo(float).eps
+        inside = (
+            (xi >= grid.xi_min - coordinate_tolerance)
+            & (xi <= grid.xi_max + coordinate_tolerance)
+            & (eta >= grid.eta_min - coordinate_tolerance)
+            & (eta <= grid.eta_max + coordinate_tolerance)
         )
-
-        # Insert nans and ensure to return an array with same shape as input
+        xi_inside = xi[inside]
+        eta_inside = eta[inside]
+        i0, i1, eta_fraction = _interpolation_axis(
+            eta_inside,
+            grid.eta[0, 0],
+            grid.deta,
+            grid.n_eta,
+        )
+        j0, j1, xi_fraction = _interpolation_axis(
+            xi_inside,
+            grid.xi[0, 0],
+            grid.dxi,
+            grid.n_xi,
+        )
+        field = scalar_values.reshape(grid.shape)
+        interpolated_inside = (
+            (1 - eta_fraction) * (1 - xi_fraction) * field[i0, j0]
+            + eta_fraction * (1 - xi_fraction) * field[i1, j0]
+            + eta_fraction * xi_fraction * field[i1, j1]
+            + (1 - eta_fraction) * xi_fraction * field[i0, j1]
+        )
         interpolated = np.full(
             lat.size,
             np.nan,
-            dtype=np.result_type(interpolated_, float),
+            dtype=np.result_type(interpolated_inside, float),
         )
-        interpolated[inside.flatten()] = interpolated_
+        interpolated[inside] = interpolated_inside
 
         return interpolated.reshape(lat.shape)
 
@@ -1309,8 +1279,8 @@ class RegionalCSMeshSpec:
         if self.version != REGIONAL_CS_MESH_SCHEMA_VERSION:
             raise ValueError(f"Unsupported regional-mesh schema version: {self.version!r}")
 
-        position = self._coordinate_pair("position", self.position)
-        orientation = self._coordinate_pair("orientation", self.orientation)
+        position = _coordinate_pair("position", self.position)
+        orientation = _coordinate_pair("orientation", self.orientation)
         if np.linalg.norm(orientation) == 0:
             raise ValueError("orientation must be non-zero")
         orientation_norm = np.linalg.norm(orientation)
@@ -1332,10 +1302,10 @@ class RegionalCSMeshSpec:
             raise ValueError("xi_shift must be finite")
         object.__setattr__(self, "xi_shift", xi_shift)
 
-        shape = self._shape(self.shape)
-        cell_size = self._cell_size(self.cell_size)
-        xi_edges = self._edge_axis("xi_edges", self.xi_edges)
-        eta_edges = self._edge_axis("eta_edges", self.eta_edges)
+        shape = _mesh_shape(self.shape)
+        cell_size = _cell_size_pair(self.cell_size)
+        xi_edges = _uniform_edge_axis("xi_edges", self.xi_edges)
+        eta_edges = _uniform_edge_axis("eta_edges", self.eta_edges)
         explicit_edges = xi_edges is not None or eta_edges is not None
         if explicit_edges and (xi_edges is None or eta_edges is None):
             raise ValueError("xi_edges and eta_edges must be provided together")
@@ -1346,57 +1316,6 @@ class RegionalCSMeshSpec:
         object.__setattr__(self, "cell_size", cell_size)
         object.__setattr__(self, "xi_edges", xi_edges)
         object.__setattr__(self, "eta_edges", eta_edges)
-
-    @staticmethod
-    def _coordinate_pair(name, values):
-        try:
-            result = tuple(float(value) for value in values)
-        except (TypeError, ValueError) as error:
-            raise TypeError(f"{name} must contain two numbers") from error
-        if len(result) != 2 or not np.isfinite(result).all():
-            raise ValueError(f"{name} must contain two finite numbers")
-        return result
-
-    @staticmethod
-    def _shape(value):
-        if value is None:
-            return None
-        if len(value) != 2 or any(
-            isinstance(item, (bool, np.bool_)) or not isinstance(item, (int, np.integer))
-            for item in value
-        ):
-            raise TypeError("shape must contain two integer cell counts")
-        result = tuple(int(item) for item in value)
-        if any(item <= 0 for item in result):
-            raise ValueError("shape cell counts must be positive")
-        return result
-
-    @staticmethod
-    def _cell_size(value):
-        if value is None:
-            return None
-        try:
-            result = tuple(float(item) for item in value)
-        except (TypeError, ValueError) as error:
-            raise TypeError("cell_size must contain two numbers") from error
-        if len(result) != 2 or not np.isfinite(result).all() or any(item <= 0 for item in result):
-            raise ValueError("cell_size must contain two positive finite values")
-        return result
-
-    @staticmethod
-    def _edge_axis(name, values):
-        if values is None:
-            return None
-        result = tuple(float(value) for value in values)
-        array = np.asarray(result)
-        if array.size < 2 or not np.isfinite(array).all():
-            raise ValueError(f"{name} must contain at least two finite values")
-        if not np.all(np.diff(array) > 0):
-            raise ValueError(f"{name} must be strictly increasing")
-        spacing = np.diff(array)
-        if not np.allclose(spacing, spacing[0], rtol=1e-12, atol=1e-15):
-            raise ValueError(f"{name} must be uniformly spaced")
-        return result
 
     @classmethod
     def from_mesh(cls, mesh):
@@ -1462,16 +1381,33 @@ class RegionalCSMeshSpec:
     def to_mesh(self):
         """Construct a regional cubed-sphere mesh from this specification."""
         projection = RegionalCSProjection(self.position, self.orientation)
+        if self.xi_edges is not None:
+            # Version-1 metadata allowed a shift together with stored edges.
+            # Preserve that exact persisted meaning at the schema boundary;
+            # RegionalCSMesh.from_edges() treats its edges as final geometry.
+            return RegionalCSMesh(
+                projection,
+                self.length,
+                self.width,
+                radius=self.radius,
+                xi_edges=self.xi_edges,
+                eta_edges=self.eta_edges,
+                xi_shift=self.xi_shift,
+            )
+        mesh_resolution = {"shape": self.shape}
+        if self.cell_size is not None:
+            eta_cell_size, xi_cell_size = self.cell_size
+            mesh_resolution = {
+                "xi_cell_size": xi_cell_size,
+                "eta_cell_size": eta_cell_size,
+            }
         return RegionalCSMesh(
             projection,
             self.length,
             self.width,
             radius=self.radius,
-            shape=self.shape,
-            cell_size=self.cell_size,
-            xi_edges=self.xi_edges,
-            eta_edges=self.eta_edges,
             xi_shift=self.xi_shift,
+            **mesh_resolution,
         )
 
 
