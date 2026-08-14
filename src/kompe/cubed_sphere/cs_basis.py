@@ -132,6 +132,13 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
         self.validate_metadata()
 
+    def __repr__(self):
+        """Summarize the global cubed-sphere coefficient space."""
+        return (
+            f"GlobalCSBasis(cells_per_face={self.cells_per_face}, "
+            f"index_length={self.index_length})"
+        )
+
     def clear_cache(self, *, shared_remaps=False):
         """Clear derived operators and matrices owned by this basis.
 
@@ -282,17 +289,14 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     def _is_native_grid(self, grid):
         """Return whether ``grid`` matches this basis' native points."""
-        if grid is self:
-            return True
-        same_as = getattr(grid, "same_as", None)
-        if callable(same_as):
-            return bool(same_as(self.native_grid))
-        if not hasattr(grid, "theta") or not hasattr(grid, "phi"):
-            return False
         from kompe.grid import SphericalGrid
 
-        grid_hash = SphericalGrid.coordinate_hash(to_numpy(grid.theta), to_numpy(grid.phi))
-        return grid_hash == self.native_grid.hash
+        if isinstance(grid, SphericalGrid):
+            return grid.same_as(self.native_grid)
+        if not hasattr(grid, "theta") or not hasattr(grid, "phi"):
+            return False
+        grid = SphericalGrid(theta=to_numpy(grid.theta), phi=to_numpy(grid.phi))
+        return grid.same_as(self.native_grid)
 
     def scalar_grid_remap_operator(self, source_grid, target_grid):
         """Return a cached scalar grid-remap operator."""
@@ -394,16 +398,16 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     def _interpolate_tangential_operator(self, tangential_operator, grid):
         """Interpolate native-grid tangential operators to ``grid``."""
         tangential_operator = np.asarray(tangential_operator)
-        east, north, _ = self.interpolate_vector_components(
+        theta, phi, _ = self.interpolate_vector(
+            tangential_operator[0],
             tangential_operator[1],
-            -tangential_operator[0],
             np.zeros_like(tangential_operator[0]),
             self.mesh.theta,
             self.mesh.phi,
             grid.theta,
             grid.phi,
         )
-        return np.stack([-north, east], axis=0)
+        return np.stack([theta, phi], axis=0)
 
     def surface_gradient_matrix(self, grid):
         """Return the CS surface-gradient matrix on ``grid``."""
@@ -411,7 +415,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         def build():
             if self._is_native_grid(grid):
                 return SurfaceDifferentialBasis.surface_gradient_matrix(self, grid)
-            native_gradient = SurfaceDifferentialBasis.surface_gradient_matrix(self, self)
+            native_gradient = SurfaceDifferentialBasis.surface_gradient_matrix(
+                self, self.native_grid
+            )
             matrix = self._interpolate_tangential_operator(native_gradient, grid)
             xp = get_array_module(getattr(grid, "theta", None), matrix)
             return xp.asarray(matrix)
@@ -439,7 +445,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         def build():
             if self._is_native_grid(grid):
                 return SurfaceDifferentialBasis.rhat_cross_gradient_matrix(self, grid)
-            native_rxgrad = SurfaceDifferentialBasis.rhat_cross_gradient_matrix(self, self)
+            native_rxgrad = SurfaceDifferentialBasis.rhat_cross_gradient_matrix(
+                self, self.native_grid
+            )
             matrix = self._interpolate_tangential_operator(native_rxgrad, grid)
             xp = get_array_module(getattr(grid, "theta", None), matrix)
             return xp.asarray(matrix)
@@ -468,7 +476,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             if self._is_native_grid(grid):
                 return SurfaceDifferentialBasis.helmholtz_synthesis_matrix(self, grid)
             xp = get_array_module(getattr(grid, "theta", None), getattr(grid, "phi", None))
-            native_gradient = SurfaceDifferentialBasis.surface_gradient_matrix(self, self)
+            native_gradient = SurfaceDifferentialBasis.surface_gradient_matrix(
+                self, self.native_grid
+            )
             native_rxgrad = np.stack([-native_gradient[1], native_gradient[0]], axis=0)
             target_gradient = self._interpolate_tangential_operator(native_gradient, grid)
             target_rxgrad = self._interpolate_tangential_operator(native_rxgrad, grid)
@@ -553,13 +563,13 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             self._sparse_laplacian_matrix(r), gauge, input_shape=(n,), output_shape=(n,)
         )
 
-    def interpolate_vector_components(
-        self, u_east, u_north, u_r, theta, phi, theta_target, phi_target, **kwargs
+    def interpolate_vector(
+        self, u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
     ):
-        """Interpolate vector components.
+        """Interpolate canonical spherical vector components.
 
-        Interpolates vector components defined on (theta, phi) to given
-        spherical coordinates. Extra trailing dimensions on the
+        Interpolates ``(theta, phi, radial)`` components defined on spherical
+        coordinates to target spherical coordinates. Extra trailing dimensions on the
         component arrays are treated as independent vector fields and
         interpolated in one call.
 
@@ -567,11 +577,11 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
         Parameters
         ----------
-        u_east : array
+        u_theta : array
+            Array of southward components.
+        u_phi : array
             Array of eastward components.
-        u_north : array
-            Array of northward components.
-        u_r : array
+        u_radial : array
             Array of radial components.
         theta : array
             Array of coordinates for components.
@@ -589,10 +599,10 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         Returns
         -------
         interpolated_vector : array
-            3 x N vector of interpolated components (east, north, up).
+            Tuple of interpolated ``(theta, phi, radial)`` components.
         """
-        return self._grid_remapper.interpolate_vector_components(
-            u_east, u_north, u_r, theta, phi, theta_target, phi_target, **kwargs
+        return self._grid_remapper.interpolate_vector(
+            u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
         )
 
     def interpolate_scalar(self, scalar, theta, phi, theta_target, phi_target, **kwargs):
@@ -625,7 +635,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         Returns
         -------
         interpolated_scalar : array
-            Array of interpolated components (east, north, up).
+            Interpolated scalar values.
         """
         return self._grid_remapper.interpolate_scalar(
             scalar, theta, phi, theta_target, phi_target, **kwargs

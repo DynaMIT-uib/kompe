@@ -8,7 +8,7 @@ from kompe.cubed_sphere import cs_coordinates
 from kompe.cubed_sphere.arrayutils import invert_3x3_matrices
 
 
-def pc(xi, eta, r=1, block=0, inverse=False):
+def _cartesian_to_cube_matrix(xi, eta, r=1, block=0):
     """Return Cartesian-to-CS contravariant transform matrices."""
     xi, et, r, block = map(np.ravel, np.broadcast_arrays(xi, eta, r, block))
     delta = cs_coordinates.delta(xi, et)
@@ -83,10 +83,15 @@ def pc(xi, eta, r=1, block=0, inverse=False):
     pc[mask, 2, 1] = np.tan(xi[mask]) / np.sqrt(delta[mask])
     pc[mask, 2, 2] = -1 / np.sqrt(delta[mask])
 
-    return invert_3x3_matrices(pc) if inverse else pc
+    return pc
 
 
-def ps(xi, eta, r=1, block=0, inverse=False):
+def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
+    """Return CS-to-Cartesian contravariant transform matrices."""
+    return invert_3x3_matrices(_cartesian_to_cube_matrix(xi, eta, r=r, block=block))
+
+
+def _spherical_coordinate_to_cube_matrix(xi, eta, r=1, block=0):
     """Return spherical-to-CS contravariant transform matrices."""
     xi, et, r, block = map(np.ravel, np.broadcast_arrays(xi, eta, r, block))
     delta = cs_coordinates.delta(xi, et)
@@ -174,22 +179,27 @@ def ps(xi, eta, r=1, block=0, inverse=False):
     ps[mask, 2, 1] = 0
     ps[mask, 2, 2] = 1
 
-    return invert_3x3_matrices(ps) if inverse else ps
+    return ps
 
 
-def q_between_blocks(xi, eta, block_i, block_j):
+def _cube_to_spherical_coordinate_matrix(xi, eta, r=1, block=0):
+    """Return CS-to-spherical-coordinate component matrices."""
+    return invert_3x3_matrices(_spherical_coordinate_to_cube_matrix(xi, eta, r=r, block=block))
+
+
+def _face_to_face_matrix(xi, eta, block_i, block_j):
     """Return component transforms between CS blocks."""
     xi_i, eta_i, block_i, block_j = map(np.ravel, np.broadcast_arrays(xi, eta, block_i, block_j))
 
-    psi_inv = ps(xi_i, eta_i, r=1, block=block_i, inverse=True)
+    source_to_spherical = _cube_to_spherical_coordinate_matrix(xi_i, eta_i, r=1, block=block_i)
     _, theta, phi = cs_coordinates.cube_to_spherical(xi_i, eta_i, r=1, block=block_i, deg=True)
     xi_j, eta_j, _ = cs_coordinates.geo_to_cube(phi, 90 - theta, block=block_j)
-    psj = ps(xi_j, eta_j, r=1, block=block_j)
+    spherical_to_target = _spherical_coordinate_to_cube_matrix(xi_j, eta_j, r=1, block=block_j)
 
-    return np.einsum("nij, njk -> nik", psj, psi_inv)
+    return np.einsum("nij, njk -> nik", spherical_to_target, source_to_spherical)
 
 
-def spherical_q(lat, r, inverse=False):
+def _spherical_coordinate_to_enu_matrix(lat, r):
     """Return spherical component normalization matrices."""
     lat, r = map(np.ravel, np.broadcast_arrays(lat, r))
 
@@ -198,7 +208,9 @@ def spherical_q(lat, r, inverse=False):
     q[:, 1, 1] = r
     q[:, 2, 2] = 1
 
-    return invert_3x3_matrices(q) if inverse else q
+    return q
 
 
-__all__ = ["pc", "ps", "q_between_blocks", "spherical_q"]
+def _enu_to_spherical_coordinate_matrix(lat, r):
+    """Return ENU-to-spherical-coordinate component matrices."""
+    return invert_3x3_matrices(_spherical_coordinate_to_enu_matrix(lat, r))

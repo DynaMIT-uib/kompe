@@ -21,7 +21,18 @@ _NORMAL_PINV_CACHE_VERSION = 1
 
 
 class LeastSquaresProblem:
-    """Defines the mathematical structure of a least-squares problem."""
+    """Data fit and optional regularization in one coefficient space.
+
+    With one data term and one regularization term, the solved objective is
+
+    ``||W (A x - b)||² + lambda_scaled ||L x||²``.
+
+    ``sqrt_weights`` supplies the diagonal of ``W`` (so its square gives the
+    statistical or area weight). ``regularization_weights`` supplies the
+    dimensionless relative lambda before Kompe balances the median non-zero
+    diagonals of ``A* A`` and ``L* L``. The same rule is applied term by term
+    when several data or regularization operators are provided.
+    """
 
     def __init__(
         self,

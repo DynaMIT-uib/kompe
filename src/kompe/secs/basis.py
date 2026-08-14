@@ -40,10 +40,6 @@ class SECSBasis(ScalarBasis):
         Physical current-system mode represented by scalar coefficients.
     """
 
-    surface_component_order = ("theta", "phi")
-    magnetic_component_order = ("radial", "theta", "phi")
-    helmholtz_component_order = ("curl_free", "divergence_free")
-
     def __init__(
         self,
         poles,
@@ -73,6 +69,13 @@ class SECSBasis(ScalarBasis):
         self.index_length = self.poles.size
         self.index_arrays = (self.poles.lat, self.poles.lon)
         self.validate_metadata()
+
+    def __repr__(self):
+        """Summarize the elementary-current coefficient space."""
+        return (
+            f"SECSBasis(current_type={self.current_type!r}, poles={self.poles.size}, "
+            f"radius={self.radius:g}, constant={self.constant:g})"
+        )
 
     @property
     def signature(self):

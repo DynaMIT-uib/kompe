@@ -504,12 +504,10 @@ def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
         counted_build_tangential_grid_remap_matrix,
     )
 
-    def fail_interpolate_vector_components(*args, **kwargs):
+    def fail_interpolate_vector(*args, **kwargs):
         raise AssertionError("supported CS remaps should use cached operators")
 
-    monkeypatch.setattr(
-        grid_remap_basis, "interpolate_vector_components", fail_interpolate_vector_components
-    )
+    monkeypatch.setattr(grid_remap_basis, "interpolate_vector", fail_interpolate_vector)
 
     projected_1 = transform.analyze_helmholtz_samples(
         values, input_grid=input_grid, analysis_basis=grid_remap_basis
@@ -553,16 +551,16 @@ def test_cs_tangential_remap_operator_matches_interpolation():
 
     operator = target_basis.tangential_grid_remap_operator(source_grid, target_grid)
     actual = (operator @ values.reshape(-1)).reshape(2, target_grid.size)
-    east, north, _ = target_basis.interpolate_vector_components(
+    expected_theta, expected_phi, _ = target_basis.interpolate_vector(
+        theta_component,
         phi_component,
-        -theta_component,
         np.zeros_like(theta_component),
         source_grid.theta,
         source_grid.phi,
         target_grid.theta,
         target_grid.phi,
     )
-    expected = np.vstack([-north, east])
+    expected = np.vstack([expected_theta, expected_phi])
 
     assert operator is target_basis.tangential_grid_remap_operator(source_grid, target_grid)
     np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=1e-12)
@@ -645,10 +643,10 @@ def test_cs_non_native_vector_operators_use_remap_without_dense_interpolation(mo
         basis.helmholtz_synthesis_matrix(target), helmholtz_coeffs, axes=2
     )
 
-    def fail_interpolate_vector_components(*args, **kwargs):
+    def fail_interpolate_vector(*args, **kwargs):
         raise AssertionError("vector operator should use the remap LinearMap path")
 
-    monkeypatch.setattr(basis, "interpolate_vector_components", fail_interpolate_vector_components)
+    monkeypatch.setattr(basis, "interpolate_vector", fail_interpolate_vector)
 
     gradient_operator = basis.surface_gradient_operator(target)
     rxgrad_operator = basis.rhat_cross_gradient_operator(target)
@@ -836,8 +834,9 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         scalar_coeffs = np.linspace(0.0, 1.0, basis.index_length)
         scalar_values = transform.synthesize_scalar(scalar_coeffs)
         assert "jax" in type(scalar_values).__module__
-        assert to_numpy(scalar_values).dtype == np.dtype(np.float64)
-        assert to_numpy(transform.scalar_synthesis_matrix).dtype == np.dtype(np.float64)
+        backend_dtype = to_numpy(scalar_values).dtype
+        assert np.issubdtype(backend_dtype, np.floating)
+        assert to_numpy(transform.scalar_synthesis_matrix).dtype == backend_dtype
         np.testing.assert_allclose(
             to_numpy(scalar_values), to_numpy(transform.scalar_synthesis_matrix) @ scalar_coeffs
         )
@@ -845,8 +844,8 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         vector_coeffs = np.vstack([scalar_coeffs, scalar_coeffs[::-1]])
         vector_values = transform.synthesize_helmholtz(vector_coeffs)
         assert "jax" in type(vector_values).__module__
-        assert to_numpy(vector_values).dtype == np.dtype(np.float64)
-        assert to_numpy(transform.helmholtz_synthesis_matrix).dtype == np.dtype(np.float64)
+        assert to_numpy(vector_values).dtype == backend_dtype
+        assert to_numpy(transform.helmholtz_synthesis_matrix).dtype == backend_dtype
         np.testing.assert_allclose(
             to_numpy(vector_values),
             np.tensordot(to_numpy(transform.helmholtz_synthesis_matrix), vector_coeffs, 2),

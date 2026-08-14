@@ -57,7 +57,7 @@ def main():
         radius=6371.2,
     )
     measure(
-        "Regional gradient matrices",
+        "Regional theta/phi gradient matrices",
         lambda: regional.operators.surface_gradient_matrices(sparse=True),
         args.repeat,
     )

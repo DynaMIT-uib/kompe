@@ -165,6 +165,14 @@ class SHBasis(SurfaceDifferentialBasis):
         self.index_arrays = (self.n, self.m)
         self.validate_metadata()
 
+    def __repr__(self):
+        """Summarize the harmonic coefficient space."""
+        return (
+            f"SHBasis(max_degree={self.max_degree}, max_order={self.max_order}, "
+            f"min_degree={self.min_degree}, quasi_normalized={self.quasi_normalized}, "
+            f"backend={self.backend!r})"
+        )
+
     def _init_coefficient_indices(self):
         """Build cosine/sine coefficient indices and filters."""
         self.index_pairs = tuple(
@@ -280,32 +288,6 @@ class SHBasis(SurfaceDifferentialBasis):
     def scalar_fields_are_mean_free_by_construction(self):
         """Return whether scalar coefficients omit the monopole."""
         return self.mean_free
-
-    def scalar_index_length(self, mean_free=None):
-        """Return scalar coefficient count."""
-        return int(self.scalar_degrees(mean_free=mean_free).size)
-
-    def scalar_degrees(self, mean_free=None):
-        """Return harmonic degrees for the requested scalar space."""
-        target_mean_free = self.mean_free if mean_free is None else bool(mean_free)
-        if target_mean_free == self.mean_free:
-            return self.n
-        if target_mean_free:
-            return self.n[1:]
-        return np.concatenate([np.array([0], dtype=self.n.dtype), self.n])
-
-    def scalar_orders(self, mean_free=None):
-        """Return harmonic orders for the requested scalar space."""
-        target_mean_free = self.mean_free if mean_free is None else bool(mean_free)
-        if target_mean_free == self.mean_free:
-            return self.m
-        if target_mean_free:
-            return self.m[1:]
-        return np.concatenate([np.array([0], dtype=self.m.dtype), self.m])
-
-    def scalar_index_arrays(self, mean_free=None):
-        """Return ``(n, m)`` arrays for the requested scalar space."""
-        return self.scalar_degrees(mean_free=mean_free), self.scalar_orders(mean_free=mean_free)
 
     def with_mean_free(self, mean_free):
         """Return a cached SH scalar-space basis or view."""

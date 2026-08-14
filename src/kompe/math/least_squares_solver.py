@@ -409,17 +409,19 @@ class LeastSquaresSolver:
     def _build_normal_pinv_response_solver(
         self, problem: LeastSquaresProblem
     ) -> Callable[[np.ndarray | list[np.ndarray]], Any]:
-        """Build a normal-pinv response solver with cached factors."""
+        """Build a dense normal-pinv solver for repeated response blocks."""
         normal_pinv = problem.dense_normal_pinv(self.tolerance)
         data_operator = problem.data_operator
         xp = get_array_module(normal_pinv, *data_operator.backend_context)
+        data_matrix = xp.asarray(data_operator.to_matrix())
+        data_adjoint = xp.swapaxes(xp.conjugate(data_matrix), -2, -1)
 
         def solve_response(rhs: np.ndarray | list[np.ndarray]) -> Any:
             rhs_block, rhs_shape, _ = problem.assemble_rhs_block(rhs, include_regularization=False)
             if rhs_block is None:
                 dtype = problem.A[0].dtype if problem.A else np.float64
                 return xp.zeros(problem.solution_shape + rhs_shape, dtype=dtype)
-            solution_block = normal_pinv @ data_operator.rmatmat(rhs_block)
+            solution_block = normal_pinv @ (data_adjoint @ rhs_block)
             return block_until_ready(solution_block.reshape(problem.solution_shape + rhs_shape))
 
         return solve_response

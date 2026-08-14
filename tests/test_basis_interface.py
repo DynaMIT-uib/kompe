@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-from scipy.sparse import csr_matrix
 
 import kompe
 from kompe import (
@@ -16,9 +15,6 @@ from kompe import (
 from kompe.core import BasisView
 from kompe.math import (
     JAX_AVAILABLE,
-    LinearMap,
-    as_linear_map,
-    diagonal_linear_map,
     is_noop_linear_map,
     set_backend,
     to_jax,
@@ -72,8 +68,8 @@ def test_grids_are_separate_from_coefficient_bases():
 
     assert not isinstance(grid, ScalarBasis)
     assert isinstance(SHBasis(1, 1), ScalarBasis)
-    assert grid.index_names == ("point",)
-    assert grid.index_length == grid.size
+    assert not hasattr(grid, "index_names")
+    assert not hasattr(grid, "index_length")
     assert not hasattr(grid, "coefficient_space_signature")
     assert not hasattr(grid, "coefficients_are_compatible_with")
 
@@ -126,18 +122,33 @@ def test_basis_metadata_arrays_are_immutable_values():
             values.flat[0] = 0
 
 
-def test_grid_hash_matches_equivalent_coordinates():
-    """SphericalGrid equality uses robust coordinate hashes."""
+def test_grid_signature_matches_equivalent_coordinates():
+    """SphericalGrid equality uses robust coordinate signatures."""
     lat = np.array([60.0, 61.0, 62.0])
     lon = np.array([10.0, 11.0, 12.0])
     first = SphericalGrid(lat=lat, lon=lon)
     second = SphericalGrid(theta=90.0 - lat + 1e-10, phi=lon - 1e-10)
     different = SphericalGrid(lat=lat, lon=lon + np.array([0.0, 0.0, 1e-3]))
 
-    assert first.hash == second.hash
+    assert first.signature == second.signature
     assert first.same_as(second)
     assert first == second
     assert not first.same_as(different)
+
+
+def test_grid_retains_broadcast_shape_for_evaluated_arrays():
+    """Flat numerical storage keeps the caller's useful plotting shape."""
+    latitude = np.array([[60.0], [70.0]])
+    longitude = np.array([[0.0, 30.0, 60.0]])
+
+    grid = SphericalGrid(lat=latitude, lon=longitude)
+
+    assert grid.shape == (2, 3)
+    assert grid.size == 6
+    np.testing.assert_allclose(grid.lat.reshape(grid.shape), np.broadcast_to(latitude, grid.shape))
+    np.testing.assert_allclose(
+        grid.lon.reshape(grid.shape), np.broadcast_to(longitude, grid.shape)
+    )
 
 
 def test_grid_owns_immutable_unambiguous_coordinates():
@@ -161,7 +172,7 @@ def test_grid_rejects_invalid_area_weights():
         SphericalGrid(lat=[60.0], lon=[0.0], area_weights=[-1.0])
 
 
-def test_csbasis_native_grid_comparison_uses_grid_hash(monkeypatch):
+def test_csbasis_native_grid_comparison_uses_grid_signature(monkeypatch):
     """Native CS SphericalGrid matching delegates to SphericalGrid.same_as."""
     cs_basis = GlobalCSBasis(4)
     grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
@@ -358,16 +369,21 @@ def test_csbasis_vector_coordinate_transforms_round_trip():
 
     pc = cs_basis.mesh.projection.cartesian_to_cube_vector_matrix(xi, eta, face=block)
     pc_inv = cs_basis.mesh.projection.cube_to_cartesian_vector_matrix(xi, eta, face=block)
-    ps = cs_basis.mesh.projection.spherical_to_cube_vector_matrix(xi, eta, face=block)
-    ps_inv = cs_basis.mesh.projection.cube_to_spherical_vector_matrix(xi, eta, face=block)
-    q = cs_basis.mesh.projection.spherical_normalization_matrix(90 - cs_basis.mesh.theta, 1.0)
-    q_inv = cs_basis.mesh.projection.spherical_normalization_matrix(
-        90 - cs_basis.mesh.theta, 1.0, inverse=True
-    )
+    enu_to_cube = cs_basis.mesh.projection.enu_to_cube_vector_matrix(xi, eta, face=block)
+    cube_to_enu = cs_basis.mesh.projection.cube_to_enu_vector_matrix(xi, eta, face=block)
+
+    for removed_name in (
+        "spherical_to_cube_vector_matrix",
+        "cube_to_spherical_vector_matrix",
+        "spherical_normalization_matrix",
+    ):
+        assert not hasattr(cs_basis.mesh.projection, removed_name)
+    assert not hasattr(cs_basis, "interpolate_vector_components")
 
     np.testing.assert_allclose(np.einsum("nij,njk->nik", pc, pc_inv), identity, atol=1e-12)
-    np.testing.assert_allclose(np.einsum("nij,njk->nik", ps, ps_inv), identity, atol=1e-12)
-    np.testing.assert_allclose(np.einsum("nij,njk->nik", q, q_inv), identity, atol=1e-12)
+    np.testing.assert_allclose(
+        np.einsum("nij,njk->nik", enu_to_cube, cube_to_enu), identity, atol=1e-12
+    )
 
 
 def test_csbasis_non_native_scalar_evaluation_uses_interpolation():
@@ -411,16 +427,16 @@ def test_csbasis_non_native_helmholtz_uses_vector_interpolation():
     native_vector = np.tensordot(native_helmholtz, coeffs, 2)
     actual = np.tensordot(target_helmholtz, coeffs, 2)
 
-    expected_east, expected_north, _ = cs_basis.interpolate_vector_components(
+    expected_theta, expected_phi, _ = cs_basis.interpolate_vector(
+        native_vector[0],
         native_vector[1],
-        -native_vector[0],
         np.zeros_like(native_vector[0]),
         cs_basis.mesh.theta,
         cs_basis.mesh.phi,
         target.theta,
         target.phi,
     )
-    expected = np.stack([-expected_north, expected_east])
+    expected = np.stack([expected_theta, expected_phi])
 
     assert target_helmholtz.shape == (2, target.size, 2, cs_basis.index_length)
     np.testing.assert_allclose(actual, expected, atol=1e-10)
@@ -435,17 +451,17 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
         np.zeros(4),
         degrees=True,
     )
-    fields_east = np.stack(
+    fields_theta = np.stack(
         [np.sin(np.deg2rad(cs_basis.mesh.theta)), np.cos(np.deg2rad(cs_basis.mesh.phi))], axis=-1
     )
-    fields_north = np.stack(
+    fields_phi = np.stack(
         [np.cos(np.deg2rad(cs_basis.mesh.theta)), np.sin(np.deg2rad(cs_basis.mesh.phi))], axis=-1
     )
-    fields_radial = np.zeros_like(fields_east)
+    fields_radial = np.zeros_like(fields_theta)
 
-    multi = cs_basis.interpolate_vector_components(
-        fields_east,
-        fields_north,
+    multi = cs_basis.interpolate_vector(
+        fields_theta,
+        fields_phi,
         fields_radial,
         cs_basis.mesh.theta,
         cs_basis.mesh.phi,
@@ -453,114 +469,21 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
         phi,
     )
     per_field = [
-        cs_basis.interpolate_vector_components(
-            fields_east[:, i],
-            fields_north[:, i],
+        cs_basis.interpolate_vector(
+            fields_theta[:, i],
+            fields_phi[:, i],
             fields_radial[:, i],
             cs_basis.mesh.theta,
             cs_basis.mesh.phi,
             theta,
             phi,
         )
-        for i in range(fields_east.shape[-1])
+        for i in range(fields_theta.shape[-1])
     ]
 
     for component_index in range(3):
         expected = np.stack([field[component_index] for field in per_field], axis=-1)
         np.testing.assert_allclose(multi[component_index], expected)
-
-
-def test_spherical_transform_contract_scalar_synthesis_matrix_matches_explicit_products():
-    """Scalar grid contraction matches explicit operators."""
-    cs_basis = GlobalCSBasis(8)
-    evaluator = SphericalTransform(
-        cs_basis, SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
-    )
-    vector = np.linspace(1.0, 2.0, cs_basis.index_length)
-    matrix = np.diag(vector)
-
-    np.testing.assert_allclose(
-        evaluator.compose_scalar_synthesis_matrix(vector),
-        evaluator.scalar_synthesis_matrix * vector.reshape((1, -1)),
-    )
-    np.testing.assert_allclose(
-        evaluator.compose_scalar_synthesis_matrix(diagonal_linear_map(vector)),
-        evaluator.scalar_synthesis_matrix * vector.reshape((1, -1)),
-    )
-    np.testing.assert_allclose(
-        evaluator.compose_scalar_synthesis_matrix(matrix),
-        evaluator.scalar_synthesis_matrix @ matrix,
-    )
-    np.testing.assert_allclose(
-        evaluator.compose_scalar_synthesis_matrix(as_linear_map(csr_matrix(matrix))),
-        evaluator.scalar_synthesis_matrix @ matrix,
-    )
-    with pytest.raises(ValueError, match="vector, matrix, or LinearMap"):
-        evaluator.compose_scalar_synthesis_matrix(np.zeros((1, 1, 1)))
-
-
-def test_spherical_transform_contract_scalar_coeffs_uses_operator_actions():
-    """Scalar grid contraction can use a structured right operator."""
-    cs_basis = GlobalCSBasis(8)
-    evaluator = SphericalTransform(
-        cs_basis, SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
-    )
-    rng = np.random.default_rng(1)
-    matrix = rng.normal(size=(cs_basis.index_length, 3)) + 1j * rng.normal(
-        size=(cs_basis.index_length, 3)
-    )
-
-    def fail_dense(_xp):
-        raise AssertionError("compose_scalar_synthesis_matrix should not densify")
-
-    operator = LinearMap(
-        shape=matrix.shape,
-        dtype=matrix.dtype,
-        _matvec=lambda x: matrix @ np.asarray(x).reshape(3),
-        _rmatvec=lambda y: matrix.conj().T @ np.asarray(y).reshape(cs_basis.index_length),
-        _matmat=lambda x: matrix @ np.asarray(x).reshape(3, -1),
-        _rmatmat=lambda y: matrix.conj().T @ np.asarray(y).reshape(cs_basis.index_length, -1),
-        _dense_array_func=fail_dense,
-        input_shape=(3,),
-        output_shape=(cs_basis.index_length,),
-    )
-
-    np.testing.assert_allclose(
-        evaluator.compose_scalar_synthesis_matrix(operator),
-        evaluator.scalar_synthesis_matrix @ matrix,
-    )
-
-
-def test_spherical_transform_contract_scalar_coeffs_skips_diagonal_probe():
-    """Square non-diagonal maps should not densify."""
-    cs_basis = GlobalCSBasis(8)
-    evaluator = SphericalTransform(
-        cs_basis, SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
-    )
-    rng = np.random.default_rng(2)
-    matrix = rng.normal(size=(cs_basis.index_length, cs_basis.index_length)) + 1j * rng.normal(
-        size=(cs_basis.index_length, cs_basis.index_length)
-    )
-
-    def fail_dense(_xp):
-        raise AssertionError("compose_scalar_synthesis_matrix should not densify")
-
-    operator = LinearMap(
-        shape=matrix.shape,
-        dtype=matrix.dtype,
-        _matvec=lambda x: matrix @ np.asarray(x).reshape(cs_basis.index_length),
-        _rmatvec=lambda y: matrix.conj().T @ np.asarray(y).reshape(cs_basis.index_length),
-        _matmat=lambda x: matrix @ np.asarray(x).reshape(cs_basis.index_length, -1),
-        _rmatmat=lambda y: matrix.conj().T @ np.asarray(y).reshape(cs_basis.index_length, -1),
-        _dense_array_func=fail_dense,
-        input_shape=(cs_basis.index_length,),
-        output_shape=(cs_basis.index_length,),
-    )
-
-    np.testing.assert_allclose(
-        evaluator.compose_scalar_synthesis_matrix(operator),
-        evaluator.scalar_synthesis_matrix @ matrix,
-    )
 
 
 def test_grid_basis_regularization_requires_degree_metadata():
@@ -795,10 +718,11 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
         assert "jax" in type(G).__module__
         assert "jax" in type(cs_basis._surface_laplacian()).__module__
         assert "jax" in type(laplacian_values).__module__
-        assert to_numpy(values).dtype == np.dtype(np.float64)
-        assert to_numpy(G).dtype == np.dtype(np.float64)
-        assert to_numpy(cs_basis._surface_laplacian()).dtype == np.dtype(np.float64)
-        assert to_numpy(laplacian_values).dtype == np.dtype(np.float64)
+        backend_dtype = to_numpy(values).dtype
+        assert np.issubdtype(backend_dtype, np.floating)
+        assert to_numpy(G).dtype == backend_dtype
+        assert to_numpy(cs_basis._surface_laplacian()).dtype == backend_dtype
+        assert to_numpy(laplacian_values).dtype == backend_dtype
         np.testing.assert_allclose(
             to_numpy(laplacian_values), to_numpy(cs_basis._surface_laplacian()) @ to_numpy(values)
         )

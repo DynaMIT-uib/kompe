@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
 
 
@@ -9,13 +11,17 @@ class GlobalCSProjection:
     """Continuous coordinate chart for the six-face global cubed sphere.
 
     The global chart has no configuration state: the selected face is carried
-    by each coordinate value.  The object provides the same projection
-    collaborator boundary used by global and regional cubed-sphere meshes,
-    while delegating the numerical implementation to ``cs_coordinates`` and
-    ``cs_vectors``.
+    by each coordinate value. Regional projections rotate geographic
+    coordinates into this chart's north face. Both projections use the same
+    numerical implementation in ``cs_coordinates`` and ``cs_vectors``; their
+    meshes retain separate regional-boundary and global-face topology.
     """
 
     __slots__ = ()
+
+    def __repr__(self):
+        """Return the stateless chart name."""
+        return "GlobalCSProjection()"
 
     @property
     def signature(self):
@@ -75,64 +81,75 @@ class GlobalCSProjection:
     @staticmethod
     def cartesian_to_cube_vector_matrix(xi, eta, radius=1, face=0):
         """Return Cartesian-to-cube component transformation matrices."""
-        return cs_vectors.pc(
+        return cs_vectors._cartesian_to_cube_matrix(
             xi,
             eta,
             r=radius,
             block=face,
-            inverse=False,
         )
 
     @staticmethod
     def cube_to_cartesian_vector_matrix(xi, eta, radius=1, face=0):
         """Return cube-to-Cartesian component transformation matrices."""
-        return cs_vectors.pc(
+        return cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
             r=radius,
             block=face,
-            inverse=True,
         )
 
     @staticmethod
-    def spherical_to_cube_vector_matrix(xi, eta, radius=1, face=0):
-        """Return spherical-to-cube component transformation matrices."""
-        return cs_vectors.ps(
+    def enu_to_cube_vector_matrix(xi, eta, radius=1, face=0):
+        """Return ENU-to-``(xi, eta, radial)`` component matrices."""
+        _, theta, _ = cs_coordinates.cube_to_spherical(
+            xi,
+            eta,
+            face,
+            r=radius,
+            deg=True,
+        )
+        coordinate_to_cube = cs_vectors._spherical_coordinate_to_cube_matrix(
             xi,
             eta,
             r=radius,
             block=face,
-            inverse=False,
         )
+        enu_to_coordinate = cs_vectors._enu_to_spherical_coordinate_matrix(
+            90.0 - theta,
+            radius,
+        )
+        return np.einsum("nij,njk->nik", coordinate_to_cube, enu_to_coordinate)
 
     @staticmethod
-    def cube_to_spherical_vector_matrix(xi, eta, radius=1, face=0):
-        """Return cube-to-spherical component transformation matrices."""
-        return cs_vectors.ps(
+    def cube_to_enu_vector_matrix(xi, eta, radius=1, face=0):
+        """Return ``(xi, eta, radial)``-to-ENU component matrices."""
+        _, theta, _ = cs_coordinates.cube_to_spherical(
+            xi,
+            eta,
+            face,
+            r=radius,
+            deg=True,
+        )
+        cube_to_coordinate = cs_vectors._cube_to_spherical_coordinate_matrix(
             xi,
             eta,
             r=radius,
             block=face,
-            inverse=True,
         )
+        coordinate_to_enu = cs_vectors._spherical_coordinate_to_enu_matrix(
+            90.0 - theta,
+            radius,
+        )
+        return np.einsum("nij,njk->nik", coordinate_to_enu, cube_to_coordinate)
 
     @staticmethod
     def face_to_face_vector_matrix(xi, eta, source_face, target_face):
         """Return component transformations between global cube faces."""
-        return cs_vectors.q_between_blocks(
+        return cs_vectors._face_to_face_matrix(
             xi,
             eta,
             source_face,
             target_face,
-        )
-
-    @staticmethod
-    def spherical_normalization_matrix(latitude, radius, inverse=False):
-        """Return normalized/coordinate spherical component transforms."""
-        return cs_vectors.spherical_q(
-            latitude,
-            radius,
-            inverse=inverse,
         )
 
 

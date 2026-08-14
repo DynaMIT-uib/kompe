@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import types
-from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import wraps
 from importlib.util import find_spec
@@ -41,17 +40,8 @@ def _load_jax() -> types.ModuleType:
     with _jax_import_lock:
         if _jax_namespace is not None:
             return _jax_namespace
-        # Kompe is a numerical-science library whose NumPy API is float64 by
-        # default. Preserve that precision contract on the JAX backend.
-        #
-        # Set both the environment option (for JAX import-time configuration)
-        # and the runtime option (for processes that imported JAX earlier).
-        os.environ["JAX_ENABLE_X64"] = "1"
         try:
             import jax
-
-            jax.config.update("jax_enable_x64", True)
-
             import jax.numpy as jnp
             from jax import Array as JaxArray
         except ImportError as exc:  # pragma: no cover - broken optional install
@@ -239,23 +229,6 @@ def vmap(func=None, *vmap_args, **vmap_kwargs):
     return _jax_vmap(func, *vmap_args, **vmap_kwargs)
 
 
-class _ArrayModuleProxy(types.SimpleNamespace):
-    """Forward attribute access to the active array module."""
-
-    def __getattr__(self, item: str) -> Any:  # pragma: no cover - thin delegation
-        module = get_array_module()
-        return getattr(module, item)
-
-    def __dir__(self) -> Iterable[str]:  # pragma: no cover - delegation only
-        return dir(get_array_module())
-
-    def __repr__(self) -> str:  # pragma: no cover - representational
-        module = get_array_module()
-        return f"<ArrayModuleProxy for {module.__name__}>"
-
-
-xp = _ArrayModuleProxy()
-
 __all__ = [
     "JAX_AVAILABLE",
     "asarray",
@@ -269,5 +242,4 @@ __all__ = [
     "to_numpy",
     "use_jax",
     "vmap",
-    "xp",
 ]

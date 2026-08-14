@@ -9,15 +9,16 @@ belong to those consumers or to explicitly named compatibility modules.
 - `ScalarBasis` owns validated coefficient metadata and scalar evaluation on
   a target grid without an empty intermediate hierarchy layer.
 - `SurfaceDifferentialBasis` adds closed-surface gradient, Helmholtz, Laplacian, and
-  gauge-aware Poisson capabilities.
+  gauge-aware Poisson capabilities. It also states the mean-free contract:
+  harmonic spaces may omit the constant mode by construction, while nodal
+  spaces must provide the physical surface-mean weights and projection.
 - `SECSBasis` is a `ScalarBasis` with scalar-potential, surface-current,
   and magnetic-field synthesis. Its required `current_type` gives one
   coefficient vector an explicit curl-free or divergence-free meaning. Its
   Green functions are distributional, so it does not pretend to have a square
   coefficient-space Laplacian.
-- `SphericalGrid` stores arbitrary evaluation points and the simple sample
-  layout needed for gridded field storage. It does not expose coefficient-space
-  compatibility, inherit basis behavior, or imply cells or topology.
+- `SphericalGrid` stores arbitrary evaluation points. It does not expose
+  coefficient metadata, inherit basis behavior, or imply cells or topology.
 - `StructuredSurfaceMesh` describes cell-centred structured surface geometry.
   `RegionalCSMesh` and `GlobalCSMesh` implement it.
 - `RegionalCSMesh` is bounded mesh geometry. Its composed
@@ -49,6 +50,10 @@ constructed.
 ## Cubed-sphere ownership
 
 Stateless gnomonic coordinates, metrics, and vector transformations are shared.
+`RegionalCSProjection` first rotates into a local frame and then uses face 4,
+the north face, of that shared chart; it does not implement a second gnomonic
+projection. The meshes remain separate because a bounded patch needs boundary
+stencils, while a global mesh needs cross-face neighbours.
 `GlobalCSMesh` owns immutable six-face cell geometry, while `GlobalCSBasis`
 owns the expansion, cross-face stencils, remapping, and closed-sphere
 operators. `RegionalCSMesh` owns the rotated single-face mesh, while
@@ -76,6 +81,12 @@ operation exists.
 
 Canonical surface vectors use `(theta, phi)`, equivalent to `(south, east)`.
 The conversion to geographic EN components is `east = phi`, `north = -theta`.
+Regional and global surface operators both follow this convention; local
+`(xi, eta)` coordinate derivatives are exposed under a distinct name.
+Global-CS vector interpolation also uses `(theta, phi, radial)`. Coordinate
+charts expose physical `enu_to_cube_vector_matrix()` and
+`cube_to_enu_vector_matrix()` directions; unnormalized spherical-coordinate
+components remain an internal numerical detail.
 Full magnetic vectors use `(radial, theta, phi)`. SECS kernels use geographic
 `(east, north, radial)` return order; secsy retains its historical names in its
 own facade.

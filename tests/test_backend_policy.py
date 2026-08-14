@@ -32,12 +32,12 @@ def test_importing_kompe_does_not_import_jax():
 
 
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
-def test_enabling_backend_enables_x64():
-    """Kompe preserves its NumPy-compatible float64 precision contract."""
+def test_enabling_backend_preserves_x64_setting():
+    """Backend selection leaves application-wide JAX precision unchanged."""
     source = (
         "import jax; before = bool(jax.config.jax_enable_x64); "
         "from kompe.math import set_backend; set_backend('jax'); "
         "print(before, bool(jax.config.jax_enable_x64))"
     )
     result = _run_python(source, env={"JAX_ENABLE_X64": "0"})
-    assert result.stdout.strip() == "False True"
+    assert result.stdout.strip() == "False False"

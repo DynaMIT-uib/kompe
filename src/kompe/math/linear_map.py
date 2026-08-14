@@ -115,7 +115,7 @@ class LinearMap:
         """Apply this map to one flattened vector."""
         xp = self.array_module(x)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             x_arr = xp.asarray(x).reshape(self.shape[1])
             return dense @ x_arr
         return self._matvec(x)
@@ -124,7 +124,7 @@ class LinearMap:
         """Apply the adjoint map to one flattened vector."""
         xp = self.array_module(y)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             y_arr = xp.asarray(y).reshape(self.shape[0])
             return xp.swapaxes(xp.conjugate(dense), -2, -1) @ y_arr
         return self._rmatvec(y)
@@ -133,7 +133,7 @@ class LinearMap:
         """Apply this map to a block of column vectors."""
         xp = self.array_module(x_block)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             x_arr = xp.asarray(x_block)
             if x_arr.ndim == 1:
                 return dense @ x_arr.reshape(self.shape[1])
@@ -150,7 +150,7 @@ class LinearMap:
         """Apply the adjoint map to a block of column vectors."""
         xp = self.array_module(y_block)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             y_arr = xp.asarray(y_block)
             adjoint = xp.swapaxes(xp.conjugate(dense), -2, -1)
             if y_arr.ndim == 1:
@@ -1342,7 +1342,12 @@ def as_linear_map(
         )
         if out_shape == op.output_shape and in_shape == op.input_shape:
             return op
-        return replace(op, output_shape=out_shape, input_shape=in_shape)
+        relabeled = replace(op, output_shape=out_shape, input_shape=in_shape)
+        # The flat matrix is unchanged by shaped metadata. Share any dense
+        # materialization already paid for, while leaving the shaped-array
+        # cache private because its reshape depends on the new labels.
+        object.__setattr__(relabeled, "_dense_cache", op._dense_cache)
+        return relabeled
 
     op_type = str(type(op))
     is_jax_sparse = "jax.experimental.sparse" in op_type or (

@@ -147,8 +147,8 @@ def sph_to_sph(lat, lon, x_lat, x_lon, z_lat, z_lon, deg=True):
     return 90 - COLAT, LON
 
 
-def enu_to_ecef(v, lon, lat, reverse=False):
-    """convert vector(s) v from ENU to ECEF (or opposite)
+def enu_to_ecef(v, lon, lat):
+    """Convert vector(s) from ENU to ECEF.
 
     Parameters
     ----------
@@ -158,9 +158,6 @@ def enu_to_ecef(v, lon, lat, reverse=False):
         N array of latitudes (degrees)
     lon: array
         N array of longitudes (degrees)
-    reverse: bool (optional)
-        perform the reverse operation (ecef -> enu). Default False
-
     Returns
     -------
     v_ecef: array
@@ -178,15 +175,15 @@ def enu_to_ecef(v, lon, lat, reverse=False):
     n = np.vstack((-np.cos(th) * np.cos(ph), -np.cos(th) * np.sin(ph), np.sin(th))).T  # (N, 3)
     u = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th))).T  # (N, 3)
 
-    # rotation matrices (enu in columns if reverse, in rows otherwise):
-    R_EN_2_ECEF = np.stack((e, n, u), axis=1 if reverse else 2)  # (N, 3, 3)
+    # ENU basis vectors form the columns of the rotation matrix.
+    R_EN_2_ECEF = np.stack((e, n, u), axis=2)  # (N, 3, 3)
 
     # perform the rotations:
     return np.einsum("nij, nj -> ni", R_EN_2_ECEF, v)
 
 
 def ecef_to_enu(v, lon, lat):
-    """convert vector(s) v from ECEF to ENU
+    """Convert vector(s) from ECEF to ENU.
 
     Parameters
     ----------
@@ -199,88 +196,23 @@ def ecef_to_enu(v, lon, lat):
 
     Returns
     -------
-    v_ecef: array
+    v_enu: array
         N x 3 array of east, north, up components
 
-    See enu_to_ecef for implementation details
+    The ENU components are projections onto the local basis vectors.
     """
-    return enu_to_ecef(v, lon, lat, reverse=True)
-
-
-def tangent_vector(lat1, lon1, lat2, lon2, degrees=True):
-    """calculate tangential (to a sphere) unit vector at (lat1, lon1) pointing towards (lat2, lon2)
-
-    input must be arrays with equal shape:
-    lat1, lon1 -- latitude (not colat) and longitude of origin
-    lat2, lon2 -- latitude (not colat) and longitude which return vector points towards
-    degrees    -- True if input in degrees, False if radians
-
-    output:
-    east, north -- eastward and northward components of tangential unit vector
-
-    Will raise ValueError if
-      - inputs do not have equal shapes
-      - inputs contain points that are closer to identical or antipodal than (roughly) 0.3 degrees
-
-    vectorized code (fast)
-
-    KML 2016-04-20
-    2020-04 - fixed check to see if tangent is well defined
-    """
-
-    if not (lat1.shape == lon1.shape == lat2.shape == lon2.shape):
-        raise ValueError("tangent_vector: input coordinates do not have equal shapes")
-
-    shape = lat1.shape
-
-    # convert to radians if necessary, and flatten:
-    if degrees:
-        converter = lambda x: x.flatten() * np.pi / 180.0
-    else:
-        converter = lambda x: x.flatten()
-
-    lat1, lon1, lat2, lon2 = list(map(converter, (lat1, lon1, lat2, lon2)))
-
-    # ECEF position vectors:
-    ecef_p1 = np.vstack((np.cos(lat1) * np.cos(lon1), np.cos(lat1) * np.sin(lon1), np.sin(lat1)))
-    ecef_p2 = np.vstack((np.cos(lat2) * np.cos(lon2), np.cos(lat2) * np.sin(lon2), np.sin(lat2)))
-
-    # check if tangent is well defined:
-    if np.any(np.isclose(np.sum((ecef_p1 * ecef_p2) ** 2, axis=0), 1.0)):
-        points = np.isclose(np.sum((ecef_p1 * ecef_p2) ** 2, axis=0), 1.0).nonzero()[0]
-        raise ValueError(
-            "tangent_vector: input coordinates at nearly identical or antipodal points; tangent not defined\n flattened coordinates: %s"
-            % points
-        )
-
-    # non-tangential difference vector (3, N):
-    dp = ecef_p2 - ecef_p1
-
-    # subtract normal part of the vectors to make tangential vector in ECEF coordinates:
-    ecef_t = dp - np.sum(dp * ecef_p1, axis=0) * ecef_p1
-
-    # normalize:
-    ecef_t = ecef_t / np.linalg.norm(ecef_t, axis=0)
-
-    # convert ecef_t to enu_t, by constructing N rotation matrices:
-    R = np.dstack(
+    ph = lon * d2r
+    th = (90 - lat) * d2r
+    east = np.vstack((-np.sin(ph), np.cos(ph), np.zeros_like(ph))).T
+    north = np.vstack((-np.cos(th) * np.cos(ph), -np.cos(th) * np.sin(ph), np.sin(th))).T
+    up = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th))).T
+    return np.column_stack(
         (
-            np.vstack((-np.sin(lon1), np.cos(lon1), 0 * lat1)).T,
-            np.vstack(
-                (-np.cos(lon1) * np.sin(lat1), -np.sin(lon1) * np.sin(lat1), np.cos(lat1))
-            ).T,
-            np.vstack((np.cos(lon1) * np.cos(lat1), np.sin(lon1) * np.cos(lat1), np.sin(lat1))).T,
+            np.einsum("ni,ni->n", v, east),
+            np.einsum("ni,ni->n", v, north),
+            np.einsum("ni,ni->n", v, up),
         )
     )
-
-    enu_t = np.einsum("lji, jl->il", R, ecef_t)
-    enu_t = enu_t[:2]  # third coordinate (up) is zero, since normal part was removed
-
-    # extract east and north components, reshape to original shape and return stacked
-    east = enu_t[0].reshape(shape)
-    north = enu_t[1].reshape(shape)
-
-    return east, north
 
 
 __all__ = [
@@ -289,5 +221,4 @@ __all__ = [
     "enu_to_ecef",
     "sph_to_car",
     "sph_to_sph",
-    "tangent_vector",
 ]

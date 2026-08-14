@@ -19,7 +19,6 @@ from kompe.cubed_sphere.spherical import (
     enu_to_ecef,
     sph_to_car,
     sph_to_sph,
-    tangent_vector,
 )
 
 __all__ = [
@@ -40,5 +39,4 @@ __all__ = [
     "sph_to_car",
     "sph_to_sph",
     "stencil",
-    "tangent_vector",
 ]

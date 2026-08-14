@@ -67,7 +67,8 @@ transformations; coefficient fitting is called analysis.
 
 All public coordinate and component conventions are explicit:
 
-- geographic latitude/longitude and canonical `theta`/`phi` are degrees;
+- `SphericalGrid` latitude/longitude and canonical `theta`/`phi` are degrees in
+  the spherical frame chosen by the caller;
 - cubed-sphere `xi`/`eta` are radians;
 - radii are unit-agnostic but must be mutually consistent;
 - surface-operator components are `(theta, phi)` (south, east);
@@ -82,7 +83,9 @@ closed-surface Helmholtz or mean-free Poisson semantics.
 ```python
 from kompe import RegionalCSMesh, RegionalCSProjection
 
-projection = RegionalCSProjection((20.0, 70.0), orientation=0.0)
+centre_longitude = 20.0
+centre_latitude = 70.0
+projection = RegionalCSProjection((centre_longitude, centre_latitude), orientation=0.0)
 mesh = RegionalCSMesh(
     projection,
     length=1800.0,
@@ -91,13 +94,36 @@ mesh = RegionalCSMesh(
     shape=(14, 18),
 )
 
-east_gradient, north_gradient = mesh.operators.surface_gradient_matrices(sparse=True)
+theta_gradient, phi_gradient = mesh.operators.surface_gradient_matrices(sparse=True)
 divergence = mesh.operators.surface_divergence_matrix(sparse=True)
 
 metadata = mesh.to_spec().to_dict()
 restored = RegionalCSMesh.from_spec(metadata)
 assert restored.signature == mesh.signature
 ```
+
+For global basis fitting and evaluation, the workflow is equally direct:
+
+```python
+import numpy as np
+from kompe import SHBasis, SphericalGrid, SphericalTransform
+
+latitude = np.linspace(-87.5, 87.5, 36)
+longitude = np.linspace(-180.0, 175.0, 72)
+lon, lat = np.meshgrid(longitude, latitude)
+grid = SphericalGrid(lat=lat, lon=lon)
+
+basis = SHBasis(8, 8, mean_free=False)
+transform = SphericalTransform(basis, grid, area_weighted=True)
+samples = np.cos(np.deg2rad(lat)).reshape(-1)
+coefficients = transform.analyze_scalar(samples)
+fitted = transform.synthesize_scalar(coefficients).reshape(grid.shape)
+```
+
+When physical resolution is more natural than a cell count, name the two
+directions explicitly: `xi_cell_size` is parallel to the projection orientation
+and `eta_cell_size` is perpendicular to it. This avoids reversing the physical
+axes to match the array shape's `(eta, xi)` order.
 
 Install the numerical core with `pip install kompe`. JAX acceleration is an
 optional extra: `pip install "kompe[jax]"`. Select it with

@@ -13,7 +13,6 @@ from kompe.math.backend import (
     to_numpy,
     use_jax,
     vmap,
-    xp,
 )
 from kompe.math.einsum import einsum_linear_map, einsum_linear_map_from_matvec
 from kompe.math.fingerprints import array_fingerprint, content_fingerprint
@@ -76,5 +75,4 @@ __all__ = [
     "vmap",
     "vstack_linear_maps",
     "weighted_tensor_pinv",
-    "xp",
 ]

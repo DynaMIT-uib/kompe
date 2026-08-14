@@ -49,7 +49,7 @@ def test_projection():
     block = p.face_index(lon, lat)
     xi, eta, block = p.geographic_to_cube(lon, lat, block)
 
-    r, theta, phi = p.cube_to_spherical(xi, eta, radius=rr, face=block)
+    _, theta, phi = p.cube_to_spherical(xi, eta, radius=rr, face=block)
     geo2cube2spherical_works = np.allclose(90 - np.rad2deg(theta) - lat, 0) & np.allclose(
         np.rad2deg(phi) - lon, 0
     )
@@ -78,33 +78,29 @@ def test_projection():
 
     Pc = p.cartesian_to_cube_vector_matrix(xi, eta, radius=rr, face=block)
     Pcinv = p.cube_to_cartesian_vector_matrix(xi, eta, radius=rr, face=block)
-    Ps = p.spherical_to_cube_vector_matrix(xi, eta, radius=rr, face=block)
-    Psinv = p.cube_to_spherical_vector_matrix(xi, eta, radius=rr, face=block)
-    Q = p.spherical_normalization_matrix(lat, rr)
+    enu_to_cube = p.enu_to_cube_vector_matrix(xi, eta, radius=rr, face=block)
+    cube_to_enu = p.cube_to_enu_vector_matrix(xi, eta, radius=rr, face=block)
 
     A = np.einsum("nij, nj -> ni", Pc, Axyz.T).T
     Axyz_ = np.einsum("nij, nj -> ni", Pcinv, A.T).T
-    Asph = np.einsum("nij, nj -> ni", Psinv, A.T).T
-    Asph_normed = np.einsum("nij, nj -> ni", Q, Asph.T).T
-    A_ = np.einsum("nij, nj -> ni", Ps, Asph.T).T
+    Aenu = np.einsum("nij, nj -> ni", cube_to_enu, A.T).T
+    A_ = np.einsum("nij, nj -> ni", enu_to_cube, Aenu.T).T
 
     cubed2cartesian_works = np.allclose(Axyz - Axyz_, 0)
     print(
         "Converting vector components between cubed sphere and Cartesian give "
         f"consistent results: {cubed2cartesian_works}"
     )
-    cubed2spherical_works = np.allclose(A_ - A, 0)
+    cubed2enu_works = np.allclose(A_ - A, 0)
     print(
-        "Converting vector components between cubed sphere and spherical give "
-        f"consistent results: {cubed2spherical_works}"
+        "Converting vector components between cubed sphere and ENU gives "
+        f"consistent results: {cubed2enu_works}"
     )
-    norm_consistent = np.allclose(
-        np.linalg.norm(Asph_normed, axis=0) - np.linalg.norm(Axyz, axis=0), 0
-    )
-    print(f"Cartesian and normalized spherical vectors have the same norm: {norm_consistent}")
+    norm_consistent = np.allclose(np.linalg.norm(Aenu, axis=0), np.linalg.norm(Axyz, axis=0))
+    print(f"Cartesian and ENU vectors have the same norm: {norm_consistent}")
 
     assert cubed2cartesian_works
-    assert cubed2spherical_works
+    assert cubed2enu_works
     assert norm_consistent
 
     # Plot cubed sphere grid and vector components in Cartesian 3D and
@@ -144,16 +140,13 @@ def test_projection():
         C = "C" + str(i)
 
         # Plot spherical coordinates using cartopy.
-        r, theta, phi = p.cube_to_spherical(xi, eta, face=i)
+        _, theta, phi = p.cube_to_spherical(xi, eta, face=i)
         lo, la = np.rad2deg(phi), 90 - np.rad2deg(theta)
         lon, lat = np.rad2deg(phi).reshape(-1), 90 - np.rad2deg(theta).reshape(-1)
-        Ps_inv = p.cube_to_spherical_vector_matrix(xi, eta, radius=1, face=i)
-        # Multiply Ps_inv by Q to get normalized vector components.
-        Q = p.spherical_normalization_matrix(lat, r.reshape(-1))
-        Ps_normalized = np.einsum("nij, njk -> nik", Q, Ps_inv)
+        cube_to_enu = p.cube_to_enu_vector_matrix(xi, eta, radius=1, face=i)
 
         # Project in xi-direction.
-        Aeast, Anorth, Ar = np.einsum("nij, nj -> ni", Ps_normalized, Axis).T
+        Aeast, Anorth, Ar = np.einsum("nij, nj -> ni", cube_to_enu, Axis).T
         assert np.all(np.isclose(Ar, 0))
         # norms = np.sqrt(Aeast**2 + Anorth**2)
 
@@ -164,7 +157,7 @@ def test_projection():
         axg2.quiver(lon, lat, Ae_pc, An_pc, transform=ccrs.PlateCarree(), color=C)
 
         # Project in eta-direction.
-        Aeast, Anorth, Ar = np.einsum("nij, nj -> ni", Ps_normalized, Aetas).T
+        Aeast, Anorth, Ar = np.einsum("nij, nj -> ni", cube_to_enu, Aetas).T
         assert np.all(np.isclose(Ar, 0))
 
         Ae_pc, An_pc = geocentric_to_plate_carree_vector_components(
@@ -261,13 +254,11 @@ def test_projection():
         la = 90 - np.rad2deg(theta_hd)
         lo = np.rad2deg(phi_hd)
 
-        r, theta, phi = p.cube_to_spherical(xi, eta, radius=1, face=block)
-        Ps = p.spherical_to_cube_vector_matrix(xi, eta, radius=1, face=block)
-        Q = p.spherical_normalization_matrix(90 - np.rad2deg(theta), r, inverse=True)
-        Ps_normalized = np.einsum("nij, njk -> nik", Ps, Q)
+        _, theta, phi = p.cube_to_spherical(xi, eta, radius=1, face=block)
+        enu_to_cube = p.enu_to_cube_vector_matrix(xi, eta, radius=1, face=block)
 
-        Ae = np.einsum("nij, nj -> ni", Ps_normalized, Aeast.T).T
-        An = np.einsum("nij, nj -> ni", Ps_normalized, Anorth.T).T
+        Ae = np.einsum("nij, nj -> ni", enu_to_cube, Aeast.T).T
+        An = np.einsum("nij, nj -> ni", enu_to_cube, Anorth.T).T
         assert np.allclose(np.hstack((Ae[2], An[2])), 0)
 
         axes[0, block].scatter(xi, eta, c="grey", zorder=1, s=5)
@@ -334,7 +325,7 @@ def test_projection():
         C = "C" + str(i)
 
         # Plot spherical coordinates using cartopy.
-        r, theta, phi = p.cube_to_spherical(xi, eta, face=i)
+        _, theta, phi = p.cube_to_spherical(xi, eta, face=i)
         lo, la = np.rad2deg(phi), 90 - np.rad2deg(theta)
 
         for k in range(N):
@@ -355,7 +346,7 @@ def test_projection():
                 transform=ccrs.Geodetic(),
             )
 
-    r, theta, phi = p.cube_to_spherical(xi_, eta_, face=0)
+    _, theta, phi = p.cube_to_spherical(xi_, eta_, face=0)
     lo, la = np.rad2deg(phi), 90 - np.rad2deg(theta)
     for k in range(N + 2 * N_extra):
         ax.plot(
