@@ -10,7 +10,7 @@ import pytest
 # leaves this process-wide JAX policy to its caller.
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-from kompe.math import JAX_AVAILABLE  # noqa: E402
+from kompe.math import JAX_AVAILABLE
 
 
 def pytest_collection_modifyitems(items):
