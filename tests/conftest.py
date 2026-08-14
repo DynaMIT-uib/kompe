@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from kompe.math import JAX_AVAILABLE
+# Numerical regression tests request double precision explicitly. Kompe itself
+# leaves this process-wide JAX policy to its caller.
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
+from kompe.math import JAX_AVAILABLE  # noqa: E402
 
 
 def pytest_collection_modifyitems(items):

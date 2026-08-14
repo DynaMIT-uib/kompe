@@ -115,7 +115,7 @@ class LinearMap:
         """Apply this map to one flattened vector."""
         xp = self.array_module(x)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             x_arr = xp.asarray(x).reshape(self.shape[1])
             return dense @ x_arr
         return self._matvec(x)
@@ -124,7 +124,7 @@ class LinearMap:
         """Apply the adjoint map to one flattened vector."""
         xp = self.array_module(y)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             y_arr = xp.asarray(y).reshape(self.shape[0])
             return xp.swapaxes(xp.conjugate(dense), -2, -1) @ y_arr
         return self._rmatvec(y)
@@ -133,7 +133,7 @@ class LinearMap:
         """Apply this map to a block of column vectors."""
         xp = self.array_module(x_block)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             x_arr = xp.asarray(x_block)
             if x_arr.ndim == 1:
                 return dense @ x_arr.reshape(self.shape[1])
@@ -150,7 +150,7 @@ class LinearMap:
         """Apply the adjoint map to a block of column vectors."""
         xp = self.array_module(y_block)
         dense = self._cached_dense(xp)
-        if dense is not None:
+        if dense is not None and self._diagonal_array_func is None:
             y_arr = xp.asarray(y_block)
             adjoint = xp.swapaxes(xp.conjugate(dense), -2, -1)
             if y_arr.ndim == 1:

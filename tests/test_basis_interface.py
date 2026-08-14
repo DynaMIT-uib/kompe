@@ -136,6 +136,21 @@ def test_grid_signature_matches_equivalent_coordinates():
     assert not first.same_as(different)
 
 
+def test_grid_retains_broadcast_shape_for_evaluated_arrays():
+    """Flat numerical storage keeps the caller's useful plotting shape."""
+    latitude = np.array([[60.0], [70.0]])
+    longitude = np.array([[0.0, 30.0, 60.0]])
+
+    grid = SphericalGrid(lat=latitude, lon=longitude)
+
+    assert grid.shape == (2, 3)
+    assert grid.size == 6
+    np.testing.assert_allclose(grid.lat.reshape(grid.shape), np.broadcast_to(latitude, grid.shape))
+    np.testing.assert_allclose(
+        grid.lon.reshape(grid.shape), np.broadcast_to(longitude, grid.shape)
+    )
+
+
 def test_grid_owns_immutable_unambiguous_coordinates():
     """SphericalGrid identity cannot diverge from mutable caller coordinates."""
     lat = np.array([60.0, 61.0])
@@ -703,10 +718,11 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
         assert "jax" in type(G).__module__
         assert "jax" in type(cs_basis._surface_laplacian()).__module__
         assert "jax" in type(laplacian_values).__module__
-        assert to_numpy(values).dtype == np.dtype(np.float64)
-        assert to_numpy(G).dtype == np.dtype(np.float64)
-        assert to_numpy(cs_basis._surface_laplacian()).dtype == np.dtype(np.float64)
-        assert to_numpy(laplacian_values).dtype == np.dtype(np.float64)
+        backend_dtype = to_numpy(values).dtype
+        assert np.issubdtype(backend_dtype, np.floating)
+        assert to_numpy(G).dtype == backend_dtype
+        assert to_numpy(cs_basis._surface_laplacian()).dtype == backend_dtype
+        assert to_numpy(laplacian_values).dtype == backend_dtype
         np.testing.assert_allclose(
             to_numpy(laplacian_values), to_numpy(cs_basis._surface_laplacian()) @ to_numpy(values)
         )

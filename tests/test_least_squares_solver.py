@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy.sparse.linalg import lsmr as scipy_lsmr
 
-from kompe.math import JAX_AVAILABLE, as_linear_map, set_backend, use_jax
+from kompe.math import JAX_AVAILABLE, LinearMap, as_linear_map, set_backend, use_jax
 from kompe.math.least_squares_problem import LeastSquaresProblem
 from kompe.math.least_squares_solver import (
     LEAST_SQUARES_SOLVER_ENV,
@@ -256,6 +256,36 @@ def test_normal_pinv_response_solver_reuses_factorization(monkeypatch):
     normal_pinv = np.linalg.pinv(A_H @ A, rtol=solver.tolerance, hermitian=True)
     np.testing.assert_allclose(solve_response(rhs_first), normal_pinv @ (A_H @ rhs_first))
     np.testing.assert_allclose(solve_response(rhs_second), normal_pinv @ (A_H @ rhs_second))
+
+
+def test_normal_pinv_response_solver_uses_explicit_data_adjoint():
+    """Repeated dense response solves do not revisit structured callbacks."""
+    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
+    adjoint_applications = 0
+
+    def rmatmat(values):
+        nonlocal adjoint_applications
+        adjoint_applications += 1
+        return matrix.T @ values
+
+    operator = LinearMap(
+        shape=matrix.shape,
+        dtype=matrix.dtype,
+        _matvec=lambda values: matrix @ values,
+        _rmatvec=lambda values: matrix.T @ values,
+        _matmat=lambda values: matrix @ values,
+        _rmatmat=rmatmat,
+        _dense_array_func=lambda xp: xp.asarray(matrix),
+    )
+    problem = LeastSquaresProblem(A=operator, solution_shape=2, data_shapes=3)
+    solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
+    solve_response = solver.build_response_solver(problem)
+    rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
+
+    expected = np.linalg.pinv(matrix) @ rhs
+    np.testing.assert_allclose(solve_response(rhs), expected)
+    np.testing.assert_allclose(solve_response(2 * rhs), 2 * expected)
+    assert adjoint_applications == 0
 
 
 def test_normal_pinv_solve_reuses_cached_pseudo_inverse(monkeypatch):

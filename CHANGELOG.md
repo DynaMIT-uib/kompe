@@ -7,6 +7,16 @@ public interfaces with an accompanying migration note.
 
 ## Unreleased
 
+- Preserve the caller's broadcast shape on `SphericalGrid` while keeping
+  coordinates flat for numerical operators.
+- Clarify spherical coordinate frames, regional centre tuple order, area
+  weighting, and scaled regularization in the public scientific API.
+- Reuse an explicitly materialized `LinearMap` matrix for later applications,
+  avoiding repeated structured construction after the dense cost has been paid.
+- Keep known diagonal and identity maps on their vector-backed application path
+  even when a full matrix has been requested for inspection.
+- Make the reusable dense normal-pseudoinverse solver retain an explicit data
+  adjoint, keeping its repeated solve path fast without changing `LinearMap` semantics.
 - Remove the empty `SphericalBasis` and `SphericalRepresentation` aliases;
   `ScalarBasis` is the direct coefficient-basis interface.
 - Remove coefficient-space aliases from `SphericalGrid`; compare point grids

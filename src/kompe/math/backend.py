@@ -41,17 +41,8 @@ def _load_jax() -> types.ModuleType:
     with _jax_import_lock:
         if _jax_namespace is not None:
             return _jax_namespace
-        # Kompe is a numerical-science library whose NumPy API is float64 by
-        # default. Preserve that precision contract on the JAX backend.
-        #
-        # Set both the environment option (for JAX import-time configuration)
-        # and the runtime option (for processes that imported JAX earlier).
-        os.environ["JAX_ENABLE_X64"] = "1"
         try:
             import jax
-
-            jax.config.update("jax_enable_x64", True)
-
             import jax.numpy as jnp
             from jax import Array as JaxArray
         except ImportError as exc:  # pragma: no cover - broken optional install

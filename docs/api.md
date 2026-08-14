@@ -6,7 +6,9 @@ backend-neutral numerical layer is intentionally namespaced under
 
 ## Representations and meshes
 
-- `SphericalGrid`: immutable spherical sample points, optionally with area weights.
+- `SphericalGrid`: immutable spherical sample points in the caller's coordinate
+  frame, optionally with area weights. Coordinates are stored flat while
+  `shape` retains the broadcast input shape for reshaping evaluated arrays.
 - `SHBasis`: real spherical-harmonic scalar and Helmholtz expansion.
 - `SECSBasis`: curl-free or divergence-free elementary-current expansion;
   construction requires an explicit `current_type`. Its current operator
@@ -59,6 +61,10 @@ are explicit projections within one coefficient space.
 `as_linear_map` to wrap dense or sparse arrays and the named constructors for
 diagonal, identity, pointwise, stacked, or indexed maps. Least-squares helpers
 consume `LinearMap` without requiring dense materialization.
+Materializing `.array` or `to_matrix()` caches the dense matrix; later
+applications reuse it instead of repeating the structured construction.
+Known diagonal and identity maps remain vector-backed even when a full matrix
+has been requested for inspection.
 
 NumPy/SciPy is the reference backend. JAX is optional and lazy. Select it with
 `kompe.math.set_backend("jax")`, a `backend_context("jax")`, or explicit JAX

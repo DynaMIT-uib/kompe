@@ -82,11 +82,6 @@ def _helmholtz_surface_smoothness_weights(degree):
     return np.sqrt(angular_norm) * laplacian_eigenvalue
 
 
-def _representation_signature(representation):
-    """Return a cache key for an evaluable representation."""
-    return representation.signature
-
-
 def _owned_explicit_weights(values):
     """Own weights so cached analysis cannot be mutated externally."""
     owned = np.array(values, copy=True, order="C")
@@ -249,7 +244,34 @@ class SphericalTransform:
         area_weighted=False,
         use_persistent_evaluation_cache=True,
     ):
-        """Initialize a transform between ``basis`` and ``grid``."""
+        """Initialize synthesis and analysis between ``basis`` and ``grid``.
+
+        Parameters
+        ----------
+        basis : SurfaceDifferentialBasis
+            Coefficient representation to evaluate or fit.
+        grid : SphericalGrid
+            Sample positions in the same spherical coordinate frame as the
+            basis.
+        grid_remap_basis : SurfaceDifferentialBasis, optional
+            Representation used only when external sample grids must first be
+            remapped to ``grid``.
+        sqrt_weights : array-like, optional
+            Square-root residual weights. Their squares weight the
+            least-squares objective.
+        reg_lambda : float, optional
+            Dimensionless relative regularization strength. Kompe balances
+            the data and regularization operator scales before solving.
+        pinv_rtol : float, optional
+            Relative singular-value cutoff used by pseudo-inverse solvers.
+        area_weighted : bool, optional
+            Use ``grid.area_weights`` when present, otherwise spherical
+            ``sin(theta)`` weights. Explicit ``sqrt_weights`` take precedence.
+            This affects analysis only, never synthesis.
+        use_persistent_evaluation_cache : bool, optional
+            Reuse deterministic basis-evaluation matrices through the basis
+            cache when available.
+        """
         if not isinstance(basis, SurfaceDifferentialBasis):
             raise TypeError("SphericalTransform basis must implement SurfaceDifferentialBasis.")
         if not isinstance(grid, SphericalGrid):
@@ -335,7 +357,7 @@ class SphericalTransform:
             "algorithm": "spherical_transform_least_squares",
             "version": _LEAST_SQUARES_CACHE_VERSION,
             "field_type": str(field_type),
-            "basis": _representation_signature(self.basis),
+            "basis": self.basis.signature,
             "grid_coordinates": self.grid.exact_coordinate_signature,
             "sqrt_weights": array_fingerprint(weights),
             "regularization_lambda": self.reg_lambda,
@@ -870,7 +892,7 @@ class SphericalTransform:
             )
 
         cache_key = (
-            _representation_signature(analysis_basis),
+            analysis_basis.signature,
             grid_signature,
             weight_signature,
             reg_lambda,

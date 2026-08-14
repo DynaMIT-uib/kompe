@@ -135,7 +135,7 @@ def _uniform_edge_axis(name, values):
 
 class RegionalCSProjection:
     def __init__(self, position, orientation):
-        """Set up cubed sphere projection
+        """Set up a regional cubed-sphere chart.
 
         The RegionalCSProjection is set up by
         1) rotating to a local coordinate system in which 'position'
@@ -145,10 +145,10 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        position: array (lon, lat)
-            coordinate at which the cube surface should be
-            tangential to the sphere - the center of the projection.
-            Pair of values for longitude and latitude [deg]
+        position : array-like of (longitude, latitude)
+            Centre at which the cube surface is tangential to the sphere,
+            in degrees. The tuple order is explicitly longitude first,
+            latitude second.
         orientation: scalar or 2-element array-like
             orientation of the cube surface.
             if scalar: angle in degrees that defines the xi axis: orientation = 0 / 180

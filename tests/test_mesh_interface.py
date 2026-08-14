@@ -16,7 +16,9 @@ def test_grid_does_not_claim_mesh_topology():
     grid = SphericalGrid(lat=[60.0, 61.0], lon=[10.0, 11.0])
 
     assert not isinstance(grid, StructuredSurfaceMesh)
-    assert not hasattr(grid, "shape")
+    assert grid.shape == (2,)
+    assert not hasattr(grid, "cell_areas")
+    assert not hasattr(grid, "operators")
 
 
 def test_global_basis_exposes_validated_native_mesh():

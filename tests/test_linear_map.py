@@ -138,6 +138,38 @@ def test_diagonal_linear_map_matches_dense_diagonal():
     np.testing.assert_allclose(diag.diagonal(backend="numpy"), [2.0, 3.0])
 
 
+def test_materialized_diagonal_map_keeps_vector_application():
+    """A full matrix requested for inspection does not replace diagonal application."""
+    diagonal = diagonal_linear_map(np.array([2.0, 3.0]))
+    calls = []
+    original_matvec = diagonal._matvec
+    original_rmatvec = diagonal._rmatvec
+    original_matmat = diagonal._matmat
+    original_rmatmat = diagonal._rmatmat
+    object.__setattr__(
+        diagonal, "_matvec", lambda values: calls.append("matvec") or original_matvec(values)
+    )
+    object.__setattr__(
+        diagonal, "_rmatvec", lambda values: calls.append("rmatvec") or original_rmatvec(values)
+    )
+    object.__setattr__(
+        diagonal, "_matmat", lambda values: calls.append("matmat") or original_matmat(values)
+    )
+    object.__setattr__(
+        diagonal, "_rmatmat", lambda values: calls.append("rmatmat") or original_rmatmat(values)
+    )
+
+    diagonal.to_matrix(backend="numpy")
+    vector = np.array([5.0, 7.0])
+    block = np.eye(2)
+    diagonal.matvec(vector)
+    diagonal.rmatvec(vector)
+    diagonal.matmat(block)
+    diagonal.rmatmat(block)
+
+    assert calls == ["matvec", "rmatvec", "matmat", "rmatmat"]
+
+
 def test_identity_linear_map_is_noop_without_dense_materialization():
     """Identity maps apply without storing an explicit dense matrix."""
     identity = identity_linear_map((2, 2))
@@ -383,16 +415,16 @@ def test_scaled_einsum_map_preserves_composition_structure():
     )
 
 
-def test_dense_linear_map_materializes_once_per_backend():
-    """Cached matrices keep fast operations in LinearMap."""
+def test_materialized_linear_map_reuses_cached_matrix():
+    """An explicitly materialized map reuses that matrix for application."""
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])
     calls = 0
 
     def fail_matvec(_):
-        raise AssertionError("cached map should use dense matvec")
+        raise AssertionError("materialized map should use dense matvec")
 
     def fail_rmatvec(_):
-        raise AssertionError("cached map should use dense rmatvec")
+        raise AssertionError("materialized map should use dense rmatvec")
 
     def dense_array(xp):
         nonlocal calls
@@ -1252,7 +1284,7 @@ def test_einsum_linear_map_dtype_does_not_materialize_jax_components(monkeypatch
 
     monkeypatch.setattr(einsum_map_module, "to_numpy", fail_to_numpy)
 
-    assert linear_map.dtype == np.dtype(float)
+    assert linear_map.dtype == np.dtype(jnp.asarray(0.0).dtype)
 
 
 def test_einsum_linear_map_complex_adjoint_matches_dense():

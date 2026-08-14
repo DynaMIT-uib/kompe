@@ -28,6 +28,8 @@ class SphericalGrid:
         Flattened cell-area weights associated with the grid points.
     size : int
         Total number of grid points.
+    shape : tuple
+        Broadcast shape of the coordinates supplied by the caller.
 
     Notes
     -----
@@ -41,16 +43,17 @@ class SphericalGrid:
         Parameters
         ----------
         lat : array-like, optional
-            Geographic latitude coordinates in degrees.
+            Latitude coordinates in degrees in the caller's spherical frame.
         lon : array-like, optional
-            Geographic longitude coordinates in degrees.
+            Longitude coordinates in degrees in the caller's spherical frame.
         theta : array-like, optional
-            Spherical colatitude coordinates in degrees.
+            Colatitude coordinates in degrees in the caller's spherical frame.
         phi : array-like, optional
-            Spherical longitude coordinates in degrees.
+            Azimuth coordinates in degrees in the caller's spherical frame.
         area_weights : array-like, optional
             Cell-area weights for weighted surface fits. If provided,
-            the flattened shape must match the grid size.
+            the number of values must match the grid size. These weights
+            are used only when an analysis explicitly requests them.
 
         Raises
         ------
@@ -74,6 +77,7 @@ class SphericalGrid:
         )
         latitude, longitude = np.broadcast_arrays(latitude, longitude)
 
+        self.shape = latitude.shape
         self.lat = np.array(latitude, dtype=float, copy=True).reshape(-1)
         self.lon = np.array(longitude, dtype=float, copy=True).reshape(-1)
         if not np.all(np.isfinite(self.lat)) or not np.all(np.isfinite(self.lon)):
@@ -143,7 +147,7 @@ class SphericalGrid:
         if self.size == 0:
             return f"SphericalGrid(size=0{weights})"
         return (
-            f"SphericalGrid(size={self.size}, "
+            f"SphericalGrid(shape={self.shape}, size={self.size}, "
             f"lat_range=({self.lat.min():g}, {self.lat.max():g}), "
             f"lon_range=({self.lon.min():g}, {self.lon.max():g}){weights})"
         )
