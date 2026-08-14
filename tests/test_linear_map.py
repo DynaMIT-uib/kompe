@@ -127,6 +127,19 @@ def test_linear_map_shape_metadata_is_validated_and_relabelable():
         as_linear_map(linear_map, input_shape=(5,))
 
 
+def test_relabeling_linear_map_preserves_dense_materialization():
+    """Shape labels do not discard an already materialized flat matrix."""
+    matrix = np.arange(16.0).reshape(4, 4)
+    linear_map = as_linear_map(matrix, input_shape=(4,), output_shape=(4,))
+    materialized = linear_map.to_matrix(backend="numpy")
+
+    relabeled = as_linear_map(linear_map, input_shape=(2, 2), output_shape=(2, 2))
+
+    assert relabeled.to_matrix(backend="numpy") is materialized
+    assert relabeled.array.shape == (2, 2, 2, 2)
+    np.testing.assert_allclose(relabeled.array.reshape(4, 4), matrix)
+
+
 def test_diagonal_linear_map_matches_dense_diagonal():
     """Diagonal helper matches dense diagonal application."""
     diag = diagonal_linear_map(np.array([2.0, 3.0]))

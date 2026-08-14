@@ -613,12 +613,12 @@ class SphericalTransform:
 
     def synthesize_scalar(self, coeffs, derivative=None):
         """Synthesize scalar coefficients on the transform grid."""
-        coeff_array = self._coefficient_array(coeffs, preserve_backend=True)
+        coeff_array = self._coefficient_array(coeffs)
         return self._coefficients_to_grid(coeff_array, derivative=derivative)
 
     def synthesize_helmholtz(self, coeffs):
         """Synthesize Helmholtz coefficients on the transform grid."""
-        coeff_array = self._coefficient_array(coeffs, helmholtz=True, preserve_backend=True)
+        coeff_array = self._coefficient_array(coeffs, helmholtz=True)
         return self._coefficients_to_grid(coeff_array, helmholtz=True)
 
     def analyze_scalar(self, grid_values, solver_type=None):
@@ -777,12 +777,13 @@ class SphericalTransform:
 
     def _analysis_coefficients_to_rows(self, coeffs, *, batch_size, helmholtz):
         """Return analysis coefficients in time-row layout."""
-        array = np.asarray(coeffs)
+        xp = get_array_module(coeffs)
+        array = xp.asarray(coeffs)
         if not helmholtz and self._scalar_analysis_is_noop():
             return array.reshape(batch_size, -1)
         if batch_size == 1:
             return array.reshape(1, -1)
-        return np.moveaxis(array, -1, 0).reshape(batch_size, -1)
+        return xp.moveaxis(array, -1, 0).reshape(batch_size, -1)
 
     def _scalar_analysis_is_noop(self):
         """Return whether scalar analysis is a no-op."""
@@ -792,25 +793,20 @@ class SphericalTransform:
             output_shape=(self.grid.size,),
         )
 
-    def _coefficient_array(self, coeffs, *, helmholtz=False, preserve_backend=False):
+    def _coefficient_array(self, coeffs, *, helmholtz=False):
         """Return validated coefficient values."""
         values = getattr(coeffs, "array", coeffs)
         shape = (2, self.basis.index_length) if helmholtz else (self.basis.index_length,)
         expected_size = int(np.prod(shape))
-        size = getattr(values, "size", None)
-        if size is None:
-            array = np.asarray(values)
-            size = array.size
-        if int(size) != expected_size:
+        xp = get_array_module(values)
+        array = xp.asarray(values)
+        if int(array.size) != expected_size:
             field_type = "Helmholtz" if helmholtz else "scalar"
             raise ValueError(
-                f"{field_type} coefficients have length {int(size)}, expected {expected_size}."
+                f"{field_type} coefficients have length {int(array.size)}, "
+                f"expected {expected_size}."
             )
-        if preserve_backend:
-            xp = get_array_module(values)
-            if xp is not np:
-                return xp.asarray(values).reshape(shape)
-        return np.asarray(values).reshape(shape)
+        return array.reshape(shape)
 
     def _coefficients_to_grid(self, coeffs, derivative=None, helmholtz=False):
         """Transform basis coefficients to grid values."""
@@ -829,7 +825,8 @@ class SphericalTransform:
     def normalize_scalar_samples(values, input_grid):
         """Return scalar values with canonical time-first layout."""
         n_points = int(input_grid.size)
-        array = np.asarray(values)
+        xp = get_array_module(values)
+        array = xp.asarray(values)
 
         if array.ndim == 1:
             if array.size != n_points:
@@ -849,7 +846,8 @@ class SphericalTransform:
     def normalize_helmholtz_samples(values, input_grid):
         """Return tangential values with canonical time-first layout."""
         n_points = int(input_grid.size)
-        array = np.asarray(values)
+        xp = get_array_module(values)
+        array = xp.asarray(values)
 
         if array.ndim == 2:
             if array.shape == (2, n_points):
@@ -860,9 +858,9 @@ class SphericalTransform:
             if array.shape[1:] == (2, n_points):
                 return array
             if array.shape[:2] == (2, n_points):
-                return np.moveaxis(array, -1, 0)
+                return xp.moveaxis(array, -1, 0)
             if array.shape[1:] == (n_points, 2):
-                return np.moveaxis(array, -1, 1)
+                return xp.moveaxis(array, -1, 1)
 
         raise ValueError(
             "Tangential sample analysis expects shape (2, N), (B, 2, N), "
@@ -937,6 +935,8 @@ class SphericalTransform:
 
     def _remap_batch_to_grid(self, value_batch, input_grid, *, helmholtz):
         """Apply grid remap operators to field slices."""
+        xp = get_array_module(value_batch)
+        values = xp.asarray(value_batch)
         if not helmholtz:
             operator = self._grid_remap_operator(
                 "scalar_grid_remap_operator",
@@ -944,10 +944,9 @@ class SphericalTransform:
                 input_shape=(input_grid.size,),
                 output_shape=(self.grid.size,),
             )
-            interpolated = operator.matmat(np.asarray(value_batch).T)
-            return np.asarray(interpolated).reshape(self.grid.size, -1).T
+            interpolated = operator.matmat(values.T)
+            return xp.asarray(interpolated).reshape(self.grid.size, -1).T
 
-        values = np.asarray(value_batch)
         operator = self._grid_remap_operator(
             "tangential_grid_remap_operator",
             input_grid,
@@ -955,4 +954,4 @@ class SphericalTransform:
             output_shape=(2, self.grid.size),
         )
         interpolated = operator.matmat(values.reshape(values.shape[0], -1).T)
-        return np.moveaxis(np.asarray(interpolated).reshape(2, self.grid.size, -1), -1, 0)
+        return xp.moveaxis(xp.asarray(interpolated).reshape(2, self.grid.size, -1), -1, 0)

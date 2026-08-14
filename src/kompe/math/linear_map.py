@@ -1342,7 +1342,12 @@ def as_linear_map(
         )
         if out_shape == op.output_shape and in_shape == op.input_shape:
             return op
-        return replace(op, output_shape=out_shape, input_shape=in_shape)
+        relabeled = replace(op, output_shape=out_shape, input_shape=in_shape)
+        # The flat matrix is unchanged by shaped metadata. Share any dense
+        # materialization already paid for, while leaving the shaped-array
+        # cache private because its reshape depends on the new labels.
+        object.__setattr__(relabeled, "_dense_cache", op._dense_cache)
+        return relabeled
 
     op_type = str(type(op))
     is_jax_sparse = "jax.experimental.sparse" in op_type or (

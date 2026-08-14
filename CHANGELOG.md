@@ -13,6 +13,8 @@ public interfaces with an accompanying migration note.
   weighting, and scaled regularization in the public scientific API.
 - Reuse an explicitly materialized `LinearMap` matrix for later applications,
   avoiding repeated structured construction after the dense cost has been paid.
+- Preserve that dense materialization when the same `LinearMap` is relabeled
+  with shaped input/output metadata.
 - Keep known diagonal and identity maps on their vector-backed application path
   even when a full matrix has been requested for inspection.
 - Make the reusable dense normal-pseudoinverse solver retain an explicit data
@@ -33,6 +35,8 @@ public interfaces with an accompanying migration note.
 - Reduce spherical-harmonic index setup to the coefficient pairs and arrays it
   actually uses, and reuse the degree/order lookup during recurrence evaluation.
 - Remove unused cubed-sphere and backend helpers.
+- Remove the dynamic `xp` namespace proxy; numerical code now selects NumPy or
+  JAX explicitly from its operands with `get_array_module()`.
 - Make the surface-basis mean-free contract explicit instead of letting
   consumers silently skip a missing gauge projection.
 - Use the canonical `(theta, phi)` component order for regional gradient and
