@@ -7,6 +7,8 @@ public interfaces with an accompanying migration note.
 
 ## Unreleased
 
+- Make local tests import the checkout under test, cover Python 3.14, and keep
+  scheduled downstream compatibility testing focused on PynaMIT.
 - Preserve the caller's broadcast shape on `SphericalGrid` while keeping
   coordinates flat for numerical operators.
 - Clarify spherical coordinate frames, regional centre tuple order, area
