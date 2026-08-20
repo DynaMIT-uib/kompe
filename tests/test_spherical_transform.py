@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
-from kompe.cubed_sphere.cs_grid import CSGridRemapper
-from kompe.math import JAX_AVAILABLE, set_backend, to_numpy, use_jax
+from kompe.cubed_sphere.global_mesh import _GlobalCSRemapper
+from kompe.math import JAX_AVAILABLE, jax_enabled, set_backend, to_numpy
 from kompe.math.least_squares_solver import dense_full_rank_least_squares_map
 
 
@@ -44,6 +44,15 @@ def test_spherical_transform_analyzes_scalar_grid_values():
     actual = transform.analyze_scalar_samples(values, input_grid=grid, analysis_basis=basis)
 
     np.testing.assert_allclose(actual[0], expected, atol=1e-10)
+
+
+def test_explicit_empty_solver_name_is_not_treated_as_default():
+    """An invalid explicit solver selection fails visibly."""
+    basis = SHBasis(3, 2, mean_free=True)
+    transform = SphericalTransform(basis, _regular_grid())
+
+    with pytest.raises(ValueError, match="Solver must be one of"):
+        transform.analyze_scalar(np.zeros(transform.grid.size), solver_type="")
 
 
 def test_rotated_gradient_analysis_matches_dense_least_squares():
@@ -168,6 +177,21 @@ def test_direct_analysis_cache_fingerprints_explicit_weights():
     assert len(transform._input_transforms) == 2
 
 
+def test_direct_analysis_cache_treats_zero_regularization_as_none():
+    """Equivalent unregularized requests share one input transform."""
+    basis = SHBasis(3, 2, mean_free=True)
+    grid = _regular_grid()
+    transform = SphericalTransform(basis, grid)
+    values = np.zeros(grid.size)
+
+    transform.analyze_scalar_samples(values, input_grid=grid, analysis_basis=basis, reg_lambda=0.0)
+    transform.analyze_scalar_samples(
+        values, input_grid=grid, analysis_basis=basis, reg_lambda=None
+    )
+
+    assert len(transform._input_transforms) == 1
+
+
 def test_spherical_transform_regularization_uses_diagonal_operators():
     """Keep surface smoothness structured in least-squares."""
     basis = SHBasis(4, 2, mean_free=True)
@@ -196,6 +220,22 @@ def test_spherical_transform_regularization_uses_diagonal_operators():
     np.testing.assert_allclose(
         transform.apply_scalar_regularization(scalar_coeffs), scalar_weights * scalar_coeffs
     )
+
+
+def test_zero_regularization_uses_unregularized_analysis_path():
+    """Zero regularization does not disable structured analysis."""
+    basis = SHBasis(3, 2, mean_free=True)
+    transform = SphericalTransform(basis, _regular_grid(), reg_lambda=0.0)
+
+    assert transform.reg_lambda is None
+    assert transform.helmholtz_analysis_operator is not None
+
+
+@pytest.mark.parametrize("reg_lambda", [-1.0, np.inf, np.nan])
+def test_transform_rejects_invalid_regularization(reg_lambda):
+    """Invalid regularization fails at transform construction."""
+    with pytest.raises(ValueError, match="finite non-negative scalar"):
+        SphericalTransform(SHBasis(3, 2), _regular_grid(), reg_lambda=reg_lambda)
 
 
 def test_surface_smoothness_regularization_matches_parseval_weights():
@@ -383,20 +423,20 @@ def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch)
 
 def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
     """Scalar analysis reuses a cached CS remap operator."""
-    CSGridRemapper._shared_remap_matrix_cache.clear()
+    _GlobalCSRemapper._shared_remap_matrix_cache.clear()
     basis = SHBasis(3, 2, mean_free=True)
-    grid_remap_basis = GlobalCSBasis(8)
+    remapping_basis = GlobalCSBasis(8)
     source_basis = GlobalCSBasis(10)
     target_grid = SphericalGrid(
-        theta=grid_remap_basis.mesh.theta,
-        phi=grid_remap_basis.mesh.phi,
-        area_weights=grid_remap_basis.mesh.cell_areas.reshape(-1),
+        theta=remapping_basis.mesh.theta,
+        phi=remapping_basis.mesh.phi,
+        area_weights=remapping_basis.mesh.cell_areas.reshape(-1),
     )
     input_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
     values = np.vstack([np.sin(np.deg2rad(input_grid.theta)), np.cos(np.deg2rad(input_grid.phi))])
-    transform = SphericalTransform(basis, target_grid, grid_remap_basis=grid_remap_basis)
+    transform = SphericalTransform(basis, target_grid, remapping_basis=remapping_basis)
     calls = 0
-    original = grid_remap_basis._grid_remapper.build_scalar_grid_remap_matrix
+    original = remapping_basis._remapper.build_scalar_grid_remap_matrix
 
     def counted_build_scalar_grid_remap_matrix(*args, **kwargs):
         nonlocal calls
@@ -404,7 +444,7 @@ def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
-        grid_remap_basis._grid_remapper,
+        remapping_basis._remapper,
         "build_scalar_grid_remap_matrix",
         counted_build_scalar_grid_remap_matrix,
     )
@@ -412,13 +452,13 @@ def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
     def fail_interpolate_scalar(*args, **kwargs):
         raise AssertionError("supported CS remaps should use cached operators")
 
-    monkeypatch.setattr(grid_remap_basis, "interpolate_scalar", fail_interpolate_scalar)
+    monkeypatch.setattr(remapping_basis, "interpolate_scalar", fail_interpolate_scalar)
 
     projected_1 = transform.analyze_scalar_samples(
-        values, input_grid=input_grid, analysis_basis=grid_remap_basis
+        values, input_grid=input_grid, analysis_basis=remapping_basis
     )
     projected_2 = transform.analyze_scalar_samples(
-        values, input_grid=input_grid, analysis_basis=grid_remap_basis
+        values, input_grid=input_grid, analysis_basis=remapping_basis
     )
 
     assert calls == 1
@@ -429,22 +469,22 @@ def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
 def test_spherical_transform_skips_matching_grid_remap(monkeypatch):
     """Sample analysis skips remapping on matching grids."""
     basis = SHBasis(3, 2, mean_free=True)
-    grid_remap_basis = GlobalCSBasis(8)
+    remapping_basis = GlobalCSBasis(8)
     grid = SphericalGrid(
-        theta=grid_remap_basis.mesh.theta,
-        phi=grid_remap_basis.mesh.phi,
-        area_weights=grid_remap_basis.mesh.cell_areas.reshape(-1),
+        theta=remapping_basis.mesh.theta,
+        phi=remapping_basis.mesh.phi,
+        area_weights=remapping_basis.mesh.cell_areas.reshape(-1),
     )
     values = np.vstack([np.sin(np.deg2rad(grid.theta)), np.cos(np.deg2rad(grid.phi))])
-    transform = SphericalTransform(basis, grid, grid_remap_basis=grid_remap_basis)
+    transform = SphericalTransform(basis, grid, remapping_basis=remapping_basis)
 
     def fail_interpolate_scalar(*args, **kwargs):
         raise AssertionError("matching grids should not interpolate")
 
-    monkeypatch.setattr(grid_remap_basis, "interpolate_scalar", fail_interpolate_scalar)
+    monkeypatch.setattr(remapping_basis, "interpolate_scalar", fail_interpolate_scalar)
 
     projected = transform.analyze_scalar_samples(
-        values, input_grid=grid, analysis_basis=grid_remap_basis
+        values, input_grid=grid, analysis_basis=remapping_basis
     )
 
     assert projected.shape == (2, basis.index_length)
@@ -462,7 +502,7 @@ def test_spherical_transform_requires_grid_remap_operator():
     )
     input_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
     values = np.sin(np.deg2rad(input_grid.theta))
-    transform = SphericalTransform(basis, target_grid, grid_remap_basis=object())
+    transform = SphericalTransform(basis, target_grid, remapping_basis=object())
 
     with pytest.raises(TypeError, match="scalar_grid_remap_operator"):
         transform.analyze_scalar_samples(
@@ -472,14 +512,14 @@ def test_spherical_transform_requires_grid_remap_operator():
 
 def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
     """Helmholtz analysis reuses a cached CS remap operator."""
-    CSGridRemapper._shared_remap_matrix_cache.clear()
+    _GlobalCSRemapper._shared_remap_matrix_cache.clear()
     basis = SHBasis(3, 2, mean_free=True)
-    grid_remap_basis = GlobalCSBasis(8)
+    remapping_basis = GlobalCSBasis(8)
     source_basis = GlobalCSBasis(10)
     target_grid = SphericalGrid(
-        theta=grid_remap_basis.mesh.theta,
-        phi=grid_remap_basis.mesh.phi,
-        area_weights=grid_remap_basis.mesh.cell_areas.reshape(-1),
+        theta=remapping_basis.mesh.theta,
+        phi=remapping_basis.mesh.phi,
+        area_weights=remapping_basis.mesh.cell_areas.reshape(-1),
     )
     input_grid = SphericalGrid(theta=source_basis.mesh.theta, phi=source_basis.mesh.phi)
     theta_values = np.vstack(
@@ -489,9 +529,9 @@ def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
         [np.cos(np.deg2rad(input_grid.phi)), np.sin(np.deg2rad(input_grid.phi))]
     )
     values = np.stack([theta_values, phi_values], axis=1)
-    transform = SphericalTransform(basis, target_grid, grid_remap_basis=grid_remap_basis)
+    transform = SphericalTransform(basis, target_grid, remapping_basis=remapping_basis)
     calls = 0
-    original = grid_remap_basis._grid_remapper.build_tangential_grid_remap_matrix
+    original = remapping_basis._remapper.build_tangential_grid_remap_matrix
 
     def counted_build_tangential_grid_remap_matrix(*args, **kwargs):
         nonlocal calls
@@ -499,7 +539,7 @@ def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
-        grid_remap_basis._grid_remapper,
+        remapping_basis._remapper,
         "build_tangential_grid_remap_matrix",
         counted_build_tangential_grid_remap_matrix,
     )
@@ -507,13 +547,13 @@ def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
     def fail_interpolate_vector(*args, **kwargs):
         raise AssertionError("supported CS remaps should use cached operators")
 
-    monkeypatch.setattr(grid_remap_basis, "interpolate_vector", fail_interpolate_vector)
+    monkeypatch.setattr(remapping_basis, "interpolate_vector", fail_interpolate_vector)
 
     projected_1 = transform.analyze_helmholtz_samples(
-        values, input_grid=input_grid, analysis_basis=grid_remap_basis
+        values, input_grid=input_grid, analysis_basis=remapping_basis
     )
     projected_2 = transform.analyze_helmholtz_samples(
-        values, input_grid=input_grid, analysis_basis=grid_remap_basis
+        values, input_grid=input_grid, analysis_basis=remapping_basis
     )
 
     assert calls == 1
@@ -568,7 +608,7 @@ def test_cs_tangential_remap_operator_matches_interpolation():
 
 def test_cs_tangential_remap_matrix_cache_is_shared(monkeypatch):
     """Equivalent CS remaps share sparse matrix construction."""
-    CSGridRemapper._shared_remap_matrix_cache.clear()
+    _GlobalCSRemapper._shared_remap_matrix_cache.clear()
     source_basis = GlobalCSBasis(8)
     target_basis = GlobalCSBasis(6)
     equivalent_target_basis = GlobalCSBasis(6)
@@ -584,7 +624,7 @@ def test_cs_tangential_remap_matrix_cache_is_shared(monkeypatch):
         raise AssertionError("equivalent remap matrix should come from shared cache")
 
     monkeypatch.setattr(
-        equivalent_target_basis._grid_remapper, "build_tangential_grid_remap_matrix", fail_build
+        equivalent_target_basis._remapper, "build_tangential_grid_remap_matrix", fail_build
     )
 
     second_operator = equivalent_target_basis.tangential_grid_remap_operator(
@@ -694,6 +734,24 @@ def test_cs_non_native_scalar_analysis_solves_against_remap_operator():
         np.testing.assert_allclose(transform.synthesize_scalar(projected), expected_values)
 
 
+def test_direct_sample_analysis_uses_the_analysis_transform_layout():
+    """A native direct analysis owns the returned batch layout."""
+
+    class DirectNativeCSBasis(GlobalCSBasis):
+        scalar_grid_remap_operator = None
+
+    basis = DirectNativeCSBasis(4)
+    target = SphericalGrid(theta=basis.mesh.theta + 1e-3, phi=basis.mesh.phi)
+    transform = SphericalTransform(basis, target)
+    values = np.vstack([np.arange(basis.index_length), -np.arange(basis.index_length)])
+
+    projected = transform.analyze_scalar_samples(
+        values, input_grid=basis.native_grid, analysis_basis=basis
+    )
+
+    np.testing.assert_array_equal(projected, values)
+
+
 def test_cs_non_native_helmholtz_analysis_solves_against_remap_operator():
     """CS Helmholtz analysis is identity only on the native grid."""
     basis = GlobalCSBasis(4)
@@ -736,7 +794,7 @@ def test_mean_free_sh_helmholtz_analysis_uses_full_rank_factorization(area_weigh
     assert operator._cached_dense(np) is None
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
 
-    if use_jax():
+    if jax_enabled():
         import jax
         import jax.numpy as jnp
 
@@ -754,6 +812,26 @@ def test_full_mean_sh_helmholtz_analysis_retains_rank_deficient_fallback():
 
     assert transform._optimized_helmholtz_analysis_operator is None
     assert transform.helmholtz_analysis_operator.shape == (2 * basis.index_length, 2 * grid.size)
+
+
+def test_optimized_helmholtz_analysis_rejects_ambiguous_value_layout():
+    """A matching element count does not define component and sample axes."""
+    basis = GlobalCSBasis(4)
+    grid = SphericalGrid(theta=basis.mesh.theta, phi=basis.mesh.phi)
+    transform = SphericalTransform(basis, grid)
+
+    with pytest.raises(ValueError, match="incompatible with data_shape"):
+        transform.analyze_helmholtz(np.ones((4, grid.size)))
+
+
+def test_helmholtz_factorization_does_not_hide_invalid_weights():
+    """Only rank deficiency may select the pseudoinverse fallback."""
+    basis = SHBasis(3, 2, mean_free=True)
+    grid = _regular_grid()
+    transform = SphericalTransform(basis, grid, sqrt_weights=np.ones(grid.size - 1))
+
+    with pytest.raises(ValueError, match="Helmholtz sqrt_weights"):
+        _ = transform._optimized_helmholtz_analysis_operator
 
 
 @pytest.mark.parametrize("area_weighted", [False, True])
@@ -808,7 +886,7 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
     )
     np.testing.assert_allclose(batch_actual, batch_expected, rtol=2e-11, atol=2e-11)
 
-    if use_jax():
+    if jax_enabled():
         import jax
         import jax.numpy as jnp
 
@@ -820,7 +898,7 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_spherical_transform_synthesis_preserves_jax_backend():
     """Coefficient-to-grid synthesis uses LinearMap backend handling."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     try:
         set_backend("jax")
         basis = GlobalCSBasis(4)
@@ -859,7 +937,7 @@ def test_spherical_transform_preserves_explicit_jax_coefficients():
     """Explicit JAX coefficients reach the LinearMap apply path."""
     import jax.numpy as jnp
 
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     try:
         set_backend("numpy")
         basis = GlobalCSBasis(4)

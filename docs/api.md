@@ -11,8 +11,9 @@ backend-neutral numerical layer is intentionally namespaced under
   `shape` retains the broadcast input shape for reshaping evaluated arrays.
 - `SHBasis`: real spherical-harmonic scalar and Helmholtz expansion.
 - `SECSBasis`: curl-free or divergence-free elementary-current expansion;
-  construction requires an explicit `current_type`. Its current operator
-  accepts `chunk_size` for bounded-memory forward and adjoint evaluation.
+  construction requires an explicit `current_type`, and every synthesis
+  method follows that mode. Its current operator accepts `chunk_size` for
+  bounded-memory forward and adjoint evaluation.
 - `GlobalCSBasis`: closed-sphere, cell-centred cubed-sphere expansion. Its
   `cells_per_face` resolution is required. `interpolate_vector()` accepts and
   returns canonical `(theta, phi, radial)` components.
@@ -42,7 +43,7 @@ constructor used by serialization and derived meshes.
 points. `synthesize_scalar` and `synthesize_helmholtz` map coefficients to
 samples. `analyze_scalar` and `analyze_helmholtz` fit samples already on the
 bound grid. `analyze_scalar_samples` and `analyze_helmholtz_samples` accept
-external sample grids, optionally remapping through `grid_remap_basis`, and
+external sample grids, optionally remapping through `remapping_basis`, and
 return batch-first coefficient rows.
 
 Matrix names state what they do and end in `_matrix`; structured equivalents

@@ -15,11 +15,14 @@ from kompe.secs.cartesian import (
     radial_unit_vectors,
     relative_coordinates,
 )
+from kompe.secs.inclined_field import (
+    current_wedge_magnetic_field_matrices,
+    inclined_secs_magnetic_field_matrices,
+)
 from kompe.secs.kernels import (
     angular_distance,
-    current_wedge_magnetic_field_matrix,
-    inclined_field_magnetic_field_matrices,
     magnetic_field_matrices,
+    scalar_green_matrix,
     surface_current_matrices,
 )
 
@@ -32,12 +35,13 @@ __all__ = [
     "cartesian_current_matrices",
     "cartesian_distance",
     "cartesian_magnetic_field_matrices",
-    "current_wedge_magnetic_field_matrix",
+    "current_wedge_magnetic_field_matrices",
     "horizontal_azimuth",
     "horizontal_distance",
-    "inclined_field_magnetic_field_matrices",
+    "inclined_secs_magnetic_field_matrices",
     "magnetic_field_matrices",
     "radial_unit_vectors",
     "relative_coordinates",
+    "scalar_green_matrix",
     "surface_current_matrices",
 ]

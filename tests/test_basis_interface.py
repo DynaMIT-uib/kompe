@@ -12,16 +12,16 @@ from kompe import (
     SphericalGrid,
     SurfaceDifferentialBasis,
 )
-from kompe.core import BasisView
+from kompe.basis import BasisSubset
 from kompe.math import (
     JAX_AVAILABLE,
-    is_noop_linear_map,
+    is_identity_linear_map,
+    jax_enabled,
     set_backend,
     to_jax,
     to_numpy,
-    use_jax,
 )
-from kompe.math.tensor_operations import weighted_tensor_pinv
+from kompe.math.pseudoinverse import weighted_tensor_pinv
 from kompe.spherical_transform import (
     SphericalTransform,
     grid_sqrt_area_weights,
@@ -31,14 +31,14 @@ from kompe.spherical_transform import (
 
 def test_public_sphere_package_is_canonical():
     """Spherical basis types are available from the public package."""
-    from kompe.cubed_sphere.cs_basis import GlobalCSBasis as ConcreteCSBasis
+    from kompe.cubed_sphere.global_basis import GlobalCSBasis as ConcreteCSBasis
     from kompe.spherical_harmonics.sh_basis import SHBasis as ConcreteSHBasis
 
     assert GlobalCSBasis is ConcreteCSBasis
     assert SHBasis is ConcreteSHBasis
     assert ScalarBasis is kompe.ScalarBasis
-    assert "BasisView" not in kompe.__all__
-    assert not hasattr(kompe, "BasisView")
+    assert "BasisSubset" not in kompe.__all__
+    assert not hasattr(kompe, "BasisSubset")
     assert not hasattr(kompe, "SphericalBasis")
     assert not hasattr(kompe, "SphericalRepresentation")
     assert isinstance(kompe.__version__, str)
@@ -53,8 +53,8 @@ def test_concrete_bases_implement_basis_interface():
     assert isinstance(sh_basis, SurfaceDifferentialBasis)
     assert isinstance(cs_basis, ScalarBasis)
     assert isinstance(cs_basis, SurfaceDifferentialBasis)
-    assert is_noop_linear_map(cs_basis.scalar_evaluation_operator(cs_basis.native_grid))
-    assert not is_noop_linear_map(sh_basis.scalar_evaluation_operator(cs_basis.native_grid))
+    assert is_identity_linear_map(cs_basis.scalar_evaluation_operator(cs_basis.native_grid))
+    assert not is_identity_linear_map(sh_basis.scalar_evaluation_operator(cs_basis.native_grid))
     assert sh_basis.kind == "SH"
     assert cs_basis.kind == "CS"
     assert cs_basis.index_length == cs_basis.mesh.theta.size
@@ -180,7 +180,7 @@ def test_csbasis_native_grid_comparison_uses_grid_signature(monkeypatch):
     def fail_allclose(*args, **kwargs):
         raise AssertionError("SphericalGrid-native comparison should use coordinate hashes")
 
-    monkeypatch.setattr("kompe.cubed_sphere.cs_basis.np.allclose", fail_allclose)
+    monkeypatch.setattr("kompe.cubed_sphere.global_basis.np.allclose", fail_allclose)
 
     assert cs_basis._is_native_grid(grid)
     grid_like = type(
@@ -194,7 +194,7 @@ def test_basis_coefficient_compatibility_uses_coefficient_space():
     sh_basis = SHBasis(3, 2)
 
     assert sh_basis.coefficients_are_compatible_with(SHBasis(3, 2))
-    assert sh_basis.coefficients_are_compatible_with(SHBasis(3, 2, backend="scipy"))
+    assert sh_basis.coefficients_are_compatible_with(SHBasis(3, 2, legendre_method="scipy"))
     assert not sh_basis.coefficients_are_compatible_with(SHBasis(3, 2, min_degree=0))
     assert not sh_basis.coefficients_are_compatible_with(SHBasis(4, 2))
     assert GlobalCSBasis(4).coefficients_are_compatible_with(GlobalCSBasis(4))
@@ -276,10 +276,11 @@ def test_solid_harmonics_match_reference_radius_shift_formulas():
     solid_harmonics = SolidHarmonicOperators(sh_basis)
 
     np.testing.assert_allclose(
-        solid_harmonics.regular_reference_shift(2.0, 3.0), (2.0 / 3.0) ** (1 - sh_basis.n)
+        solid_harmonics.regular_reference_shift_factors(2.0, 3.0), (2.0 / 3.0) ** (1 - sh_basis.n)
     )
     np.testing.assert_allclose(
-        solid_harmonics.irregular_reference_shift(2.0, 3.0), (2.0 / 3.0) ** (sh_basis.n + 2)
+        solid_harmonics.irregular_reference_shift_factors(2.0, 3.0),
+        (2.0 / 3.0) ** (sh_basis.n + 2),
     )
     np.testing.assert_allclose(
         solid_harmonics.poloidal_to_regular_potential_factor, -(sh_basis.n + 1)
@@ -289,7 +290,8 @@ def test_solid_harmonics_match_reference_radius_shift_formulas():
         solid_harmonics.poloidal_to_boundary_potential_jump_factor, 2 * sh_basis.n + 1
     )
     np.testing.assert_allclose(
-        solid_harmonics.poloidal_to_boundary_potential_jump(7.0), 7.0 * (2 * sh_basis.n + 1)
+        solid_harmonics.poloidal_to_boundary_potential_jump_factors(7.0),
+        7.0 * (2 * sh_basis.n + 1),
     )
     np.testing.assert_allclose(
         -sh_basis.n * solid_harmonics.poloidal_to_regular_potential_factor,
@@ -681,7 +683,7 @@ def test_csbasis_cache_controls_do_not_change_numerical_results():
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_csbasis_mean_free_projection_preserves_jax_arrays():
     """CS gauge projection preserves backend arrays."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     try:
         set_backend("jax")
         cs_basis = GlobalCSBasis(4)
@@ -701,7 +703,7 @@ def test_csbasis_mean_free_projection_preserves_jax_arrays():
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_csbasis_surface_operators_preserve_jax_inputs():
     """CS surface operators accept backend arrays."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     try:
         set_backend("jax")
         cs_basis = GlobalCSBasis(4)
@@ -733,7 +735,7 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_shbasis_surface_operators_preserve_jax_inputs():
     """SH surface operators accept backend arrays."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     try:
         set_backend("jax")
         sh_basis = SHBasis(3, 2)
@@ -768,17 +770,17 @@ def test_shbasis_mean_free_option_matches_nmin_one_space():
     cached_mean_free = full.with_mean_free(True)
     non_mean_free = mean_free.with_mean_free(False)
 
-    assert isinstance(cached_mean_free, BasisView)
+    assert isinstance(cached_mean_free, BasisSubset)
     assert isinstance(cached_mean_free, SurfaceDifferentialBasis)
     assert cached_mean_free.parent_basis is full
     assert cached_mean_free.root_basis is full
-    assert mean_free.scalar_fields_are_mean_free_by_construction()
+    assert mean_free.omits_constant_mode()
     assert mean_free.min_degree == nmin_one.min_degree == 1
     assert mean_free.index_length == nmin_one.index_length
-    assert cached_mean_free.scalar_fields_are_mean_free_by_construction()
+    assert cached_mean_free.omits_constant_mode()
     assert cached_mean_free.with_mean_free(False) is full
     assert full.with_mean_free(True) is cached_mean_free
-    assert not non_mean_free.scalar_fields_are_mean_free_by_construction()
+    assert not non_mean_free.omits_constant_mode()
     assert non_mean_free.min_degree == 0
     assert non_mean_free.index_length > mean_free.index_length
 
@@ -803,12 +805,12 @@ def test_shbasis_mean_free_view_slices_parent_operators():
     view_solid_harmonics = SolidHarmonicOperators(view)
     direct_solid_harmonics = SolidHarmonicOperators(direct_mean_free)
     np.testing.assert_allclose(
-        view_solid_harmonics.regular_reference_shift(2.0, 3.0),
-        direct_solid_harmonics.regular_reference_shift(2.0, 3.0),
+        view_solid_harmonics.regular_reference_shift_factors(2.0, 3.0),
+        direct_solid_harmonics.regular_reference_shift_factors(2.0, 3.0),
     )
     np.testing.assert_allclose(
-        view_solid_harmonics.irregular_reference_shift(2.0, 3.0),
-        direct_solid_harmonics.irregular_reference_shift(2.0, 3.0),
+        view_solid_harmonics.irregular_reference_shift_factors(2.0, 3.0),
+        direct_solid_harmonics.irregular_reference_shift_factors(2.0, 3.0),
     )
     np.testing.assert_allclose(
         view_solid_harmonics.poloidal_to_boundary_potential_jump_factor,
@@ -817,10 +819,10 @@ def test_shbasis_mean_free_view_slices_parent_operators():
 
 
 def test_basis_view_slices_cs_surface_operators():
-    """Generic basis views also slice CS coefficient-space operators."""
+    """Generic basis subsets also slice CS coefficient-space operators."""
     cs_basis = GlobalCSBasis(8)
     indices = np.arange(0, cs_basis.index_length, 2)
-    view = BasisView(cs_basis, indices, view_name="even")
+    view = BasisSubset(cs_basis, indices, subset_name="even")
     grid = type("GridLike", (), {"theta": cs_basis.mesh.theta, "phi": cs_basis.mesh.phi})()
 
     assert isinstance(view, SurfaceDifferentialBasis)

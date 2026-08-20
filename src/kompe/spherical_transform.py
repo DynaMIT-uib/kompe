@@ -10,25 +10,37 @@ from functools import cached_property
 import numpy as np
 from scipy.linalg import cholesky
 
-from kompe.core import SurfaceDifferentialBasis
+from kompe.basis import SurfaceDifferentialBasis
 from kompe.grid import SphericalGrid
 from kompe.math import array_fingerprint
 from kompe.math.backend import get_array_module
 from kompe.math.least_squares_problem import LeastSquaresProblem
 from kompe.math.least_squares_solver import (
     LeastSquaresSolver,
-    factorized_least_squares_map,
+    cholesky_least_squares_map,
     get_default_least_squares_solver,
 )
 from kompe.math.linear_map import (
     as_linear_map,
     diagonal_linear_map,
-    is_noop_linear_map,
+    is_identity_linear_map,
 )
-from kompe.math.tensor_operations import weighted_tensor_pinv
+from kompe.math.pseudoinverse import weighted_tensor_pinv
 
 _LEAST_SQUARES_CACHE_VERSION = 2
 _WEIGHTED_PRODUCT_WORK_BYTES = 512 * 1024**2
+
+
+def _normalize_regularization_lambda(value):
+    """Return a positive regularization strength or ``None``."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("reg_lambda must be a finite non-negative scalar or None.")
+    value = float(value)
+    if not np.isfinite(value) or value < 0.0:
+        raise ValueError("reg_lambda must be a finite non-negative scalar or None.")
+    return None if value == 0.0 else value
 
 
 def grid_sqrt_area_weights(grid):
@@ -40,7 +52,8 @@ def grid_sqrt_area_weights(grid):
         xp = get_array_module(grid.theta)
         theta = xp.asarray(grid.theta, dtype=float)
         weights = xp.sin(xp.deg2rad(theta))
-    weights = xp.clip(weights, 0.0, None)
+        # Float32 sine can be slightly negative at exactly 180 degrees.
+        weights = xp.maximum(weights, 0.0)
     return xp.sqrt(weights)
 
 
@@ -179,7 +192,7 @@ def _helmholtz_normal_factor(theta_matrix, phi_matrix, sqrt_weights):
     try:
         return cholesky(normal, lower=True, overwrite_a=True, check_finite=False)
     except np.linalg.LinAlgError as exc:
-        raise ValueError("Helmholtz synthesis must have full column rank.") from exc
+        raise np.linalg.LinAlgError("Helmholtz synthesis must have full column rank.") from exc
 
 
 def _rhat_cross_gradient_normal_factor(theta_matrix, phi_matrix, sqrt_weights, coefficient_scale):
@@ -237,7 +250,7 @@ class SphericalTransform:
         basis,
         grid,
         *,
-        grid_remap_basis=None,
+        remapping_basis=None,
         sqrt_weights=None,
         reg_lambda=None,
         pinv_rtol=1e-15,
@@ -253,7 +266,7 @@ class SphericalTransform:
         grid : SphericalGrid
             Sample positions in the same spherical coordinate frame as the
             basis.
-        grid_remap_basis : SurfaceDifferentialBasis, optional
+        remapping_basis : SurfaceDifferentialBasis, optional
             Representation used only when external sample grids must first be
             remapped to ``grid``.
         sqrt_weights : array-like, optional
@@ -279,7 +292,7 @@ class SphericalTransform:
         basis.validate_metadata()
         self.basis = basis
         self.grid = grid
-        self.grid_remap_basis = grid_remap_basis
+        self.remapping_basis = remapping_basis
         self.explicit_sqrt_weights = sqrt_weights is not None
         self.area_weighted = bool(area_weighted)
         self.sqrt_weights = resolve_sqrt_weights(
@@ -288,7 +301,7 @@ class SphericalTransform:
         self.helmholtz_sqrt_weights = resolve_sqrt_weights(
             grid, sqrt_weights=sqrt_weights, area_weighted=area_weighted, vector=True
         )
-        self.reg_lambda = reg_lambda
+        self.reg_lambda = _normalize_regularization_lambda(reg_lambda)
         self.pinv_rtol = pinv_rtol
         self.use_persistent_evaluation_cache = bool(use_persistent_evaluation_cache)
 
@@ -493,7 +506,7 @@ class SphericalTransform:
 
     def _factorized_helmholtz_analysis_operator(self):
         """Factor analysis when both potentials omit their gauges."""
-        if not self.basis.scalar_fields_are_mean_free_by_construction():
+        if not self.basis.omits_constant_mode():
             return None
 
         theta_matrix = self.theta_derivative_matrix
@@ -513,14 +526,14 @@ class SphericalTransform:
                 factor = _helmholtz_normal_factor(
                     theta_matrix, phi_matrix, self.helmholtz_sqrt_weights
                 )
-            return factorized_least_squares_map(
+            return cholesky_least_squares_map(
                 self.helmholtz_synthesis_operator,
                 factor,
                 sqrt_weights=self.helmholtz_sqrt_weights,
                 input_shape=(2, self.grid.size),
                 output_shape=(2, self.basis.index_length),
             )
-        except ValueError:
+        except np.linalg.LinAlgError:
             return None
 
     def rhat_cross_gradient_analysis_operator(self, *, coefficient_scale=None):
@@ -537,7 +550,7 @@ class SphericalTransform:
         synthesis = self.rhat_cross_gradient_operator
         if not np.all(scale == 1):
             synthesis = synthesis @ diagonal_linear_map(scale)
-        return factorized_least_squares_map(
+        return cholesky_least_squares_map(
             synthesis,
             factor,
             sqrt_weights=self.helmholtz_sqrt_weights,
@@ -583,7 +596,7 @@ class SphericalTransform:
             solution_shape=self.basis.index_length,
             data_shapes=self.grid.size,
             sqrt_weights=self.sqrt_weights,
-            regularization_weights=self.reg_lambda,
+            regularization_strengths=self.reg_lambda,
             regularization_matrices=self.scalar_regularization_operator,
             operator_cache=self._operator_cache(),
             cache_identity=self._least_squares_cache_identity("scalar"),
@@ -598,7 +611,7 @@ class SphericalTransform:
             solution_shape=(2, self.basis.index_length),
             data_shapes=(2, self.grid.size),
             sqrt_weights=self.helmholtz_sqrt_weights,
-            regularization_weights=self.reg_lambda,
+            regularization_strengths=self.reg_lambda,
             regularization_matrices=self.helmholtz_regularization_operator,
             operator_cache=self._operator_cache(),
             cache_identity=self._least_squares_cache_identity("helmholtz"),
@@ -607,7 +620,7 @@ class SphericalTransform:
 
     def _solve_least_squares(self, problem, grid_values, solver_type=None):
         """Solve one configured least-squares problem."""
-        solver_type = solver_type or get_default_least_squares_solver()
+        solver_type = get_default_least_squares_solver() if solver_type is None else solver_type
         solver = LeastSquaresSolver(solver=solver_type, tolerance=self.pinv_rtol)
         return solver.solve(problem=problem, rhs=grid_values)
 
@@ -623,7 +636,7 @@ class SphericalTransform:
 
     def analyze_scalar(self, grid_values, solver_type=None):
         """Analyze scalar grid values into basis coefficients."""
-        if self._scalar_analysis_is_noop():
+        if self._scalar_synthesis_is_identity():
             return grid_values
         return self._solve_least_squares(
             self.scalar_least_squares_problem, grid_values, solver_type
@@ -649,16 +662,14 @@ class SphericalTransform:
 
         if values.shape == data_shape:
             return operator.matvec(values).reshape(output_shape)
+        if values.ndim == 1 and values.size == data_size:
+            return operator.matvec(values).reshape(output_shape)
         if values.ndim > 2 and tuple(values.shape[:2]) == data_shape:
             rhs_shape = values.shape[2:]
             value_block = values.reshape(data_size, -1)
         elif values.ndim > 2 and tuple(values.shape[-2:]) == data_shape:
             rhs_shape = values.shape[:-2]
             value_block = values.reshape(-1, data_size).T
-        elif values.size % data_size == 0:
-            rhs_count = values.size // data_size
-            rhs_shape = (rhs_count,) if rhs_count > 1 else ()
-            value_block = values.reshape(data_size, rhs_count)
         else:
             raise ValueError(f"Shape {values.shape} incompatible with data_shape {data_shape}.")
 
@@ -736,9 +747,9 @@ class SphericalTransform:
     ):
         """Analyze one scalar or Helmholtz field batch."""
         if helmholtz:
-            value_batch = self.normalize_helmholtz_samples(values, input_grid)
+            value_batch = self.as_tangential_sample_rows(values, input_grid)
         else:
-            value_batch = self.normalize_scalar_samples(values, input_grid)
+            value_batch = self.as_scalar_sample_rows(values, input_grid)
         direct_analysis = isinstance(analysis_basis, SurfaceDifferentialBasis) and not callable(
             getattr(analysis_basis, "scalar_grid_remap_operator", None)
         )
@@ -771,7 +782,7 @@ class SphericalTransform:
             coeffs = analysis_transform.analyze_helmholtz(grid_values)
         else:
             coeffs = analysis_transform.analyze_scalar(grid_values)
-        return self._analysis_coefficients_to_rows(
+        return analysis_transform._analysis_coefficients_to_rows(
             coeffs, batch_size=value_batch.shape[0], helmholtz=helmholtz
         )
 
@@ -779,15 +790,15 @@ class SphericalTransform:
         """Return analysis coefficients in time-row layout."""
         xp = get_array_module(coeffs)
         array = xp.asarray(coeffs)
-        if not helmholtz and self._scalar_analysis_is_noop():
+        if not helmholtz and self._scalar_synthesis_is_identity():
             return array.reshape(batch_size, -1)
         if batch_size == 1:
             return array.reshape(1, -1)
         return xp.moveaxis(array, -1, 0).reshape(batch_size, -1)
 
-    def _scalar_analysis_is_noop(self):
+    def _scalar_synthesis_is_identity(self):
         """Return whether scalar analysis is a no-op."""
-        return is_noop_linear_map(
+        return is_identity_linear_map(
             self.scalar_synthesis_operator,
             input_shape=(self.basis.index_length,),
             output_shape=(self.grid.size,),
@@ -822,7 +833,7 @@ class SphericalTransform:
         return operator.matvec(coeffs).reshape(operator.output_shape)
 
     @staticmethod
-    def normalize_scalar_samples(values, input_grid):
+    def as_scalar_sample_rows(values, input_grid):
         """Return scalar values with canonical time-first layout."""
         n_points = int(input_grid.size)
         xp = get_array_module(values)
@@ -843,7 +854,7 @@ class SphericalTransform:
         )
 
     @staticmethod
-    def normalize_helmholtz_samples(values, input_grid):
+    def as_tangential_sample_rows(values, input_grid):
         """Return tangential values with canonical time-first layout."""
         n_points = int(input_grid.size)
         xp = get_array_module(values)
@@ -871,6 +882,7 @@ class SphericalTransform:
         self, analysis_basis, input_grid, *, sqrt_weights=None, reg_lambda=None, pinv_rtol=1e-15
     ):
         """Return transform for direct input-grid analysis."""
+        reg_lambda = _normalize_regularization_lambda(reg_lambda)
         if sqrt_weights is not None:
             weight_signature = array_fingerprint(sqrt_weights)
             if weight_signature is None:
@@ -916,12 +928,12 @@ class SphericalTransform:
 
     def _grid_remap_operator(self, method_name, input_grid, *, input_shape, output_shape):
         """Return the required grid-remap operator."""
-        if self.grid_remap_basis is None:
-            raise ValueError("grid_remap_basis is required for grid remapping.")
-        remap_operator = getattr(self.grid_remap_basis, method_name, None)
+        if self.remapping_basis is None:
+            raise ValueError("remapping_basis is required for grid remapping.")
+        remap_operator = getattr(self.remapping_basis, method_name, None)
         if not callable(remap_operator):
             raise TypeError(
-                f"SphericalGrid-to-grid sample analysis requires grid_remap_basis to provide "
+                f"SphericalGrid-to-grid sample analysis requires remapping_basis to provide "
                 f"{method_name}()."
             )
         operator = remap_operator(input_grid, self.grid)
@@ -929,7 +941,7 @@ class SphericalTransform:
             return as_linear_map(operator, input_shape=input_shape, output_shape=output_shape)
         except (TypeError, ValueError) as exc:
             raise TypeError(
-                f"{type(self.grid_remap_basis).__name__}.{method_name}() "
+                f"{type(self.remapping_basis).__name__}.{method_name}() "
                 "must return an operator convertible to LinearMap."
             ) from exc
 

@@ -13,9 +13,9 @@ from scipy.linalg import cho_solve, cholesky
 from scipy.sparse.linalg import LinearOperator, cg, lsmr, splu
 
 from kompe.math.backend import (
-    block_after_jax_linalg,
     block_until_ready,
     get_array_module,
+    synchronize_linalg_result,
     to_numpy,
 )
 
@@ -149,7 +149,7 @@ def dense_full_rank_least_squares_map(
     )
 
 
-def factorized_least_squares_map(
+def cholesky_least_squares_map(
     data_operator, normal_factor, *, sqrt_weights=None, input_shape=None, output_shape=None
 ) -> LinearMap:
     """Return analysis from an operator and normal factor."""
@@ -181,7 +181,7 @@ def factorized_least_squares_map(
         _rmatvec=lambda values: solve_adjoint(values).reshape(-1),
         _matmat=solve_coefficients,
         _rmatmat=solve_adjoint,
-        _backend_context=(*data.backend_context, factor),
+        _backend_operands=(*data.backend_operands, factor),
         input_shape=input_shape,
         output_shape=output_shape,
     )
@@ -312,6 +312,11 @@ class LeastSquaresSolver:
         if solver not in self.VALID_SOLVERS:
             raise ValueError(f"Solver must be one of {self.VALID_SOLVERS}")
         self.solver = solver
+        if isinstance(tolerance, (bool, np.bool_)):
+            raise TypeError("tolerance must be a finite non-negative scalar.")
+        tolerance = float(tolerance)
+        if not np.isfinite(tolerance) or tolerance < 0.0:
+            raise ValueError("tolerance must be a finite non-negative scalar.")
         self.tolerance = tolerance
 
         if preconditioner is not None and preconditioner not in self.VALID_PRECONDITIONERS:
@@ -330,9 +335,6 @@ class LeastSquaresSolver:
         rhs_block, rhs_shape, num_rhs = problem.assemble_rhs_block(
             rhs, include_regularization=self.solver != "normal_pinv"
         )
-        if rhs_block is None:
-            dtype = problem.A[0].dtype if problem.A else np.float64
-            return get_array_module().zeros(problem.solution_shape + rhs_shape, dtype=dtype)
 
         if self.solver == "svd":
             solver_func = self._solve_svd
@@ -359,7 +361,7 @@ class LeastSquaresSolver:
         if selected_type not in self.VALID_PRECONDITIONERS:
             raise ValueError(f"Preconditioner must be one of {self.VALID_PRECONDITIONERS}")
         if self.solver not in {"cgls", "lsmr"}:
-            return None
+            raise ValueError(f"Solver '{self.solver}' does not accept a preconditioner.")
         if selected_type == "jacobi":
             return self._build_jacobi_preconditioner(problem, square_root=self.solver == "lsmr")
         return self._build_pinv_preconditioner(problem, squared=self.solver == "cgls")
@@ -394,7 +396,7 @@ class LeastSquaresSolver:
     ) -> np.ndarray:
         """Solve the normal equations with a direct dense solve."""
         xp, normal_matrix, normal_rhs = self._dense_normal_equations(problem, rhs_block)
-        return block_after_jax_linalg(xp.linalg.solve(normal_matrix, normal_rhs))
+        return synchronize_linalg_result(xp.linalg.solve(normal_matrix, normal_rhs))
 
     def _solve_normal_pinv(
         self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args, **_kwargs
@@ -412,15 +414,12 @@ class LeastSquaresSolver:
         """Build a dense normal-pinv solver for repeated response blocks."""
         normal_pinv = problem.dense_normal_pinv(self.tolerance)
         data_operator = problem.data_operator
-        xp = get_array_module(normal_pinv, *data_operator.backend_context)
+        xp = get_array_module(normal_pinv, *data_operator.backend_operands)
         data_matrix = xp.asarray(data_operator.to_matrix())
         data_adjoint = xp.swapaxes(xp.conjugate(data_matrix), -2, -1)
 
         def solve_response(rhs: np.ndarray | list[np.ndarray]) -> Any:
             rhs_block, rhs_shape, _ = problem.assemble_rhs_block(rhs, include_regularization=False)
-            if rhs_block is None:
-                dtype = problem.A[0].dtype if problem.A else np.float64
-                return xp.zeros(problem.solution_shape + rhs_shape, dtype=dtype)
             solution_block = normal_pinv @ (data_adjoint @ rhs_block)
             return block_until_ready(solution_block.reshape(problem.solution_shape + rhs_shape))
 
@@ -653,7 +652,7 @@ class LeastSquaresSolver:
             _rmatvec=rmatvec,
             _matmat=matmat,
             _rmatmat=rmatmat,
-            _backend_context=(vt_arr, weights_arr),
+            _backend_operands=(vt_arr, weights_arr),
             output_shape=solution_shape,
             input_shape=solution_shape,
         )
@@ -670,7 +669,7 @@ class LeastSquaresSolver:
             s_pinv[s > cutoff] = 1.0 / s[s > cutoff]
         else:
             system_matrix = block_until_ready(problem.assemble_dense_system_matrix())
-            _, s, vt = block_after_jax_linalg(xp.linalg.svd(system_matrix, full_matrices=False))
+            _, s, vt = synchronize_linalg_result(xp.linalg.svd(system_matrix, full_matrices=False))
             cutoff = tol * (s[0] if s.size > 0 else 0)
             safe_s = xp.where(s > cutoff, s, 1.0)
             s_pinv = xp.where(s > cutoff, 1.0 / safe_s, xp.zeros_like(s))

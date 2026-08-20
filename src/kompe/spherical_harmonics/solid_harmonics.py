@@ -1,6 +1,6 @@
 """Radial operations for spherical-harmonic coefficients."""
 
-from kompe.core import SurfaceDifferentialBasis
+from kompe.basis import SurfaceDifferentialBasis
 from kompe.math import as_linear_map
 from kompe.math.backend import get_array_module
 
@@ -52,11 +52,11 @@ class SolidHarmonicOperators:
         """Return a stable signature for this radial extension."""
         return ("SOLID_HARMONICS", self.basis.signature)
 
-    def regular_reference_shift(self, start, end):
+    def regular_reference_shift_factors(self, start, end):
         """Shift regular coefficients to a new reference radius."""
         return get_array_module().asarray((start / end) ** (1 - self.basis.n))
 
-    def irregular_reference_shift(self, start, end):
+    def irregular_reference_shift_factors(self, start, end):
         """Shift irregular coefficients to a new reference radius."""
         return get_array_module().asarray((start / end) ** (self.basis.n + 2))
 
@@ -77,17 +77,17 @@ class SolidHarmonicOperators:
             self.poloidal_to_irregular_potential_factor - self.poloidal_to_regular_potential_factor
         )
 
-    def poloidal_to_boundary_potential_jump(self, radius):
+    def poloidal_to_boundary_potential_jump_factors(self, radius):
         """Map poloidal coefficients to the boundary potential jump."""
         return radius * self.poloidal_to_boundary_potential_jump_factor
 
     def regular_reference_shift_operator(self, start, end):
         """Return the regular reference-radius shift operator."""
-        return as_linear_map(self.regular_reference_shift(start, end))
+        return as_linear_map(self.regular_reference_shift_factors(start, end))
 
     def irregular_reference_shift_operator(self, start, end):
         """Return the irregular reference-radius shift operator."""
-        return as_linear_map(self.irregular_reference_shift(start, end))
+        return as_linear_map(self.irregular_reference_shift_factors(start, end))
 
     def poloidal_to_regular_potential_operator(self):
         """Return the poloidal-to-regular-potential operator."""
@@ -99,4 +99,4 @@ class SolidHarmonicOperators:
 
     def poloidal_to_boundary_potential_jump_operator(self, radius):
         """Return the poloidal-to-boundary-potential-jump operator."""
-        return as_linear_map(self.poloidal_to_boundary_potential_jump(radius))
+        return as_linear_map(self.poloidal_to_boundary_potential_jump_factors(radius))

@@ -8,9 +8,9 @@ import numpy as np
 import scipy
 from packaging import version
 
-from kompe.core import BasisView, SurfaceDifferentialBasis, _owned_readonly_array
+from kompe.basis import BasisSubset, SurfaceDifferentialBasis, _owned_readonly_array
 from kompe.math import as_linear_map
-from kompe.math.backend import get_array_module, to_numpy, use_jax
+from kompe.math.backend import get_array_module, jax_enabled, to_numpy
 from kompe.spherical_harmonics.helpers import (
     SHIndices,
     schmidt_quasi_normalization_factors,
@@ -89,7 +89,7 @@ class SHBasis(SurfaceDifferentialBasis):
     - ``'scipy'``:
         Uses the trusted scipy library, with a precise analytical
         scaling factor applied to ensure identical output to the
-        ``'internal'`` backend. It automatically selects the best
+        ``'internal'`` method. It automatically selects the best
         available scipy function.
     """
 
@@ -101,8 +101,8 @@ class SHBasis(SurfaceDifferentialBasis):
         max_order,
         min_degree=None,
         mean_free=None,
-        quasi_normalized=True,
-        backend="internal",
+        schmidt_quasi_normalized=True,
+        legendre_method="internal",
         operator_cache=None,
     ):
         """
@@ -119,36 +119,39 @@ class SHBasis(SurfaceDifferentialBasis):
         mean_free : bool, optional
             Whether scalar spaces omit the monopole term. If provided,
             it must be consistent with ``min_degree``.
-        quasi_normalized : bool, optional
+        schmidt_quasi_normalized : bool, optional
             If True, applies Schmidt quasi-normalization factors. By
             default True.
-        backend : str, optional
-            Backend for Legendre function calculation. Can be 'internal'
+        legendre_method : str, optional
+            Method for Legendre function calculation. Can be 'internal'
             (default) or 'scipy'. Both produce identical results.
         operator_cache : object, optional
             Cache implementing ``get_or_create(category, identity, builder)``.
         """
         max_degree, max_order = _normalized_degree_limits(max_degree, max_order)
-        if backend not in ["internal", "scipy"]:
-            raise ValueError(f"Backend '{backend}' not recognized. Use 'internal' or 'scipy'.")
+        if legendre_method not in ["internal", "scipy"]:
+            raise ValueError(
+                f"Legendre method {legendre_method!r} is not recognized; "
+                "use 'internal' or 'scipy'."
+            )
         effective_nmin = _minimum_scalar_degree(min_degree, mean_free)
-        self.max_degree, self.max_order, self.min_degree, self.backend = (
+        self.max_degree, self.max_order, self.min_degree, self.legendre_method = (
             max_degree,
             max_order,
             effective_nmin,
-            backend,
+            legendre_method,
         )
         self.mean_free = self.min_degree >= 1
         self.operator_cache = operator_cache
         self._related_basis_cache = {}
         self._grid_cache = OrderedDict()
         self._init_coefficient_indices()
-        self._init_normalization(quasi_normalized)
+        self._init_normalization(schmidt_quasi_normalized)
 
         # Use the flag set during the conditional import.
         self._use_modern_scipy = _USE_MODERN_SCIPY
 
-        if self.backend == "scipy":
+        if self.legendre_method == "scipy":
             self._compute_scipy_scaling_factors()
 
             if not self._use_modern_scipy:
@@ -169,8 +172,9 @@ class SHBasis(SurfaceDifferentialBasis):
         """Summarize the harmonic coefficient space."""
         return (
             f"SHBasis(max_degree={self.max_degree}, max_order={self.max_order}, "
-            f"min_degree={self.min_degree}, quasi_normalized={self.quasi_normalized}, "
-            f"backend={self.backend!r})"
+            f"min_degree={self.min_degree}, "
+            f"schmidt_quasi_normalized={self.schmidt_quasi_normalized}, "
+            f"legendre_method={self.legendre_method!r})"
         )
 
     def _init_coefficient_indices(self):
@@ -200,10 +204,10 @@ class SHBasis(SurfaceDifferentialBasis):
         self.snm.n = _owned_readonly_array(self.snm.n)
         self.snm.m = _owned_readonly_array(self.snm.m)
 
-    def _init_normalization(self, quasi_normalized):
+    def _init_normalization(self, schmidt_quasi_normalized):
         """Build immutable coefficient normalization factors."""
-        self.quasi_normalized = quasi_normalized
-        if self.quasi_normalized:
+        self.schmidt_quasi_normalized = schmidt_quasi_normalized
+        if self.schmidt_quasi_normalized:
             s_matrix = schmidt_quasi_normalization_factors(self.max_degree, self.max_order)
             self.schmidt_factors = _owned_readonly_array(
                 [s_matrix[n, m] for n, m in self.index_pairs]
@@ -219,18 +223,18 @@ class SHBasis(SurfaceDifferentialBasis):
             int(self.max_degree),
             int(self.max_order),
             int(self.min_degree),
-            bool(self.quasi_normalized),
+            bool(self.schmidt_quasi_normalized),
         )
 
     @staticmethod
     def _grid_cache_key(grid):
-        """Return a stable cache key for one grid/backend pair."""
+        """Return a stable cache key for one grid/array-backend pair."""
         signature = getattr(grid, "exact_coordinate_signature", None)
         if signature is None:
             signature = getattr(grid, "signature", None)
         if signature is None:
             return None
-        return (signature, bool(use_jax()))
+        return (signature, bool(jax_enabled()))
 
     def _evaluation_cache_identity(self, grid, derivative):
         """Return exact identity for one persisted SH evaluation."""
@@ -285,7 +289,7 @@ class SHBasis(SurfaceDifferentialBasis):
             matrix, input_shape=input_shape, output_shape=matrix.shape[:output_rank]
         )
 
-    def scalar_fields_are_mean_free_by_construction(self):
+    def omits_constant_mode(self):
         """Return whether scalar coefficients omit the monopole."""
         return self.mean_free
 
@@ -299,7 +303,7 @@ class SHBasis(SurfaceDifferentialBasis):
 
         if not self.mean_free and target_mean_free:
             coefficient_indices = np.flatnonzero(self.n >= 1)
-            sibling = BasisView(
+            sibling = BasisSubset(
                 self,
                 coefficient_indices,
                 metadata={
@@ -307,25 +311,25 @@ class SHBasis(SurfaceDifferentialBasis):
                     "max_order": self.max_order,
                     "min_degree": 1,
                     "mean_free": True,
-                    "backend": self.backend,
-                    "quasi_normalized": self.quasi_normalized,
+                    "legendre_method": self.legendre_method,
+                    "schmidt_quasi_normalized": self.schmidt_quasi_normalized,
                 },
                 coefficient_space_signature=(
                     "SH",
                     int(self.max_degree),
                     int(self.max_order),
                     1,
-                    bool(self.quasi_normalized),
+                    bool(self.schmidt_quasi_normalized),
                 ),
-                view_name="mean_free",
+                subset_name="mean_free",
             )
         else:
             sibling = SHBasis(
                 self.max_degree,
                 self.max_order,
                 mean_free=target_mean_free,
-                quasi_normalized=self.quasi_normalized,
-                backend=self.backend,
+                schmidt_quasi_normalized=self.schmidt_quasi_normalized,
+                legendre_method=self.legendre_method,
                 operator_cache=self.operator_cache,
             )
         self._related_basis_cache[target_mean_free] = sibling
@@ -512,7 +516,7 @@ class SHBasis(SurfaceDifferentialBasis):
         """Return normalized Legendre values and optional dP/dtheta."""
         cached_P = None if cache is None else cache.get("P_unnormalized")
         cached_dP = None if cache is None else cache.get("dP_unnormalized")
-        if self.backend == "internal":
+        if self.legendre_method == "internal":
             P_unnormalized = cached_P if cached_P is not None else self.legendre(theta)
             if derivative_required:
                 dP_unnormalized = (

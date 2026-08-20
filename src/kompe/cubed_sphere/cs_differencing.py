@@ -51,7 +51,7 @@ class CSFiniteDifferences:
         shape = (6, N, N)
         size = 6 * N * N
 
-        h = cs_coordinates.coordinate(1, N) - cs_coordinates.coordinate(0, N)
+        h = cs_coordinates.face_coordinate(1, N) - cs_coordinates.face_coordinate(0, N)
 
         k, i, j = map(
             np.ravel, np.meshgrid(np.arange(6), np.arange(N), np.arange(N), indexing="ij")
@@ -104,11 +104,11 @@ class CSFiniteDifferences:
             weights = np.ones(k.size)
         weights = weights / Ni
 
-        h = cs_coordinates.coordinate(1, N) - cs_coordinates.coordinate(0, N)
+        h = cs_coordinates.face_coordinate(1, N) - cs_coordinates.face_coordinate(0, N)
         cols = np.full(k.size, -1, dtype=np.int64)
 
-        xi = cs_coordinates.coordinate(i + 0.5, N)
-        eta = cs_coordinates.coordinate(j + 0.5, N)
+        xi = cs_coordinates.face_coordinate(i + 0.5, N)
+        eta = cs_coordinates.face_coordinate(j + 0.5, N)
         _, theta, phi = basis.mesh.projection.cube_to_spherical(
             xi, eta, k, radius=1.0, degrees=True
         )

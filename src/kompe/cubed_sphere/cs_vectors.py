@@ -11,7 +11,7 @@ from kompe.cubed_sphere.arrayutils import invert_3x3_matrices
 def _cartesian_to_cube_matrix(xi, eta, r=1, block=0):
     """Return Cartesian-to-CS contravariant transform matrices."""
     xi, et, r, block = map(np.ravel, np.broadcast_arrays(xi, eta, r, block))
-    delta = cs_coordinates.delta(xi, et)
+    delta = cs_coordinates.metric_delta(xi, et)
     pc = np.empty((delta.size, 3, 3))
 
     rsec2xi = r / np.cos(xi) ** 2
@@ -94,7 +94,7 @@ def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
 def _spherical_coordinate_to_cube_matrix(xi, eta, r=1, block=0):
     """Return spherical-to-CS contravariant transform matrices."""
     xi, et, r, block = map(np.ravel, np.broadcast_arrays(xi, eta, r, block))
-    delta = cs_coordinates.delta(xi, et)
+    delta = cs_coordinates.metric_delta(xi, et)
     ps = np.empty((delta.size, 3, 3))
 
     mask = block == 0
@@ -193,7 +193,7 @@ def _face_to_face_matrix(xi, eta, block_i, block_j):
 
     source_to_spherical = _cube_to_spherical_coordinate_matrix(xi_i, eta_i, r=1, block=block_i)
     _, theta, phi = cs_coordinates.cube_to_spherical(xi_i, eta_i, r=1, block=block_i, deg=True)
-    xi_j, eta_j, _ = cs_coordinates.geo_to_cube(phi, 90 - theta, block=block_j)
+    xi_j, eta_j, _ = cs_coordinates.geographic_to_cube(phi, 90 - theta, block=block_j)
     spherical_to_target = _spherical_coordinate_to_cube_matrix(xi_j, eta_j, r=1, block=block_j)
 
     return np.einsum("nij, njk -> nik", spherical_to_target, source_to_spherical)

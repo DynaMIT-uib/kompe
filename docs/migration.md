@@ -100,7 +100,7 @@ GlobalCSBasis.mesh ──► GlobalCSMesh
 functions have distributional Laplacians at their poles, so pretending it has
 the same square coefficient-space Laplacian and mean-free Poisson semantics as
 SH or global CS would make the interface less honest. It is nevertheless a
-first-class basis with signatures, scalar synthesis, canonical
+first-class basis with signatures, scalar Green-profile synthesis, canonical
 surface-current operators, two-component Helmholtz synthesis, and magnetic
 field synthesis. Construction requires `current_type="curl_free"` or
 `current_type="divergence_free"`; this prevents a scalar coefficient vector

@@ -5,11 +5,11 @@ from collections import OrderedDict
 import numpy as np
 import scipy.sparse as sp
 
-from kompe.core import SurfaceDifferentialBasis
+from kompe.basis import SurfaceDifferentialBasis
 from kompe.cubed_sphere.cs_differencing import CSFiniteDifferences
-from kompe.cubed_sphere.cs_grid import CSGridRemapper, GlobalCSMesh
+from kompe.cubed_sphere.global_mesh import GlobalCSMesh, _GlobalCSRemapper
 from kompe.math import as_linear_map, identity_linear_map
-from kompe.math.backend import get_array_module, to_numpy, use_jax
+from kompe.math.backend import get_array_module, jax_enabled, to_numpy
 from kompe.math.least_squares_solver import sparse_constrained_least_squares_map
 
 
@@ -111,7 +111,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         self._derivative_bundle = None
         self._laplacian_cache = {}
         self._laplacian_sparse_cache = {}
-        self._grid_remapper = CSGridRemapper(self)
+        self._remapper = _GlobalCSRemapper(self)
         self._finite_differences = CSFiniteDifferences(self)
         self._surface_matrix_cache = OrderedDict()
         self._surface_operator_cache = OrderedDict()
@@ -150,9 +150,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         self._laplacian_sparse_cache.clear()
         self._surface_matrix_cache.clear()
         self._surface_operator_cache.clear()
-        self._grid_remapper.clear_cache()
+        self._remapper.clear_cache()
         if shared_remaps:
-            self._grid_remapper.clear_shared_cache()
+            self._remapper.clear_shared_cache()
 
     def cache_info(self):
         """Return cache occupancy without exposing mutable cache objects."""
@@ -163,8 +163,8 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             "surface_matrices": len(self._surface_matrix_cache),
             "surface_operators": len(self._surface_operator_cache),
             "surface_max_size": self._surface_cache_size,
-            "remap_operators": self._grid_remapper.cache_info(),
-            "shared_remap_matrices": self._grid_remapper.shared_cache_info(),
+            "remap_operators": self._remapper.cache_info(),
+            "shared_remap_matrices": self._remapper.shared_cache_info(),
         }
 
     @property
@@ -183,7 +183,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         signature = getattr(grid, "signature", None)
         if signature is None:
             return None
-        return (name, *parts, signature, bool(use_jax()))
+        return (name, *parts, signature, bool(jax_enabled()))
 
     def _cached_surface_matrix(self, name, grid, build, *parts):
         """Return a cached target-grid matrix when possible."""
@@ -300,11 +300,11 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     def scalar_grid_remap_operator(self, source_grid, target_grid):
         """Return a cached scalar grid-remap operator."""
-        return self._grid_remapper.scalar_grid_remap_operator(source_grid, target_grid)
+        return self._remapper.scalar_grid_remap_operator(source_grid, target_grid)
 
     def tangential_grid_remap_operator(self, source_grid, target_grid):
         """Return a cached tangential grid-remap operator."""
-        return self._grid_remapper.tangential_grid_remap_operator(source_grid, target_grid)
+        return self._remapper.tangential_grid_remap_operator(source_grid, target_grid)
 
     @staticmethod
     def _safe_sin_theta(theta_deg):
@@ -601,7 +601,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         interpolated_vector : array
             Tuple of interpolated ``(theta, phi, radial)`` components.
         """
-        return self._grid_remapper.interpolate_vector(
+        return self._remapper.interpolate_vector(
             u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
         )
 
@@ -637,7 +637,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         interpolated_scalar : array
             Interpolated scalar values.
         """
-        return self._grid_remapper.interpolate_scalar(
+        return self._remapper.interpolate_scalar(
             scalar, theta, phi, theta_target, phi_target, **kwargs
         )
 

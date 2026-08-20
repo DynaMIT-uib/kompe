@@ -4,32 +4,21 @@ import numpy as np
 
 
 class RegionalCSPlotter:
-    def __init__(self, ax, csgrid, **kwargs):
-        """
-        A class creating a cubed sphere axis object to plot data with (lon,lat) corrdinates on a cubed sphere projection.
+    """Draw geographic data and reference grids on a regional CS mesh.
 
+    The plotting methods mirror the corresponding Matplotlib calls but accept
+    longitude and latitude, which are projected onto ``mesh`` before drawing.
+    """
 
-        Example:
-        --------
-        import matplotlib.pyplot as plt
-        fig,ax = plt.subplots()
-        csax = RegionalCSPlotter(ax,grid)
-        csax.MEMBERFUNCTION()
-        plt.show()
-
-        where memberfunctions include:
-        plot(lon,lat,**kwargs)            - works like plt.plot
-        text(lon,lat,text, **kwargs)      - works like plt.text
-        scatter(lon,lat,**kwargs)         - works like plt.scatter
-        contour(lon,lat,c,**kwargs)                - works like plt.contour
-        contourf(lon,lat,c,**kwargs)               - works like plt.contourf
+    def __init__(self, ax, mesh, **kwargs):
+        """Attach a regional cubed-sphere plotter to ``ax``.
 
         Parameters
         ----------
         ax : matplotlib.AxesSubplot
-            A standard matplotlib AxesSubplot object.
-        csgrid : kompe.RegionalCSMesh
-            A cubed sphere grid object.
+            Matplotlib axes on which to draw.
+        mesh : kompe.RegionalCSMesh
+            Regional cubed-sphere mesh to draw.
         **kwargs : dict, optional
             Keywords to control grid lines.
             In addition to Line2D properties, the following can be specified:
@@ -43,25 +32,19 @@ class RegionalCSPlotter:
                 Local-time grid labels are not implemented. Passing True raises
                 ``NotImplementedError``.
             lat_levels : array_like
-                Where to plot latitudinal grid parallels in spherical grids. If not provided, default values are used.
+                Latitudes at which to draw parallels.
             lat_res : int
-                Resolution of latitudinal grid parallels in spherical grids. Ignored if lat_levels are set.
+                Latitude spacing when ``lat_levels`` is omitted.
             lon_levels : array_like
-                Where to plot longitudinal grid meridians in spherical grids. If not provided, default values are used.
+                Longitudes at which to draw meridians.
             lon_res : int
-                Resolution of longitudinal grid meridians in spherical grids. Ignored if lon_levels are set.
+                Longitude spacing when ``lon_levels`` is omitted.
             km_res : int
                 Resolution of 'km' grid. If not provided, default values are used.
 
-        Returns
-        -------
-        None.
-
         """
-
-        # Add ax and grid to csax
         self.ax = ax
-        self.grid = csgrid
+        self.grid = mesh
         self.ax.set_aspect("equal")
 
         # set ax limits
@@ -127,8 +110,7 @@ class RegionalCSPlotter:
         lt=False,
         **kwargs,
     ):
-        """
-        Adds a spherical lon/lat grid to the axis
+        """Draw a geographic longitude/latitude grid.
 
         Parameters
         ----------
@@ -144,18 +126,13 @@ class RegionalCSPlotter:
         **kwargs : dict
             Line2D properties.
 
-        Returns
-        -------
-        None.
-
         """
-
         if gridtype != "geo":
             raise ValueError("Only geographic spherical grids are implemented.")
         if lt:
             raise NotImplementedError("Local-time grid labels are not implemented.")
 
-        ## Latitudinal parallels
+        # Latitudinal parallels
 
         lon = np.linspace(0, 360, 361) % 360  # Longitidunal locations
 
@@ -179,7 +156,7 @@ class RegionalCSPlotter:
 
         # Add latitudinal ticks
         iii = self.grid.contains(*np.meshgrid(lon, lat_levels))  # points in csgrid
-        lon_mean = anglemean(
+        lon_mean = circular_mean_degrees(
             np.where(~iii, np.nan, lon[None, :]), axis=1
         )  # mean of lon grid lines
         lon_count = np.sum(iii, axis=1)  # "length" of grid lines
@@ -189,7 +166,11 @@ class RegionalCSPlotter:
         )  # Move tick location from mean to between meridians
 
         # Add the latitudinal ticks
-        for x, y in zip(lon_pos[lon_count > count_min], lat_levels[lon_count > count_min]):
+        for x, y in zip(
+            lon_pos[lon_count > count_min],
+            lat_levels[lon_count > count_min],
+            strict=True,
+        ):
             self.text(x, y, str(int(y)), horizontalalignment="center", verticalalignment="center")
 
         iii = self.grid.contains(*np.meshgrid(lon_levels, lat))  # points in csgrid
@@ -203,12 +184,15 @@ class RegionalCSPlotter:
         )  # Move ticks from mean to between parallels
 
         # Add the longitudinal ticks
-        for x, y in zip(lon_levels[lat_count > count_min], lat_pos[lat_count > count_min]):
+        for x, y in zip(
+            lon_levels[lat_count > count_min],
+            lat_pos[lat_count > count_min],
+            strict=True,
+        ):
             self.text(x, y, str(int(x)), horizontalalignment="center", verticalalignment="center")
 
     def add_km_grid(self, resolution, **kwargs):
-        """
-        Adds grid lines with equal physical distance on the grid
+        """Draw grid lines separated by ``resolution`` kilometres.
 
         Parameters
         ----------
@@ -217,12 +201,7 @@ class RegionalCSPlotter:
         **kwargs : 2D line properties.
             Passed to matplotlib.pyplot.plot
 
-        Returns
-        -------
-        None.
-
         """
-
         csres = 0.005
 
         # xi gridlines
@@ -279,7 +258,7 @@ class RegionalCSPlotter:
         ind = (xi_tick >= self.grid.xi_min) & (xi_tick <= self.grid.xi_max)
         xi_tick = xi_tick[ind]
         km_tick = km_tick[ind]
-        for x, label in zip(xi_tick, km_tick):
+        for x, label in zip(xi_tick, km_tick, strict=True):
             self.ax.text(
                 x,
                 eta_tick,
@@ -288,7 +267,7 @@ class RegionalCSPlotter:
                 verticalalignment="top",
             )
 
-        ## eta gridlines
+        # Eta grid lines
 
         xi = np.arange(self.grid.xi_min * 2, self.grid.xi_max * 2, csres)
         # eta(xi) for eta>0
@@ -343,7 +322,7 @@ class RegionalCSPlotter:
         ind = (eta_tick >= self.grid.eta_min) & (eta_tick <= self.grid.eta_max)
         eta_tick = eta_tick[ind]
         km_tick = km_tick[ind]
-        for y, label in zip(eta_tick, km_tick):
+        for y, label in zip(eta_tick, km_tick, strict=True):
             self.ax.text(
                 xi_tick,
                 y,
@@ -353,8 +332,7 @@ class RegionalCSPlotter:
             )
 
     def text(self, lon, lat, text, ignore_limits=False, **kwargs):
-        """
-        Adds text to the cubed sphere projection
+        """Draw text at a geographic position.
 
         Parameters
         ----------
@@ -375,7 +353,6 @@ class RegionalCSPlotter:
             The created Text instance.
 
         """
-
         xi, eta = self.grid.projection.geographic_to_cube(lon, lat)
 
         if self.grid.contains(lon, lat) or ignore_limits:
@@ -383,8 +360,7 @@ class RegionalCSPlotter:
         print('text outside plot limit - set "ignore_limits = True" to override')
 
     def plot(self, lon, lat, **kwargs):
-        """
-        Plots data points on the cubed sphere projection
+        """Plot a line using geographic coordinates.
 
         Parameters
         ----------
@@ -405,8 +381,7 @@ class RegionalCSPlotter:
         return self.ax.plot(x, y, **kwargs)
 
     def scatter(self, lon, lat, **kwargs):
-        """
-        Scatter plot of data points on the cubed sphere projection
+        """Draw points using geographic coordinates.
 
         Parameters
         ----------
@@ -427,8 +402,8 @@ class RegionalCSPlotter:
         return self.ax.scatter(x, y, **kwargs)
 
     def contour(self, *args, **kwargs):
-        """
-        Plot contour lines on the cubes sphere projection.
+        """Draw contour lines on the cubed-sphere projection.
+
         Call signature: contour([X, Y,] Z, **kwargs)
 
         Parameters
@@ -450,18 +425,16 @@ class RegionalCSPlotter:
             A set of contour lines or filled regions.
 
         """
-
         if len(args) == 1:  # Only C provided
             return self.ax.contour(self.grid.xi, self.grid.eta, args[0], **kwargs)
-        elif len(args) == 3:
-            X, Y = self.grid.projection.geographic_to_cube(args[0], args[1])
-            return self.ax.contour(X, Y, args[2], **kwargs)
-        else:
-            raise TypeError("Only accepts 1 or 3 arguments")
+        if len(args) == 3:
+            x, y = self.grid.projection.geographic_to_cube(args[0], args[1])
+            return self.ax.contour(x, y, args[2], **kwargs)
+        raise TypeError("contour accepts either Z or longitude, latitude, Z")
 
     def contourf(self, *args, **kwargs):
-        """
-        Plot filled contours on the cubes sphere projection.
+        """Draw filled contours on the cubed-sphere projection.
+
         Call signature: contourf([X, Y,] Z, **kwargs)
 
         Parameters
@@ -483,19 +456,17 @@ class RegionalCSPlotter:
             A set of contour lines or filled regions.
 
         """
-
         if len(args) == 1:  # Only C provided
             return self.ax.contourf(self.grid.xi, self.grid.eta, args[0], **kwargs)
-        elif len(args) == 3:
-            X, Y = self.grid.projection.geographic_to_cube(args[0], args[1])
-            return self.ax.contourf(X, Y, args[2], **kwargs)
-        else:
-            raise TypeError("Only accepts 1 or 3 arguments")
+        if len(args) == 3:
+            x, y = self.grid.projection.geographic_to_cube(args[0], args[1])
+            return self.ax.contourf(x, y, args[2], **kwargs)
+        raise TypeError("contourf accepts either Z or longitude, latitude, Z")
 
     def pcolormesh(self, *args, **kwargs):
-        """
-        Create a pseudocolor plot with a non-regular rectangular grid.
-        Call signature: contourf([X, Y,] Z, **kwargs)
+        """Draw a pseudocolor mesh on the cubed-sphere projection.
+
+        Call signature: pcolormesh([X, Y,] Z, **kwargs)
 
         Parameters
         ----------
@@ -516,20 +487,17 @@ class RegionalCSPlotter:
             A QuadMesh object.
 
         """
-
         if len(args) == 1:  # Only C provided
             return self.ax.pcolormesh(self.grid.xi_mesh, self.grid.eta_mesh, args[0], **kwargs)
-        elif len(args) == 3:
-            X, Y = self.grid.projection.geographic_to_cube(args[0], args[1])
-            return self.ax.pcolormesh(X, Y, args[2], **kwargs)
-        else:
-            raise TypeError("Only accepts 1 or 3 arguments")
+        if len(args) == 3:
+            x, y = self.grid.projection.geographic_to_cube(args[0], args[1])
+            return self.ax.pcolormesh(x, y, args[2], **kwargs)
+        raise TypeError("pcolormesh accepts either Z or longitude, latitude, Z")
 
     def quiver(self, east, north, lon, lat, **kwargs):
-        """
-        Quiver plot on the cubed sphere projection
+        """Draw eastward/northward vectors at geographic positions.
 
-        parameters
+        Parameters
         ----------
         east: array_like or scalar
             Eastward vector components
@@ -548,19 +516,19 @@ class RegionalCSPlotter:
             A PolyCollection quiver object.
 
         """
+        x, y, xi_component, eta_component = self.grid.projection.geographic_vector_to_cube(
+            east, north, lon, lat
+        )
 
-        x, y, Ax, Ay = self.grid.projection.geographic_vector_to_cube(east, north, lon, lat)
-
-        return self.ax.quiver(x, y, Ax, Ay, **kwargs)
+        return self.ax.quiver(x, y, xi_component, eta_component, **kwargs)
 
     def add_coastlines(self, resolution="110m", **kwargs):
-        """
-        Adds coastlines to the cubed sphere projection.
+        """Draw Natural Earth coastlines on the cubed-sphere projection.
 
         Parameters
         ----------
         resolution : str, optional
-            DESCRIPTION. The default is '110m'.
+            Natural Earth resolution identifier.
         **kwargs : 2D line properties
             Passed to matplotlib.pyplot.plot.
 
@@ -569,7 +537,6 @@ class RegionalCSPlotter:
         None.
 
         """
-
         if "color" not in kwargs:
             kwargs["color"] = "black"
 
@@ -578,29 +545,28 @@ class RegionalCSPlotter:
             self.ax.plot(xi, eta, **kwargs)
 
 
-def anglemean(X, axis=None):
-    """
-    Function to calculate the circular mean. NaNs are ignored.
+def circular_mean_degrees(angles, axis=None):
+    """Return the circular mean in degrees, ignoring NaNs.
 
     Parameters
     ----------
-    X : array_like
-        Array containing numbers whose mean is desired. If a is not an array, a conversion is attempted.
+    angles : array_like
+        Angles in degrees.
     axis : None or int or tuple of ints, optional
-        Axis or axes along which the means are computed. The default is to compute the mean of the flattened array.
+        Axis or axes along which to compute the mean.
 
     Returns
     -------
     ndarray
-        A new array containing the mean values
+        Circular mean values in degrees.
 
     """
     return np.rad2deg(
         np.arctan2(
-            np.nanmean(np.sin(np.deg2rad(X)), axis=axis),
-            np.nanmean(np.cos(np.deg2rad(X)), axis=axis),
+            np.nanmean(np.sin(np.deg2rad(angles)), axis=axis),
+            np.nanmean(np.cos(np.deg2rad(angles)), axis=axis),
         )
     )
 
 
-__all__ = ["RegionalCSPlotter", "anglemean"]
+__all__ = ["RegionalCSPlotter", "circular_mean_degrees"]

@@ -11,8 +11,8 @@ from kompe.math import (
     einsum_linear_map,
     einsum_linear_map_from_matvec,
     get_array_module,
+    jax_enabled,
     set_backend,
-    use_jax,
 )
 from kompe.math.least_squares_problem import LeastSquaresProblem
 from kompe.math.least_squares_solver import LeastSquaresSolver
@@ -21,7 +21,7 @@ from kompe.math.linear_map import (
     as_linear_map,
     diagonal_linear_map,
     identity_linear_map,
-    is_noop_linear_map,
+    is_identity_linear_map,
     pointwise_matrix_linear_map,
     take_linear_map,
     vstack_linear_maps,
@@ -44,6 +44,26 @@ def test_dense_linear_map_matches_matrix_operations():
     np.testing.assert_allclose(
         (linear_map @ as_linear_map(other)).to_matrix(backend="numpy"), matrix @ other
     )
+
+
+def test_array_linear_map_preserves_scalar_input_shape():
+    """An explicit zero-dimensional input shape is not replaced by inference."""
+    matrix = np.array([[2.0], [3.0]])
+    linear_map = as_linear_map(matrix, input_shape=(), output_shape=(2,))
+
+    assert linear_map.input_shape == ()
+    np.testing.assert_allclose(linear_map.matvec(np.array(4.0)), [8.0, 12.0])
+
+
+def test_linear_map_conversion_does_not_hide_array_errors():
+    """Errors raised while producing an array retain their original meaning."""
+
+    class BrokenArray:
+        def __array__(self, dtype=None, copy=None):
+            raise RuntimeError("array construction failed")
+
+    with pytest.raises(RuntimeError, match="array construction failed"):
+        as_linear_map(BrokenArray())
 
 
 def test_linear_map_addition_matches_matrix_operations():
@@ -189,7 +209,7 @@ def test_identity_linear_map_is_noop_without_dense_materialization():
     vector = np.arange(4.0)
     block = np.column_stack([vector, vector + 1.0])
 
-    assert is_noop_linear_map(identity)
+    assert is_identity_linear_map(identity)
     np.testing.assert_allclose(identity.matvec(vector), vector)
     np.testing.assert_allclose(identity.rmatvec(vector), vector)
     np.testing.assert_allclose(identity.matmat(block), block)
@@ -287,7 +307,7 @@ def test_structured_dense_builders_preserve_jax_backend(monkeypatch):
 
     import kompe.math.linear_map as linear_map_module
 
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = jnp.arange(24.0).reshape(2, 3, 4)
     pointwise = pointwise_matrix_linear_map(matrix)
     selector = take_linear_map((2, 4), [0, 2], axis=1)
@@ -538,7 +558,7 @@ def test_linear_map_to_array_returns_shaped_dense_representation():
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_dense_linear_map_accepts_numpy_inputs_with_jax_backend():
     """Dense maps stay NumPy-facing until called with JAX inputs."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = np.array([[1.0, 2.0], [3.0, 5.0], [7.0, 11.0]])
     x = np.array([0.25, -2.0])
 
@@ -555,7 +575,7 @@ def test_dense_linear_map_accepts_numpy_inputs_with_jax_backend():
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_pointwise_linear_map_accepts_numpy_inputs_with_jax_backend():
     """Pointwise maps stay NumPy-facing until called with JAX inputs."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = np.arange(24.0).reshape(2, 3, 4)
     values = np.arange(12.0).reshape(3, 4)
     linear_map = pointwise_matrix_linear_map(matrix)
@@ -629,7 +649,7 @@ def test_diagonal_linear_map_preserves_jax_dense_source(monkeypatch):
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_linear_map_dense_uses_active_backend():
     """Dense materialization can stay on the active backend."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = np.array([[1.0, 2.0], [3.0, 5.0], [7.0, 11.0]])
     base = as_linear_map(matrix)
     matrix_free = LinearMap(
@@ -652,20 +672,20 @@ def test_linear_map_dense_uses_active_backend():
 
 
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
-def test_linear_map_backend_context_drives_matrix_free_batches():
+def test_linear_map_backend_operands_drives_matrix_free_batches():
     """Matrix-free batching follows operator backend context."""
     import jax.numpy as jnp
 
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])
-    backend_context = jnp.asarray(0.0)
+    backend_operands = jnp.asarray(0.0)
 
     def matvec(vec):
-        xp = get_array_module(vec, backend_context)
+        xp = get_array_module(vec, backend_operands)
         return xp.asarray(matrix) @ xp.asarray(vec)
 
     def rmatvec(vec):
-        xp = get_array_module(vec, backend_context)
+        xp = get_array_module(vec, backend_operands)
         return xp.asarray(matrix).T @ xp.asarray(vec)
 
     linear_map = LinearMap(
@@ -673,7 +693,7 @@ def test_linear_map_backend_context_drives_matrix_free_batches():
         dtype=matrix.dtype,
         _matvec=matvec,
         _rmatvec=rmatvec,
-        _backend_context=(backend_context,),
+        _backend_operands=(backend_operands,),
     )
 
     try:
@@ -725,7 +745,7 @@ def test_sparse_linear_map_preserves_explicit_jax_inputs_when_numpy_active():
     """Sparse maps follow explicit JAX operands."""
     import jax.numpy as jnp
 
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
     x = np.array([0.25, -2.0])
 
@@ -1231,7 +1251,7 @@ def test_einsum_linear_map_from_matvec_rejects_ambiguous_labels():
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_einsum_linear_map_dense_materialization_uses_active_backend():
     """Einsum-backed dense materialization can stay on JAX."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])
     linear_map = einsum_linear_map(
         component_tensors=[matrix],
@@ -1255,7 +1275,7 @@ def test_einsum_linear_map_dense_materialization_uses_active_backend():
 @pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
 def test_einsum_linear_map_dense_uses_active_backend():
     """Einsum-backed LinearMap preserves the active matrix backend."""
-    previous_backend = use_jax()
+    previous_backend = jax_enabled()
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])
     linear_map = einsum_linear_map(
         component_tensors=[matrix],

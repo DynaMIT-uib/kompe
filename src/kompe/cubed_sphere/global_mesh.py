@@ -12,18 +12,18 @@ import scipy.sparse as sp
 from scipy.interpolate import griddata
 from scipy.spatial import Delaunay
 
-from kompe.core import _owned_readonly_array
+from kompe.basis import _owned_readonly_array
 from kompe.cubed_sphere.arrayutils import determinants_3x3
 from kompe.cubed_sphere.cs_coordinates import (
-    coordinate,
     cube_to_cartesian,
     cube_to_spherical,
+    face_coordinate,
     metric_tensor,
 )
 from kompe.cubed_sphere.global_projection import GlobalCSProjection
 from kompe.grid import SphericalGrid
 from kompe.math import as_linear_map, identity_linear_map
-from kompe.math.backend import to_numpy, use_jax
+from kompe.math.backend import jax_enabled, to_numpy
 from kompe.mesh import StructuredSurfaceMesh
 
 
@@ -51,8 +51,8 @@ class GlobalCSMesh(StructuredSurfaceMesh):
 
         cells_per_face = int(cells_per_face)
         k, i, j = self._gridpoints(cells_per_face)
-        xi = coordinate(i[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
-        eta = coordinate(j[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
+        xi = face_coordinate(i[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
+        eta = face_coordinate(j[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
         face = k[:, :-1, :-1].reshape(-1)
         _, theta, phi = cube_to_spherical(xi, eta, face, deg=True)
         cell_metric = metric_tensor(xi, eta)
@@ -117,7 +117,7 @@ class GlobalCSMesh(StructuredSurfaceMesh):
 
     def coordinate(self, index):
         """Return xi/eta coordinate values for logical edge indices."""
-        return coordinate(index, self.cells_per_face)
+        return face_coordinate(index, self.cells_per_face)
 
     def grid_line_indices(self, *, flat=False):
         """Return face, xi, and eta indices for all mesh grid lines."""
@@ -152,10 +152,10 @@ class GlobalCSMesh(StructuredSurfaceMesh):
         j0, j1 = j[:, :-1, :-1].reshape(-1), j[:, :-1, 1:].reshape(-1)
 
         corners = [
-            (coordinate(i0, N), coordinate(j0, N)),
-            (coordinate(i1, N), coordinate(j0, N)),
-            (coordinate(i1, N), coordinate(j1, N)),
-            (coordinate(i0, N), coordinate(j1, N)),
+            (face_coordinate(i0, N), face_coordinate(j0, N)),
+            (face_coordinate(i1, N), face_coordinate(j0, N)),
+            (face_coordinate(i1, N), face_coordinate(j1, N)),
+            (face_coordinate(i0, N), face_coordinate(j1, N)),
         ]
         vectors = []
         for xi, eta in corners:
@@ -168,7 +168,7 @@ class GlobalCSMesh(StructuredSurfaceMesh):
         ) + cls.spherical_triangle_area(vectors[0], vectors[2], vectors[3])
 
 
-class CSGridRemapper:
+class _GlobalCSRemapper:
     """Build and cache remaps between CS-compatible grids."""
 
     _shared_remap_matrix_cache: ClassVar[OrderedDict] = OrderedDict()
@@ -387,7 +387,7 @@ class CSGridRemapper:
         if source_grid.same_as(target_grid):
             return identity_linear_map((source_grid.size,))
         matrix_key = self.remap_matrix_key("scalar_grid_remap_matrix", source_grid, target_grid)
-        key = ("scalar_grid_remap", matrix_key, bool(use_jax()))
+        key = ("scalar_grid_remap", matrix_key, bool(jax_enabled()))
         if key not in self.operator_cache:
             matrix = self._cached_remap_matrix(
                 matrix_key, lambda: self.build_scalar_grid_remap_matrix(source_grid, target_grid)
@@ -407,7 +407,7 @@ class CSGridRemapper:
         matrix_key = self.remap_matrix_key(
             "tangential_grid_remap_matrix", source_grid, target_grid
         )
-        key = ("tangential_grid_remap", matrix_key, bool(use_jax()))
+        key = ("tangential_grid_remap", matrix_key, bool(jax_enabled()))
         if key not in self.operator_cache:
             matrix = self._cached_remap_matrix(
                 matrix_key,
@@ -567,4 +567,4 @@ class CSGridRemapper:
         return interpolated.reshape(target_shape + value_shape)
 
 
-__all__ = ["CSGridRemapper", "GlobalCSMesh"]
+__all__ = ["GlobalCSMesh"]

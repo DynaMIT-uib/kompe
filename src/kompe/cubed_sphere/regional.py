@@ -22,8 +22,9 @@ from kompe.cubed_sphere import cs_coordinates
 from kompe.grid import SphericalGrid
 from kompe.math import as_linear_map, content_fingerprint
 from kompe.mesh import StructuredSurfaceMesh
+from kompe.spherical import ecef_to_enu, enu_to_ecef
 
-from . import cs_vectors, diffutils, spherical
+from . import cs_vectors, finite_differences
 
 _DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 
@@ -186,7 +187,7 @@ class RegionalCSProjection:
         latitude = np.deg2rad(self.lat0)
 
         # Local radial direction, expressed in geographic ECEF coordinates.
-        self.z = np.array(
+        self.local_z_axis = np.array(
             [
                 np.cos(latitude) * np.cos(longitude),
                 np.cos(latitude) * np.sin(longitude),
@@ -195,28 +196,28 @@ class RegionalCSProjection:
         )
 
         # On the north face, increasing xi follows the local Cartesian y axis.
-        self.y = spherical.enu_to_ecef(
+        self.local_y_axis = enu_to_ecef(
             orientation_enu,
-            np.array(self.lon0),
             np.array(self.lat0),
+            np.array(self.lon0),
         ).flatten()
 
         # Complete the right-handed local Cartesian frame.
-        self.x = np.cross(self.y, self.z)
+        self.local_x_axis = np.cross(self.local_y_axis, self.local_z_axis)
 
         # define rotation matrices for rotations between local and geocentric:
-        self.R_geo2local = np.vstack(
-            (self.x, self.y, self.z)
+        self.geographic_to_local_matrix = np.vstack(
+            (self.local_x_axis, self.local_y_axis, self.local_z_axis)
         )  # rotation matrix from GEO to rotated coords (ECEF)
-        self.R_local2geo = self.R_geo2local.T  # inverse
+        self.local_to_geographic_matrix = self.geographic_to_local_matrix.T
         for name in (
             "position",
             "orientation",
-            "x",
-            "y",
-            "z",
-            "R_geo2local",
-            "R_local2geo",
+            "local_x_axis",
+            "local_y_axis",
+            "local_z_axis",
+            "geographic_to_local_matrix",
+            "local_to_geographic_matrix",
         ):
             values = np.array(getattr(self, name), copy=True)
             values.setflags(write=False)
@@ -262,7 +263,7 @@ class RegionalCSProjection:
         """
         lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
         local_lon, local_lat = self.geographic_to_local(lon, lat)
-        xi, eta, _ = cs_coordinates.geo_to_cube(
+        xi, eta, _ = cs_coordinates.geographic_to_cube(
             local_lon,
             local_lat,
             block=_NORTH_FACE,
@@ -322,7 +323,7 @@ class RegionalCSProjection:
         lat: array-like
             array of latitudes [deg] in new coordinate system
         """
-        return _rotate_spherical_coordinates(lon, lat, self.R_geo2local)
+        return _rotate_spherical_coordinates(lon, lat, self.geographic_to_local_matrix)
 
     def local_to_geographic(self, lon, lat):
         """Convert from local coordinates to geocentric coordinates
@@ -343,7 +344,7 @@ class RegionalCSProjection:
             array of latitudes [deg] in new coordinate system
 
         """
-        return _rotate_spherical_coordinates(lon, lat, self.R_local2geo)
+        return _rotate_spherical_coordinates(lon, lat, self.local_to_geographic_matrix)
 
     def local_to_geographic_enu_rotation(self, lon, lat):
         """Calculate rotation matrices that transform local ENU to geocentric ENU
@@ -367,17 +368,17 @@ class RegionalCSProjection:
         """
         lon, lat = map(np.ravel, np.broadcast_arrays(lon, lat))
         geographic_lon, geographic_lat = self.local_to_geographic(lon, lat)
-        local_east = spherical.enu_to_ecef(np.tile((1.0, 0.0, 0.0), (lon.size, 1)), lon, lat)
-        local_north = spherical.enu_to_ecef(np.tile((0.0, 1.0, 0.0), (lon.size, 1)), lon, lat)
-        geographic_east = spherical.ecef_to_enu(
-            np.einsum("ij,nj->ni", self.R_local2geo, local_east),
-            geographic_lon,
+        local_east = enu_to_ecef(np.tile((1.0, 0.0, 0.0), (lon.size, 1)), lat, lon)
+        local_north = enu_to_ecef(np.tile((0.0, 1.0, 0.0), (lon.size, 1)), lat, lon)
+        geographic_east = ecef_to_enu(
+            np.einsum("ij,nj->ni", self.local_to_geographic_matrix, local_east),
             geographic_lat,
+            geographic_lon,
         )[:, :2]
-        geographic_north = spherical.ecef_to_enu(
-            np.einsum("ij,nj->ni", self.R_local2geo, local_north),
-            geographic_lon,
+        geographic_north = ecef_to_enu(
+            np.einsum("ij,nj->ni", self.local_to_geographic_matrix, local_north),
             geographic_lat,
+            geographic_lon,
         )[:, :2]
         return np.stack((geographic_east, geographic_north), axis=2)
 
@@ -411,12 +412,14 @@ class RegionalCSProjection:
             np.broadcast_arrays(east, north, lon, lat),
         )
         xi, eta = self.geographic_to_cube(lon, lat)
-        geographic_ecef = spherical.enu_to_ecef(
+        geographic_ecef = enu_to_ecef(
             np.column_stack((east, north, np.zeros_like(east))),
-            lon,
             lat,
+            lon,
         )
-        local_ecef = np.einsum("ij,nj->ni", self.R_geo2local, geographic_ecef)
+        local_ecef = np.einsum(
+            "ij,nj->ni", self.geographic_to_local_matrix, geographic_ecef
+        )
         cube_matrix = cs_vectors._cartesian_to_cube_matrix(
             xi,
             eta,
@@ -464,8 +467,10 @@ class RegionalCSProjection:
             block=_NORTH_FACE,
         )
         local_ecef = np.einsum("nij,nj->ni", cartesian_matrix, cube)
-        geographic_ecef = np.einsum("ij,nj->ni", self.R_local2geo, local_ecef)
-        geographic = spherical.ecef_to_enu(geographic_ecef, lon, lat)
+        geographic_ecef = np.einsum(
+            "ij,nj->ni", self.local_to_geographic_matrix, local_ecef
+        )
+        geographic = ecef_to_enu(geographic_ecef, lat, lon)
         return lon, lat, geographic[:, 0], geographic[:, 1]
 
     def projected_coastlines(self, resolution="50m"):
@@ -965,7 +970,8 @@ class RegionalCSOperators:
         ----------
         stencil_size: int, optional
             Stencil size. Default is 1, in which case derivatives will be calculated
-            with a 3-point stencil. With S = 2, a 5-point stencil will be used. etc.
+            with a 3-point stencil. With ``stencil_size=2``, a 5-point
+            stencil is used, and so on.
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
@@ -996,7 +1002,7 @@ class RegionalCSOperators:
 
         # inner grid points:
         points = np.r_[-S : S + 1 : 1]
-        coefficients = diffutils.stencil(points, order=1)
+        coefficients = finite_differences.finite_difference_weights(points, order=1)
         i_dx, j_dx = ii[:, S:-S], jj[:, S:-S]
         i_dy, j_dy = ii.T[:, S:-S], jj.T[:, S:-S]
 
@@ -1013,7 +1019,7 @@ class RegionalCSOperators:
         for kk in np.arange(0, S)[::-1]:
             # LEFT
             points = np.r_[-kk : S + 1 : 1]
-            coefficients = diffutils.stencil(points, order=1)
+            coefficients = finite_differences.finite_difference_weights(points, order=1)
             i_dx, j_dx = ii[:, kk], jj[:, kk]
             i_dy, j_dy = ii.T[:, kk], jj.T[:, kk]
 
@@ -1028,7 +1034,7 @@ class RegionalCSOperators:
 
             # RIGHT
             points = np.r_[-S : kk + 1 : 1]
-            coefficients = diffutils.stencil(points, order=1)
+            coefficients = finite_differences.finite_difference_weights(points, order=1)
             i_dx, j_dx = ii[:, -(kk + 1)], jj[:, -(kk + 1)]
             i_dy, j_dy = ii.T[:, -(kk + 1)], jj.T[:, -(kk + 1)]
 
@@ -1110,7 +1116,8 @@ class RegionalCSOperators:
         ----------
         stencil_size: int, optional
             Stencil size. Default is 1, in which case derivatives will be calculated
-            with a 3-point stencil. With S = 2, a 5-point stencil will be used. etc.
+            with a 3-point stencil. With ``stencil_size=2``, a 5-point
+            stencil is used, and so on.
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
@@ -1168,7 +1175,7 @@ class RegionalCSOperators:
         )[:, :2, :].transpose(0, 2, 1)
         dual_basis = np.einsum(
             "ij,njk->nik",
-            grid.projection.R_local2geo,
+            grid.projection.local_to_geographic_matrix,
             dual_basis_local,
         )
         metric = cs_coordinates.surface_metric_tensor(xi, eta, r=grid.radius)

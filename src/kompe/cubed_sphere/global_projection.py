@@ -31,7 +31,7 @@ class GlobalCSProjection:
     @staticmethod
     def metric_delta(xi, eta):
         """Return the cubed-sphere metric delta parameter."""
-        return cs_coordinates.delta(xi, eta)
+        return cs_coordinates.metric_delta(xi, eta)
 
     @staticmethod
     def metric_tensor(xi, eta, radius=1, covariant=True):
@@ -46,12 +46,12 @@ class GlobalCSProjection:
     @staticmethod
     def face_index(longitude, latitude):
         """Return global cubed-sphere face indices."""
-        return cs_coordinates.cube_face(longitude, latitude)
+        return cs_coordinates.face_index(longitude, latitude)
 
     @staticmethod
     def geographic_to_cube(longitude, latitude, face=None):
         """Map geographic longitude/latitude to global cube coordinates."""
-        return cs_coordinates.geo_to_cube(
+        return cs_coordinates.geographic_to_cube(
             longitude,
             latitude,
             block=face,

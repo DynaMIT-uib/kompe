@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 
-from kompe.math.backend import block_after_jax_linalg, get_array_module
+from kompe.math.backend import get_array_module, synchronize_linalg_result
 
 
 def tensor_pinv(A, n_leading_flattened=2, rtol=1e-15, hermitian=False):
@@ -23,7 +23,7 @@ def tensor_pinv(A, n_leading_flattened=2, rtol=1e-15, hermitian=False):
 
     A_flat = A_arr.reshape((flat_first, flat_last))
     A_pinv = xp.linalg.pinv(A_flat, rtol=rtol, hermitian=hermitian)
-    return block_after_jax_linalg(A_pinv).reshape(last_dims + first_dims)
+    return synchronize_linalg_result(A_pinv).reshape(last_dims + first_dims)
 
 
 def weighted_tensor_pinv(A, sqrt_weights=None, n_leading_flattened=2, rtol=1e-15):
@@ -44,5 +44,5 @@ def weighted_tensor_pinv(A, sqrt_weights=None, n_leading_flattened=2, rtol=1e-15
     A_flat = A_arr.reshape((flat_first, flat_last))
     weighted_A = weights_flat.reshape((-1, 1)) * A_flat
     weighted_pinv = xp.linalg.pinv(weighted_A, rtol=rtol)
-    weighted_pinv = block_after_jax_linalg(weighted_pinv)
+    weighted_pinv = synchronize_linalg_result(weighted_pinv)
     return (weighted_pinv * weights_flat.reshape((1, -1))).reshape(last_dims + first_dims)

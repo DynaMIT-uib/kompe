@@ -17,7 +17,7 @@ from kompe import (
     SHBasis,
 )
 from kompe.cubed_sphere import REGIONAL_CS_MESH_SCHEMA, REGIONAL_CS_MESH_SCHEMA_VERSION
-from kompe.cubed_sphere.plot import RegionalCSPlotter
+from kompe.cubed_sphere.regional_plotting import RegionalCSPlotter
 
 
 def _longitude_error(actual, expected):

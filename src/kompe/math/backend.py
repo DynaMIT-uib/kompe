@@ -85,6 +85,16 @@ def use_jax(flag: bool | None = None) -> bool:
     return bool(_USE_JAX and JAX_AVAILABLE)
 
 
+def jax_enabled() -> bool:
+    """Return whether JAX is the active array backend."""
+    return use_jax()
+
+
+def get_backend() -> str:
+    """Return the active array backend name."""
+    return "jax" if jax_enabled() else "numpy"
+
+
 def set_backend(backend: str | bool | None) -> str:
     """Set the active array backend."""
     if isinstance(backend, bool):
@@ -165,7 +175,7 @@ def block_until_ready(array: Any) -> Any:
     return array
 
 
-def block_after_jax_linalg(array: Any) -> Any:
+def synchronize_linalg_result(array: Any) -> Any:
     """Synchronize JAX CPU linear algebra before NumPy/OpenBLAS work.
 
     JAX CPU ``pinv``/``svd``/``solve`` may lower to asynchronous LAPACK
@@ -233,9 +243,11 @@ __all__ = [
     "JAX_AVAILABLE",
     "asarray",
     "backend_context",
-    "block_after_jax_linalg",
+    "synchronize_linalg_result",
     "block_until_ready",
+    "get_backend",
     "get_array_module",
+    "jax_enabled",
     "jit",
     "set_backend",
     "to_jax",

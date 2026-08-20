@@ -11,7 +11,7 @@ import numpy as np
 import scipy.sparse
 from scipy.sparse.linalg import LinearOperator
 
-from kompe.math.backend import asarray, block_after_jax_linalg, get_array_module, to_numpy
+from kompe.math.backend import asarray, get_array_module, synchronize_linalg_result, to_numpy
 from kompe.math.linear_map import LinearMap, as_linear_map, vstack_linear_maps
 
 OperatorInput: TypeAlias = np.ndarray | scipy.sparse.spmatrix | LinearOperator | LinearMap
@@ -25,13 +25,15 @@ class LeastSquaresProblem:
 
     With one data term and one regularization term, the solved objective is
 
-    ``||W (A x - b)||² + lambda_scaled ||L x||²``.
+    ``||W (A x - b)||² + ||s L x||²``.
 
     ``sqrt_weights`` supplies the diagonal of ``W`` (so its square gives the
-    statistical or area weight). ``regularization_weights`` supplies the
-    dimensionless relative lambda before Kompe balances the median non-zero
-    diagonals of ``A* A`` and ``L* L``. The same rule is applied term by term
-    when several data or regularization operators are provided.
+    statistical or area weight). ``regularization_strengths`` supplies the
+    dimensionless relative strength before Kompe balances the median non-zero
+    diagonals of ``A* A`` and ``L* L``. ``s`` is the resulting row scale: the
+    square root of that strength times the balancing factor. The same rule is
+    applied term by term when several data or regularization operators are
+    provided.
     """
 
     def __init__(
@@ -40,7 +42,7 @@ class LeastSquaresProblem:
         solution_shape: int | tuple[int, ...],
         data_shapes: Any | list[Any],
         sqrt_weights: Any | list[Any] | None = None,
-        regularization_weights: NumericInputList | None = None,
+        regularization_strengths: NumericInputList | None = None,
         regularization_matrices: OperatorInputList | None = None,
         operator_cache: Any | None = None,
         cache_identity: Any | None = None,
@@ -60,7 +62,7 @@ class LeastSquaresProblem:
         self._data_normal_matrix_cache = None
 
         self._process_data_terms(A, data_shapes, sqrt_weights)
-        self._process_regularization_terms(regularization_matrices, regularization_weights)
+        self._process_regularization_terms(regularization_matrices, regularization_strengths)
 
     def _process_data_terms(self, A_in, data_shapes_in, sqrt_weights_in):
         A_list = self._prepare_input_list(A_in, "A")
@@ -78,18 +80,21 @@ class LeastSquaresProblem:
             for i, w in enumerate(sqrt_weights_list)
         ]
 
-    def _process_regularization_terms(self, reg_matrices_in, reg_weights_in):
+    def _process_regularization_terms(self, regularization_matrices, regularization_strengths):
         reg_L_list = self._prepare_input_list(
-            reg_matrices_in, "regularization_matrices", is_optional=True
+            regularization_matrices, "regularization_matrices", is_optional=True
         )
         self.num_reg_terms = len(reg_L_list)
         self.regularization_matrices = [
             as_linear_map(L, input_shape=self.solution_shape) if L is not None else None
             for L in reg_L_list
         ]
-        self.regularization_weights = self._validate_regularization_weights(
+        self.regularization_strengths = self._validate_regularization_strengths(
             self._prepare_input_list(
-                reg_weights_in, "regularization_weights", count=self.num_reg_terms, default_val=0.0
+                regularization_strengths,
+                "regularization_strengths",
+                count=self.num_reg_terms,
+                default_val=0.0,
             )
         )
 
@@ -107,10 +112,10 @@ class LeastSquaresProblem:
         return as_linear_map(w_val, output_shape=shape, input_shape=shape)
 
     @cached_property
-    def scaled_lambdas(self) -> list[float]:
-        """Compute scaled regularization weights."""
+    def regularization_row_scales(self) -> list[float]:
+        """Return row scales for the balanced regularization operators."""
         if not any(
-            matrix is not None and self.regularization_weights[index] > 0.0
+            matrix is not None and self.regularization_strengths[index] > 0.0
             for index, matrix in enumerate(self.regularization_matrices)
         ):
             return [0.0] * len(self.regularization_matrices)
@@ -120,20 +125,22 @@ class LeastSquaresProblem:
             diag_A_T_A = np.diag(self._custom_data_normal_matrix()).real
         active_diag_A = diag_A_T_A[diag_A_T_A > 0]
         data_term_scale = np.median(active_diag_A) if active_diag_A.size > 0 else 1.0
-        scaled_lambdas = []
+        regularization_row_scales = []
         for i, L_item in enumerate(self.regularization_matrices):
-            raw_weight = self.regularization_weights[i]
-            if raw_weight == 0 or L_item is None:
-                scaled_lambdas.append(0.0)
+            strength = self.regularization_strengths[i]
+            if strength == 0 or L_item is None:
+                regularization_row_scales.append(0.0)
                 continue
             diag_L_T_L = L_item.normal_matrix_diag()
             active_diag_L = diag_L_T_L[diag_L_T_L > 0]
-            reg_term_scale = np.median(active_diag_L) if active_diag_L.size > 0 else 1.0
-            scale_factor = (
-                math.sqrt(data_term_scale / reg_term_scale) if reg_term_scale > 1e-14 else 0.0
-            )
-            scaled_lambdas.append(math.sqrt(raw_weight) * scale_factor)
-        return scaled_lambdas
+            if active_diag_L.size == 0:
+                raise ValueError(
+                    f"regularization_matrices[{i}] is zero but has positive strength."
+                )
+            reg_term_scale = np.median(active_diag_L)
+            scale_factor = math.sqrt(data_term_scale / reg_term_scale)
+            regularization_row_scales.append(math.sqrt(strength) * scale_factor)
+        return regularization_row_scales
 
     @cached_property
     def data_operator(self) -> LinearMap:
@@ -174,7 +181,7 @@ class LeastSquaresProblem:
             def build():
                 normal_matrix = self.dense_normal_matrix()
                 normal_pinv = to_numpy(
-                    block_after_jax_linalg(
+                    synchronize_linalg_result(
                         xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
                     )
                 )
@@ -213,7 +220,12 @@ class LeastSquaresProblem:
         data_normal = self._custom_data_normal_matrix()
         regularization_terms = self._active_regularization_terms()
         self._data_normal_matrix_cache = None
-        normal = data_normal if data_normal.flags.writeable else np.array(data_normal, copy=True)
+        if not regularization_terms:
+            return get_array_module().asarray(data_normal)
+
+        # The builder may return a shared or cached matrix. Regularization
+        # belongs to this problem and must not alter the builder's data.
+        normal = np.array(data_normal, copy=True)
         diagonal_indices = np.diag_indices(self.solution_size)
         for weight, regularization in regularization_terms:
             try:
@@ -256,7 +268,7 @@ class LeastSquaresProblem:
 
     def assemble_rhs_block(
         self, b: Any | list[Any], *, include_regularization: bool = True
-    ) -> tuple[Any | None, tuple[int, ...], int]:
+    ) -> tuple[Any, tuple[int, ...], int]:
         """Assemble one or more right-hand side columns."""
         b_list = self._prepare_input_list(b, "b", count=self.num_data_terms)
         processed = [
@@ -264,7 +276,7 @@ class LeastSquaresProblem:
         ]
         valid_b = [p for p in processed if p[0] is not None]
         if not valid_b:
-            return None, (), 0
+            raise ValueError("At least one right-hand-side data term must be provided.")
         rhs_shape = valid_b[0][1]
         if not all(p[1] == rhs_shape for p in valid_b):
             raise ValueError("Inconsistent RHS column shapes in b terms.")
@@ -274,10 +286,10 @@ class LeastSquaresProblem:
         active_regularization_terms = (
             self._active_regularization_terms() if include_regularization else ()
         )
-        backend_context = self.system_operator(
+        backend_operands = self.system_operator(
             include_regularization=include_regularization
-        ).backend_context
-        xp = get_array_module(*(p[0] for p in valid_b), *backend_context)
+        ).backend_operands
+        xp = get_array_module(*(p[0] for p in valid_b), *backend_operands)
 
         blocks = []
         for i, (b_col_block, _) in enumerate(processed):
@@ -316,15 +328,15 @@ class LeastSquaresProblem:
         return vstack_linear_maps(row_maps, input_shape=self.solution_shape)
 
     def _active_regularization_terms(self) -> tuple[tuple[float, LinearMap], ...]:
-        lambdas = self.scaled_lambdas
+        lambdas = self.regularization_row_scales
         return tuple(
             (lambdas[i], L_item)
             for i, L_item in enumerate(self.regularization_matrices)
-            if i < len(lambdas) and L_item is not None and lambdas[i] > 1e-12
+            if i < len(lambdas) and L_item is not None and lambdas[i] > 0.0
         )
 
     @staticmethod
-    def _validate_regularization_weights(weights: list) -> list[float]:
+    def _validate_regularization_strengths(weights: list) -> list[float]:
         """Return finite, non-negative scalar regularization weights."""
         validated = []
         for index, weight in enumerate(weights):
@@ -335,11 +347,11 @@ class LeastSquaresProblem:
                 value = float(array)
             except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"regularization_weights[{index}] must be a finite non-negative scalar."
+                    f"regularization_strengths[{index}] must be a finite non-negative scalar."
                 ) from exc
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(
-                    f"regularization_weights[{index}] must be a finite non-negative scalar."
+                    f"regularization_strengths[{index}] must be a finite non-negative scalar."
                 )
             validated.append(value)
         return validated
@@ -397,11 +409,10 @@ class LeastSquaresProblem:
         if b.ndim == 1 and b.size == flat_data_size:
             return b.reshape(flat_data_size, 1), ()
 
-        if b.size % flat_data_size != 0:
-            raise ValueError(f"Shape {b.shape} incompatible with data_shape {data_shape}.")
-        num_rhs = b.size // flat_data_size
-        rhs_shape = (num_rhs,) if num_rhs > 1 else ()
-        return b.reshape(flat_data_size, num_rhs), rhs_shape
+        if b.ndim == 0 and flat_data_size == 1:
+            return b.reshape(1, 1), ()
+
+        raise ValueError(f"Shape {b.shape} incompatible with data_shape {data_shape}.")
 
 
 def _backend_cache_key(xp: Any) -> str:

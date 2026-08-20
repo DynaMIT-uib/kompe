@@ -16,8 +16,8 @@ from kompe.math.backend import (
     asarray,
     block_until_ready,
     get_array_module,
+    jax_enabled,
     to_numpy,
-    use_jax,
 )
 
 MatrixShape: TypeAlias = tuple[int, int]
@@ -57,7 +57,7 @@ class LinearMap:
     _dense_array_func: Callable[[Any], Any] | None = field(default=None, repr=False)
     _diagonal_array_func: Callable[[Any], Any] | None = field(default=None, repr=False)
     _normal_matrix_diag: Callable[[], np.ndarray] | None = field(default=None, repr=False)
-    _backend_context: tuple[Any, ...] = field(default=(), repr=False)
+    _backend_operands: tuple[Any, ...] = field(default=(), repr=False)
     _is_noop: bool = field(default=False, repr=False)
     _einsum_map: Any = field(default=None, repr=False, compare=False)
     _dense_tensor: Any = field(default=None, repr=False, compare=False)
@@ -82,13 +82,13 @@ class LinearMap:
         return 2
 
     @property
-    def backend_context(self) -> tuple[Any, ...]:
+    def backend_operands(self) -> tuple[Any, ...]:
         """Closed-over operands used for backend selection."""
-        return self._backend_context
+        return self._backend_operands
 
     def array_module(self, *operands: Any) -> Any:
         """Return the array module implied by operands and this map."""
-        return get_array_module(*operands, *self._backend_context)
+        return get_array_module(*operands, *self._backend_operands)
 
     @staticmethod
     def _dense_cache_key(xp: Any) -> str:
@@ -320,7 +320,7 @@ class LinearMap:
             _dense_array_func=dense_array,
             _diagonal_array_func=diagonal_array,
             _normal_matrix_diag=normal_matrix_diag,
-            _backend_context=self._backend_context + other_map._backend_context,
+            _backend_operands=self._backend_operands + other_map._backend_operands,
             output_shape=self.output_shape,
             input_shape=other_map.input_shape,
         )
@@ -474,7 +474,7 @@ class LinearMap:
             _rmatmat=rmatmat,
             _dense_array_func=dense_array,
             _normal_matrix_diag=normal_matrix_diag,
-            _backend_context=self._backend_context + other_map._backend_context,
+            _backend_operands=self._backend_operands + other_map._backend_operands,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
         )
@@ -544,7 +544,7 @@ class LinearMap:
                 diagonal_array if self._diagonal_array_func is not None else None
             ),
             _normal_matrix_diag=normal_matrix_diag,
-            _backend_context=self._backend_context,
+            _backend_operands=self._backend_operands,
             _dense_tensor=scaled_dense_tensor,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
@@ -688,7 +688,7 @@ def _linear_map_from_dense(
         _rmatmat=rmatmat,
         _dense_array_func=dense_array,
         _normal_matrix_diag=normal_matrix_diag,
-        _backend_context=(mat_array,),
+        _backend_operands=(mat_array,),
         _dense_tensor=mat_array.reshape(out_shape + in_shape),
         output_shape=out_shape,
         input_shape=in_shape,
@@ -749,7 +749,7 @@ def diagonal_linear_map(
         _dense_array_func=dense_array,
         _diagonal_array_func=diagonal_array,
         _normal_matrix_diag=normal_matrix_diag,
-        _backend_context=(diag_array,),
+        _backend_operands=(diag_array,),
         output_shape=out_shape,
         input_shape=in_shape,
     )
@@ -873,7 +873,7 @@ def pointwise_matrix_linear_map(matrix: Any) -> LinearMap:
         _rmatmat=rmatmat,
         _dense_array_func=dense_array,
         _normal_matrix_diag=normal_matrix_diag,
-        _backend_context=(matrix_array,),
+        _backend_operands=(matrix_array,),
         input_shape=input_shape,
         output_shape=output_shape,
     )
@@ -984,7 +984,7 @@ def take_linear_map(
     )
 
 
-def is_noop_linear_map(
+def is_identity_linear_map(
     value: Any,
     *,
     input_shape: tuple[int, ...] | None = None,
@@ -1077,10 +1077,12 @@ def vstack_linear_maps(
 
     output_size = sum(row_map.shape[0] for row_map in row_maps)
     dtype = np.result_type(*(row_map.dtype for row_map in row_maps))
-    backend_context = tuple(operand for row_map in row_maps for operand in row_map.backend_context)
+    backend_operands = tuple(
+        operand for row_map in row_maps for operand in row_map.backend_operands
+    )
 
     def array_module_for(value: Any) -> Any:
-        return get_array_module(value, *backend_context)
+        return get_array_module(value, *backend_operands)
 
     def matmat(block: Any) -> Any:
         xp = array_module_for(block)
@@ -1124,7 +1126,7 @@ def vstack_linear_maps(
         _rmatmat=rmatmat,
         _dense_array_func=dense_array,
         _normal_matrix_diag=normal_matrix_diag,
-        _backend_context=backend_context,
+        _backend_operands=backend_operands,
         output_shape=(output_size,),
         input_shape=common_input_shape,
     )
@@ -1228,26 +1230,26 @@ def _linear_map_from_jax_sparse(
     shape = tuple(int(dim) for dim in op.shape)
     out_shape, in_shape = _map_shapes(shape, input_shape, output_shape)
     dtype = op.dtype
-    backend_context = tuple(
+    backend_operands = tuple(
         operand
         for operand in (getattr(op, "data", None), getattr(op, "indices", None))
         if operand is not None
     )
 
     def matvec(vec: Any) -> Any:
-        xp = get_array_module(vec, *backend_context)
+        xp = get_array_module(vec, *backend_operands)
         return op @ xp.asarray(vec).reshape(shape[1])
 
     def rmatvec(vec: Any) -> Any:
-        xp = get_array_module(vec, *backend_context)
+        xp = get_array_module(vec, *backend_operands)
         return op.T @ xp.asarray(vec).reshape(shape[0])
 
     def matmat(block: Any) -> Any:
-        xp = get_array_module(block, *backend_context)
+        xp = get_array_module(block, *backend_operands)
         return op @ xp.asarray(block).reshape(shape[1], -1)
 
     def rmatmat(block: Any) -> Any:
-        xp = get_array_module(block, *backend_context)
+        xp = get_array_module(block, *backend_operands)
         return op.T @ xp.asarray(block).reshape(shape[0], -1)
 
     def dense_array(xp: Any) -> Any:
@@ -1272,7 +1274,7 @@ def _linear_map_from_jax_sparse(
         _rmatmat=rmatmat,
         _dense_array_func=dense_array,
         _normal_matrix_diag=normal_matrix_diag,
-        _backend_context=backend_context,
+        _backend_operands=backend_operands,
         output_shape=out_shape,
         input_shape=in_shape,
     )
@@ -1298,7 +1300,7 @@ def _linear_map_from_array(
     if arr.ndim == 2 and input_shape is None and output_shape is None:
         return _linear_map_from_dense(arr)
 
-    inferred_input = input_shape or (arr.shape[-1],)
+    inferred_input = (arr.shape[-1],) if input_shape is None else input_shape
     flat_in = math.prod(inferred_input)
     total_elements = int(arr.size)
     if output_shape is None:
@@ -1362,7 +1364,7 @@ def as_linear_map(
         )
 
     if scipy.sparse.issparse(op):
-        if use_jax():
+        if jax_enabled():
             try:
                 from jax.experimental.sparse import BCOO
 
@@ -1377,9 +1379,5 @@ def as_linear_map(
             op, input_shape=input_shape, output_shape=output_shape
         )
 
-    try:
-        arr = _dense_array_candidate(op)
-    except Exception as exc:
-        message = f"Unsupported operator type '{type(op)}' for LinearMap conversion."
-        raise TypeError(message) from exc
+    arr = _dense_array_candidate(op)
     return _linear_map_from_array(arr, input_shape=input_shape, output_shape=output_shape)

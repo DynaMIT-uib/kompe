@@ -12,7 +12,7 @@ belong to those consumers or to explicitly named compatibility modules.
   gauge-aware Poisson capabilities. It also states the mean-free contract:
   harmonic spaces may omit the constant mode by construction, while nodal
   spaces must provide the physical surface-mean weights and projection.
-- `SECSBasis` is a `ScalarBasis` with scalar-potential, surface-current,
+- `SECSBasis` is a `ScalarBasis` with scalar Green-profile, surface-current,
   and magnetic-field synthesis. Its required `current_type` gives one
   coefficient vector an explicit curl-free or divergence-free meaning. Its
   Green functions are distributional, so it does not pretend to have a square

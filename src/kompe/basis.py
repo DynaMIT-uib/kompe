@@ -115,8 +115,8 @@ class ScalarBasis(ABC):
             "max_order",
             "min_degree",
             "mean_free",
-            "backend",
-            "quasi_normalized",
+            "legendre_method",
+            "schmidt_quasi_normalized",
             "cells_per_face",
         ):
             if hasattr(self, name):
@@ -182,7 +182,7 @@ class SurfaceDifferentialBasis(ScalarBasis):
     def _surface_laplacian(self, r=1.0):
         """Return the scalar surface Laplacian operator."""
 
-    def scalar_fields_are_mean_free_by_construction(self):
+    def omits_constant_mode(self):
         """Return whether the coefficient space omits the constant mode."""
         return False
 
@@ -195,7 +195,7 @@ class SurfaceDifferentialBasis(ScalarBasis):
 
     def project_scalar_mean_free(self, coeffs):
         """Project scalar coefficients to zero mean when the basis requires it."""
-        if not self.scalar_fields_are_mean_free_by_construction():
+        if not self.omits_constant_mode():
             raise NotImplementedError(
                 f"{type(self).__name__} must define its scalar mean-free projection."
             )
@@ -203,7 +203,7 @@ class SurfaceDifferentialBasis(ScalarBasis):
 
     def project_helmholtz_mean_free(self, coeffs):
         """Project both Helmholtz potentials to zero mean."""
-        if not self.scalar_fields_are_mean_free_by_construction():
+        if not self.omits_constant_mode():
             raise NotImplementedError(
                 f"{type(self).__name__} must define its Helmholtz mean-free projection."
             )
@@ -345,8 +345,8 @@ class SurfaceDifferentialBasis(ScalarBasis):
         )
 
 
-class BasisView(SurfaceDifferentialBasis):
-    """Coefficient-space view of another evaluable basis."""
+class BasisSubset(SurfaceDifferentialBasis):
+    """A coefficient subset of another evaluable basis."""
 
     def __init__(
         self,
@@ -355,21 +355,21 @@ class BasisView(SurfaceDifferentialBasis):
         *,
         metadata=None,
         coefficient_space_signature=None,
-        view_name="view",
+        subset_name="subset",
     ):
-        """Initialize a coefficient-space view."""
+        """Select coefficients and metadata from ``parent_basis``."""
         if not isinstance(parent_basis, SurfaceDifferentialBasis):
-            raise TypeError("BasisView parent_basis must implement SurfaceDifferentialBasis.")
+            raise TypeError("BasisSubset parent_basis must implement SurfaceDifferentialBasis.")
 
         parent_basis.validate_metadata()
         self.parent_basis = parent_basis
         self._parent_coefficient_indices = _owned_readonly_array(
             self._normalize_coefficient_indices(parent_basis, coefficient_indices), dtype=int
         )
-        self._view_name = str(view_name)
+        self._subset_name = str(subset_name)
         self._coefficient_space_signature = coefficient_space_signature
         self._related_basis_cache = {}
-        self.mean_free = parent_basis.scalar_fields_are_mean_free_by_construction()
+        self.mean_free = parent_basis.omits_constant_mode()
 
         self.kind = parent_basis.kind
         self.index_names = tuple(parent_basis.index_names)
@@ -387,39 +387,39 @@ class BasisView(SurfaceDifferentialBasis):
         self.validate_metadata()
 
     def __repr__(self):
-        """Summarize the viewed coefficient space."""
+        """Summarize the selected coefficient space."""
         return (
-            f"BasisView(kind={self.kind!r}, view_name={self._view_name!r}, "
+            f"BasisSubset(kind={self.kind!r}, subset_name={self._subset_name!r}, "
             f"index_length={self.index_length})"
         )
 
     @staticmethod
     def _normalize_coefficient_indices(parent_basis, coefficient_indices):
-        """Return validated parent coefficient indices for a view."""
+        """Return validated parent coefficient indices for a subset."""
         parent_length = int(parent_basis.index_length)
         if coefficient_indices is None:
             return np.arange(parent_length, dtype=int)
 
         raw_indices = np.asarray(coefficient_indices)
         if raw_indices.ndim != 1:
-            raise ValueError("BasisView coefficient_indices must be one-dimensional.")
+            raise ValueError("BasisSubset coefficient_indices must be one-dimensional.")
         if raw_indices.dtype == bool:
             if raw_indices.size != parent_length:
                 raise ValueError(
-                    "BasisView boolean coefficient_indices must match parent index_length."
+                    "BasisSubset boolean coefficient_indices must match parent index_length."
                 )
             indices = np.flatnonzero(raw_indices)
         else:
             if not np.issubdtype(raw_indices.dtype, np.integer):
                 raise TypeError(
-                    "BasisView coefficient_indices must be integers or a boolean mask."
+                    "BasisSubset coefficient_indices must be integers or a boolean mask."
                 )
             indices = raw_indices.astype(int, copy=False)
 
         if np.any(indices < 0) or np.any(indices >= parent_length):
-            raise IndexError("BasisView coefficient_indices are outside the parent basis.")
+            raise IndexError("BasisSubset coefficient_indices are outside the parent basis.")
         if np.unique(indices).size != indices.size:
-            raise ValueError("BasisView coefficient_indices must not contain duplicates.")
+            raise ValueError("BasisSubset coefficient_indices must not contain duplicates.")
         return indices.copy()
 
     @staticmethod
@@ -438,16 +438,16 @@ class BasisView(SurfaceDifferentialBasis):
                 )
             else:
                 raise ValueError(
-                    "BasisView can only slice index_arrays with one value per coefficient."
+                    "BasisSubset can only slice index_arrays with one value per coefficient."
                 )
         return arrays
 
     @property
     def signature(self):
-        """Return a stable cache signature for this basis view."""
+        """Return a stable cache signature for this basis subset."""
         return self.parent_basis.signature + (
-            "view",
-            self._view_name,
+            "subset",
+            self._subset_name,
             tuple(int(index) for index in self._parent_coefficient_indices),
             self.coefficient_space_signature,
         )
@@ -461,21 +461,21 @@ class BasisView(SurfaceDifferentialBasis):
         if np.array_equal(self._parent_coefficient_indices, parent_indices):
             return self.parent_basis.coefficient_space_signature
         return (
-            "VIEW",
+            "SUBSET",
             self.parent_basis.coefficient_space_signature,
             tuple(int(index) for index in self._parent_coefficient_indices),
         )
 
     @property
     def root_basis(self):
-        """Return the non-view ancestor for this basis view."""
+        """Return the first ancestor that is not a subset."""
         basis = self.parent_basis
-        while isinstance(basis, BasisView):
+        while isinstance(basis, BasisSubset):
             basis = basis.parent_basis
         return basis
 
     def _slice_coefficient_operator(self, values, operator_name):
-        """Slice a parent coefficient-space operator to this view."""
+        """Slice a parent coefficient-space operator to this subset."""
         indices = self._parent_coefficient_indices
         if sp.issparse(values):
             expected_shape = (self.parent_basis.index_length, self.parent_basis.index_length)
@@ -504,31 +504,31 @@ class BasisView(SurfaceDifferentialBasis):
         raise ValueError(f"{operator_name} must be a 1-D or square 2-D coefficient operator.")
 
     def _slice_evaluation(self, result):
-        """Slice parent evaluation columns into this view."""
+        """Slice parent evaluation columns into this subset."""
         indices = self._parent_coefficient_indices
         if indices.size and np.all(np.diff(indices) == 1):
             return result[:, slice(int(indices[0]), int(indices[-1]) + 1)]
         return result[:, indices]
 
     def scalar_evaluation_matrix(self, grid, derivative=None):
-        """Evaluate the viewed basis functions on ``grid``."""
+        """Evaluate the selected basis functions on ``grid``."""
         return self._slice_evaluation(
             self.parent_basis.scalar_evaluation_matrix(grid, derivative=derivative)
         )
 
     def _uncached_scalar_evaluation_matrix(self, grid, derivative=None):
-        """Evaluate the view without persistent materialization."""
+        """Evaluate the subset without persistent materialization."""
         return self._slice_evaluation(
             self.parent_basis._uncached_scalar_evaluation_matrix(grid, derivative=derivative)
         )
 
     def _surface_laplacian(self, r=1.0):
-        """Return the viewed scalar surface Laplacian operator."""
+        """Return the subset's scalar surface Laplacian operator."""
         return self._slice_coefficient_operator(
             self.parent_basis._surface_laplacian(r), "laplacian"
         )
 
-    def scalar_fields_are_mean_free_by_construction(self):
+    def omits_constant_mode(self):
         """Return whether scalar coefficients omit the mean term."""
         return self.mean_free
 

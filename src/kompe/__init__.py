@@ -2,8 +2,8 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
+from kompe.basis import ScalarBasis, SurfaceDifferentialBasis
 from kompe.constants import EARTH_RADIUS_M, MU0
-from kompe.core import ScalarBasis, SurfaceDifferentialBasis
 from kompe.cubed_sphere import (
     GlobalCSBasis,
     GlobalCSMesh,

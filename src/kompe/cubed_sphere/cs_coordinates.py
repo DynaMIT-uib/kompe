@@ -7,7 +7,7 @@ import numpy as np
 from kompe.cubed_sphere.arrayutils import invert_3x3_matrices
 
 
-def coordinate(index, N):
+def face_coordinate(index, N):
     """Return xi/eta coordinate values for grid-line indices."""
     if not isinstance(N, (int, np.integer)):
         raise TypeError("N must be an integer")
@@ -16,7 +16,7 @@ def coordinate(index, N):
     return -np.pi / 4 + index * np.pi / (2 * N)
 
 
-def delta(xi, eta):
+def metric_delta(xi, eta):
     """Return the cubed-sphere metric delta parameter."""
     xi, eta = np.broadcast_arrays(xi, eta)
     return 1 + np.tan(xi) ** 2 + np.tan(eta) ** 2
@@ -57,38 +57,38 @@ def metric_tensor(xi, eta, r=1, covariant=True):
 def cube_to_cartesian(xi, eta, r=1, block=0):
     """Return Cartesian coordinates from CS coordinates."""
     xi, eta, r, block = np.broadcast_arrays(xi, eta, r, block)
-    metric_delta = delta(xi, eta)
+    delta_value = metric_delta(xi, eta)
     x, y, z = np.empty_like(xi), np.empty_like(xi), np.empty_like(xi)
 
     mask = block == 0
-    x[mask] = r[mask] / np.sqrt(metric_delta[mask])
-    y[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(metric_delta[mask])
-    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(metric_delta[mask])
+    x[mask] = r[mask] / np.sqrt(delta_value[mask])
+    y[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(delta_value[mask])
+    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(delta_value[mask])
 
     mask = block == 1
-    x[mask] = -r[mask] * np.tan(xi[mask]) / np.sqrt(metric_delta[mask])
-    y[mask] = r[mask] / np.sqrt(metric_delta[mask])
-    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(metric_delta[mask])
+    x[mask] = -r[mask] * np.tan(xi[mask]) / np.sqrt(delta_value[mask])
+    y[mask] = r[mask] / np.sqrt(delta_value[mask])
+    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(delta_value[mask])
 
     mask = block == 2
-    x[mask] = -r[mask] / np.sqrt(metric_delta[mask])
-    y[mask] = -r[mask] * np.tan(xi[mask]) / np.sqrt(metric_delta[mask])
-    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(metric_delta[mask])
+    x[mask] = -r[mask] / np.sqrt(delta_value[mask])
+    y[mask] = -r[mask] * np.tan(xi[mask]) / np.sqrt(delta_value[mask])
+    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(delta_value[mask])
 
     mask = block == 3
-    x[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(metric_delta[mask])
-    y[mask] = -r[mask] / np.sqrt(metric_delta[mask])
-    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(metric_delta[mask])
+    x[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(delta_value[mask])
+    y[mask] = -r[mask] / np.sqrt(delta_value[mask])
+    z[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(delta_value[mask])
 
     mask = block == 4
-    x[mask] = -r[mask] * np.tan(eta[mask]) / np.sqrt(metric_delta[mask])
-    y[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(metric_delta[mask])
-    z[mask] = r[mask] / np.sqrt(metric_delta[mask])
+    x[mask] = -r[mask] * np.tan(eta[mask]) / np.sqrt(delta_value[mask])
+    y[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(delta_value[mask])
+    z[mask] = r[mask] / np.sqrt(delta_value[mask])
 
     mask = block == 5
-    x[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(metric_delta[mask])
-    y[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(metric_delta[mask])
-    z[mask] = -r[mask] / np.sqrt(metric_delta[mask])
+    x[mask] = r[mask] * np.tan(eta[mask]) / np.sqrt(delta_value[mask])
+    y[mask] = r[mask] * np.tan(xi[mask]) / np.sqrt(delta_value[mask])
+    z[mask] = -r[mask] / np.sqrt(delta_value[mask])
 
     return x, y, z
 
@@ -108,7 +108,7 @@ def cube_to_spherical(xi, eta, block, r=1, deg=False):
     return r, theta, phi
 
 
-def cube_face(lon, lat):
+def face_index(lon, lat):
     """Return cube-face indices for geocentric coordinates."""
     lon, lat = np.broadcast_arrays(lon, lat)
     lat, lon = lat.reshape(-1), lon.reshape(-1)
@@ -131,14 +131,14 @@ def cube_face(lon, lat):
     return blocks
 
 
-def geo_to_cube(lon, lat, block=None):
+def geographic_to_cube(lon, lat, block=None):
     """Return CS coordinates for geocentric coordinates."""
     lon, lat = np.broadcast_arrays(lon, lat)
     shape = lon.shape
     size = lon.size
 
     if block is None:
-        block = cube_face(lon, lat)
+        block = face_index(lon, lat)
     else:
         block = block * np.ones_like(lat)
 
@@ -165,12 +165,12 @@ def geo_to_cube(lon, lat, block=None):
 
 
 __all__ = [
-    "coordinate",
-    "cube_face",
+    "face_coordinate",
+    "face_index",
     "cube_to_cartesian",
     "cube_to_spherical",
-    "delta",
-    "geo_to_cube",
+    "metric_delta",
+    "geographic_to_cube",
     "metric_tensor",
     "surface_metric_tensor",
 ]

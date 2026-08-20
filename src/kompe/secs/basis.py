@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
+from kompe.basis import ScalarBasis
 from kompe.constants import EARTH_RADIUS_M
-from kompe.core import ScalarBasis
 from kompe.grid import SphericalGrid
-from kompe.math import LinearMap, as_linear_map
-from kompe.secs.kernels import magnetic_field_matrices, surface_current_matrices
+from kompe.math import LinearMap, as_linear_map, get_array_module
+from kompe.secs.kernels import (
+    magnetic_field_matrices,
+    scalar_green_matrix,
+    surface_current_matrices,
+)
 
 DEFAULT_IONOSPHERE_RADIUS_M = EARTH_RADIUS_M + 110e3
 
@@ -34,7 +38,7 @@ class SECSBasis(ScalarBasis):
     radius : float, optional
         Radius of the current sheet. Units are arbitrary but must be
         consistent with evaluation radii and singularity limits.
-    constant : float, optional
+    normalization : float, optional
         Green-function normalization. The standard convention is ``1/(4*pi)``.
     current_type : {"curl_free", "divergence_free"}
         Physical current-system mode represented by scalar coefficients.
@@ -45,24 +49,24 @@ class SECSBasis(ScalarBasis):
         poles,
         *,
         radius=DEFAULT_IONOSPHERE_RADIUS_M,
-        constant=1.0 / (4.0 * np.pi),
+        normalization=1.0 / (4.0 * np.pi),
         current_type,
     ):
         if not isinstance(poles, SphericalGrid):
             raise TypeError("SECSBasis poles must be a SphericalGrid.")
 
         radius = float(radius)
-        constant = float(constant)
+        normalization = float(normalization)
         if not np.isfinite(radius) or radius <= 0.0:
             raise ValueError("SECSBasis radius must be finite and positive.")
-        if not np.isfinite(constant):
-            raise ValueError("SECSBasis constant must be finite.")
+        if not np.isfinite(normalization):
+            raise ValueError("SECSBasis normalization must be finite.")
         if current_type not in {"curl_free", "divergence_free"}:
             raise ValueError("current_type must be 'curl_free' or 'divergence_free'.")
 
         self.poles = poles
         self.radius = radius
-        self.constant = constant
+        self.normalization = normalization
         self.current_type = current_type
         self.kind = "SECS"
         self.index_names = ("latitude", "longitude")
@@ -74,7 +78,7 @@ class SECSBasis(ScalarBasis):
         """Summarize the elementary-current coefficient space."""
         return (
             f"SECSBasis(current_type={self.current_type!r}, poles={self.poles.size}, "
-            f"radius={self.radius:g}, constant={self.constant:g})"
+            f"radius={self.radius:g}, normalization={self.normalization:g})"
         )
 
     @property
@@ -85,7 +89,7 @@ class SECSBasis(ScalarBasis):
             self.current_type,
             self.poles.exact_coordinate_signature,
             self.radius,
-            self.constant,
+            self.normalization,
         )
 
     @property
@@ -121,42 +125,38 @@ class SECSBasis(ScalarBasis):
         self._validate_grid(grid)
         if derivative is not None:
             raise NotImplementedError(
-                "SECS potential derivatives are represented by surface-current synthesis."
+                "SECS scalar derivatives are represented by surface-current synthesis."
             )
-        scalar_type = "potential" if self.current_type == "curl_free" else "scalar"
-        return surface_current_matrices(
+        quantity = "potential" if self.current_type == "curl_free" else "current_magnitude"
+        return scalar_green_matrix(
             grid.lat,
             grid.lon,
             self.poles.lat,
             self.poles.lon,
-            current_type=scalar_type,
-            constant=self.constant,
-            RI=self.radius,
+            quantity=quantity,
+            normalization=self.normalization,
         )
 
-    def surface_current_matrix(self, grid, *, current_type=None, singularity_limit=0.0):
-        """Return current synthesis in canonical ``(theta, phi)`` order."""
+    def surface_current_matrix(self, grid, *, singularity_limit=0.0):
+        """Return this basis's current synthesis in ``(theta, phi)`` order."""
         self._validate_grid(grid)
-        current_type = self.current_type if current_type is None else current_type
-        if current_type not in {"curl_free", "divergence_free"}:
-            raise ValueError("current_type must be 'curl_free' or 'divergence_free'.")
         east, north = surface_current_matrices(
             grid.lat,
             grid.lon,
             self.poles.lat,
             self.poles.lon,
-            current_type=current_type,
-            constant=self.constant,
-            RI=self.radius,
+            current_type=self.current_type,
+            normalization=self.normalization,
+            source_radius=self.radius,
             singularity_limit=singularity_limit,
         )
-        return np.stack([-north, east], axis=0)
+        xp = get_array_module(east, north)
+        return xp.stack([-north, east], axis=0)
 
     def surface_current_operator(
         self,
         grid,
         *,
-        current_type=None,
         singularity_limit=0.0,
         chunk_size=None,
     ):
@@ -167,13 +167,8 @@ class SECSBasis(ScalarBasis):
         memory while preserving forward, adjoint, and multiple-RHS actions.
         """
         self._validate_grid(grid)
-        current_type = self.current_type if current_type is None else current_type
-        if current_type not in {"curl_free", "divergence_free"}:
-            raise ValueError("current_type must be 'curl_free' or 'divergence_free'.")
         if chunk_size is None:
-            matrix = self.surface_current_matrix(
-                grid, current_type=current_type, singularity_limit=singularity_limit
-            )
+            matrix = self.surface_current_matrix(grid, singularity_limit=singularity_limit)
             return as_linear_map(
                 matrix, input_shape=(self.index_length,), output_shape=(2, grid.size)
             )
@@ -182,59 +177,73 @@ class SECSBasis(ScalarBasis):
         evaluation_lat = np.asarray(grid.lat).reshape(-1)
         evaluation_lon = np.asarray(grid.lon).reshape(-1)
 
-        def chunk_matrix(start, stop):
+        def chunk_matrix(start, stop, xp):
             east, north = surface_current_matrices(
-                evaluation_lat[start:stop],
-                evaluation_lon[start:stop],
+                xp.asarray(evaluation_lat[start:stop]),
+                xp.asarray(evaluation_lon[start:stop]),
                 self.poles.lat,
                 self.poles.lon,
-                current_type=current_type,
-                constant=self.constant,
-                RI=self.radius,
+                current_type=self.current_type,
+                normalization=self.normalization,
+                source_radius=self.radius,
                 singularity_limit=singularity_limit,
             )
-            return np.stack([-north, east], axis=0)
+            return xp.stack([-north, east], axis=0)
 
         def slices():
             for start in range(0, grid.size, chunk_size):
                 yield start, min(start + chunk_size, grid.size)
 
         def matvec(coefficients):
-            coefficients = np.asarray(coefficients).reshape(self.index_length)
-            output = np.empty((2, grid.size), dtype=np.result_type(coefficients, float))
+            xp = get_array_module(coefficients)
+            coefficients = xp.asarray(coefficients).reshape(self.index_length)
+            output = xp.empty((2, grid.size), dtype=xp.result_type(coefficients, float))
             for start, stop in slices():
-                output[:, start:stop] = np.einsum(
-                    "cnp,p->cn", chunk_matrix(start, stop), coefficients
+                chunk = xp.einsum(
+                    "cnp,p->cn", chunk_matrix(start, stop, xp), coefficients
                 )
+                if xp is np:
+                    output[:, start:stop] = chunk
+                else:
+                    output = output.at[:, start:stop].set(chunk)
             return output.reshape(-1)
 
         def rmatvec(values):
-            values = np.asarray(values).reshape(2, grid.size)
-            output = np.zeros(self.index_length, dtype=np.result_type(values, float))
+            xp = get_array_module(values)
+            values = xp.asarray(values).reshape(2, grid.size)
+            output = xp.zeros(self.index_length, dtype=xp.result_type(values, float))
             for start, stop in slices():
-                output += np.einsum("cnp,cn->p", chunk_matrix(start, stop), values[:, start:stop])
+                output = output + xp.einsum(
+                    "cnp,cn->p", chunk_matrix(start, stop, xp), values[:, start:stop]
+                )
             return output
 
         def matmat(coefficients):
-            coefficients = np.asarray(coefficients).reshape(self.index_length, -1)
-            output = np.empty(
+            xp = get_array_module(coefficients)
+            coefficients = xp.asarray(coefficients).reshape(self.index_length, -1)
+            output = xp.empty(
                 (2, grid.size, coefficients.shape[1]),
-                dtype=np.result_type(coefficients, float),
+                dtype=xp.result_type(coefficients, float),
             )
             for start, stop in slices():
-                output[:, start:stop] = np.einsum(
-                    "cnp,pk->cnk", chunk_matrix(start, stop), coefficients
+                chunk = xp.einsum(
+                    "cnp,pk->cnk", chunk_matrix(start, stop, xp), coefficients
                 )
+                if xp is np:
+                    output[:, start:stop] = chunk
+                else:
+                    output = output.at[:, start:stop].set(chunk)
             return output.reshape(2 * grid.size, -1)
 
         def rmatmat(values):
-            values = np.asarray(values).reshape(2, grid.size, -1)
-            output = np.zeros(
-                (self.index_length, values.shape[-1]), dtype=np.result_type(values, float)
+            xp = get_array_module(values)
+            values = xp.asarray(values).reshape(2, grid.size, -1)
+            output = xp.zeros(
+                (self.index_length, values.shape[-1]), dtype=xp.result_type(values, float)
             )
             for start, stop in slices():
-                output += np.einsum(
-                    "cnp,cnk->pk", chunk_matrix(start, stop), values[:, start:stop]
+                output = output + xp.einsum(
+                    "cnp,cnk->pk", chunk_matrix(start, stop, xp), values[:, start:stop]
                 )
             return output
 
@@ -250,14 +259,32 @@ class SECSBasis(ScalarBasis):
         )
 
     def helmholtz_current_synthesis_matrix(self, grid, *, singularity_limit=0.0):
-        """Return curl-free/divergence-free current synthesis tensor."""
-        curl_free = self.surface_current_matrix(
-            grid, current_type="curl_free", singularity_limit=singularity_limit
+        """Return both current modes using this basis's pole geometry."""
+        self._validate_grid(grid)
+        curl_free_east, curl_free_north = surface_current_matrices(
+            grid.lat,
+            grid.lon,
+            self.poles.lat,
+            self.poles.lon,
+            current_type="curl_free",
+            normalization=self.normalization,
+            source_radius=self.radius,
+            singularity_limit=singularity_limit,
         )
-        divergence_free = self.surface_current_matrix(
-            grid, current_type="divergence_free", singularity_limit=singularity_limit
+        divergence_free_east, divergence_free_north = surface_current_matrices(
+            grid.lat,
+            grid.lon,
+            self.poles.lat,
+            self.poles.lon,
+            current_type="divergence_free",
+            normalization=self.normalization,
+            source_radius=self.radius,
+            singularity_limit=singularity_limit,
         )
-        return np.stack([curl_free, divergence_free], axis=2)
+        xp = get_array_module(curl_free_east, divergence_free_east)
+        curl_free = xp.stack([-curl_free_north, curl_free_east], axis=0)
+        divergence_free = xp.stack([-divergence_free_north, divergence_free_east], axis=0)
+        return xp.stack([curl_free, divergence_free], axis=2)
 
     def helmholtz_current_synthesis_operator(self, grid, *, singularity_limit=0.0):
         """Return two-potential SECS current synthesis operator."""
@@ -271,28 +298,25 @@ class SECSBasis(ScalarBasis):
         grid,
         evaluation_radius,
         *,
-        current_type=None,
         singularity_limit=0.0,
         induction_nullification_radius=None,
     ):
-        """Return magnetic synthesis in canonical ``(radial, theta, phi)`` order."""
+        """Return this basis's magnetic synthesis in ``(radial, theta, phi)`` order."""
         self._validate_grid(grid)
-        current_type = self.current_type if current_type is None else current_type
-        if current_type not in {"curl_free", "divergence_free"}:
-            raise ValueError("current_type must be 'curl_free' or 'divergence_free'.")
         east, north, radial = magnetic_field_matrices(
             grid.lat,
             grid.lon,
             evaluation_radius,
             self.poles.lat,
             self.poles.lon,
-            current_type=current_type,
-            constant=self.constant,
-            RI=self.radius,
+            current_type=self.current_type,
+            normalization=self.normalization,
+            source_radius=self.radius,
             singularity_limit=singularity_limit,
             induction_nullification_radius=induction_nullification_radius,
         )
-        return np.stack([radial, -north, east], axis=0)
+        xp = get_array_module(east, north, radial)
+        return xp.stack([radial, -north, east], axis=0)
 
     def magnetic_field_operator(self, grid, evaluation_radius, **kwargs):
         """Return coefficient-to-magnetic-field synthesis operator."""

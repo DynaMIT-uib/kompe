@@ -303,7 +303,7 @@ class _EinsumMap:
             _rmatmat=self.rmatmat,
             _dense_array_func=self.dense_array,
             _normal_matrix_diag=self.normal_matrix_diag,
-            _backend_context=self.component_tensors,
+            _backend_operands=self.component_tensors,
             _einsum_map=self,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
