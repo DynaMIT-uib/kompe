@@ -87,9 +87,7 @@ def _semi_infinite_current_magnetic_field_matrices(
     direction_enu = direction_enu / xp.linalg.norm(direction_enu, axis=0)
     upward_sign = xp.sign(direction_enu[2])
     direction_enu = direction_enu * upward_sign.reshape((1, -1))
-    direction_ecef = enu_to_ecef(
-        direction_enu.T, wedge_parameters[0], wedge_parameters[1]
-    ).T
+    direction_ecef = enu_to_ecef(direction_enu.T, wedge_parameters[0], wedge_parameters[1]).T
 
     # Find the lengths along j (from s) that are closest to evaluation points (N x K)
     distance_along = xp.einsum("in,ik->nk", evaluation_ecef, direction_ecef) - xp.sum(
@@ -115,9 +113,7 @@ def _semi_infinite_current_magnetic_field_matrices(
     perpendicular_ecef = xp.stack((perpendicular_x, perpendicular_y, perpendicular_z))
 
     # Distances from evaluation points to the closest points on each line (N x K).
-    perpendicular_distance = xp.sqrt(
-        perpendicular_x**2 + perpendicular_y**2 + perpendicular_z**2
-    )
+    perpendicular_distance = xp.sqrt(perpendicular_x**2 + perpendicular_y**2 + perpendicular_z**2)
 
     # normalized versions of p_ecef vectors:
     perpendicular_unit = perpendicular_ecef / perpendicular_distance.reshape(
@@ -126,16 +122,13 @@ def _semi_infinite_current_magnetic_field_matrices(
 
     # Biot-Savart direction: perpendicular-to-wire crossed with wire direction.
     field_direction_x = (
-        perpendicular_unit[1] * direction_ecef[2]
-        - perpendicular_unit[2] * direction_ecef[1]
+        perpendicular_unit[1] * direction_ecef[2] - perpendicular_unit[2] * direction_ecef[1]
     )
     field_direction_y = (
-        perpendicular_unit[2] * direction_ecef[0]
-        - perpendicular_unit[0] * direction_ecef[2]
+        perpendicular_unit[2] * direction_ecef[0] - perpendicular_unit[0] * direction_ecef[2]
     )
     field_direction_z = (
-        perpendicular_unit[0] * direction_ecef[1]
-        - perpendicular_unit[1] * direction_ecef[0]
+        perpendicular_unit[0] * direction_ecef[1] - perpendicular_unit[1] * direction_ecef[0]
     )
     field_direction = xp.stack((field_direction_x, field_direction_y, field_direction_z))
 
@@ -143,9 +136,7 @@ def _semi_infinite_current_magnetic_field_matrices(
     endpoint_angle = xp.arctan(-distance_along / perpendicular_distance)
 
     # magnetic field scaling factor (N x K):
-    field_scale = MU0 / (4 * np.pi * perpendicular_distance) * (
-        1 - xp.sin(endpoint_angle)
-    )
+    field_scale = MU0 / (4 * np.pi * perpendicular_distance) * (1 - xp.sin(endpoint_angle))
     field_scale = field_scale.reshape((1, n_points, n_wedges))
 
     # (3 x N x K) array that map current magnitudes to ECEF components of the magnetic field:
@@ -215,9 +206,7 @@ def current_wedge_magnetic_field_matrices(
     )
     return tuple(
         inclined_component - radial_component
-        for inclined_component, radial_component in zip(
-            inclined_leg, radial_leg, strict=True
-        )
+        for inclined_component, radial_component in zip(inclined_leg, radial_leg, strict=True)
     )
 
 

@@ -99,9 +99,7 @@ def rotate_spherical_coordinates(
     rotated_xyz = xp.asarray(rotation) @ xyz
 
     # convert back to spherical
-    _, colatitude, rotated_longitude = cartesian_to_spherical(
-        rotated_xyz, degrees=degrees
-    )
+    _, colatitude, rotated_longitude = cartesian_to_spherical(rotated_xyz, degrees=degrees)
 
     quarter_turn = 90 if degrees else np.pi / 2
     return quarter_turn - colatitude, rotated_longitude
@@ -122,9 +120,7 @@ def enu_to_ecef(vectors, latitude, longitude):
     north = xp.vstack(
         (-xp.cos(theta) * xp.cos(phi), -xp.cos(theta) * xp.sin(phi), xp.sin(theta))
     ).T
-    up = xp.vstack(
-        (xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi), xp.cos(theta))
-    ).T
+    up = xp.vstack((xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi), xp.cos(theta))).T
 
     # ENU basis vectors form the columns of the rotation matrix.
     enu_basis = xp.stack((east, north, up), axis=2)  # (N, 3, 3)
@@ -146,9 +142,7 @@ def ecef_to_enu(vectors, latitude, longitude):
     north = xp.vstack(
         (-xp.cos(theta) * xp.cos(phi), -xp.cos(theta) * xp.sin(phi), xp.sin(theta))
     ).T
-    up = xp.vstack(
-        (xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi), xp.cos(theta))
-    ).T
+    up = xp.vstack((xp.sin(theta) * xp.cos(phi), xp.sin(theta) * xp.sin(phi), xp.cos(theta))).T
     return xp.column_stack(
         (
             xp.einsum("ni,ni->n", vectors, east),

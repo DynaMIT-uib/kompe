@@ -141,9 +141,7 @@ def surface_current_matrices(
     ).T
 
     # Unit tangent from each evaluation point towards each pole (N x P x 3).
-    poleward_ecef = (
-        pole_position[None, :, :] - evaluation_position[:, None, :]
-    )
+    poleward_ecef = pole_position[None, :, :] - evaluation_position[:, None, :]
     poleward_ecef = (
         poleward_ecef
         - xp.einsum("ijk,ik->ij", poleward_ecef, evaluation_position)[:, :, None]
@@ -151,13 +149,9 @@ def surface_current_matrices(
     )
     if xp is np:
         with np.errstate(invalid="ignore", divide="ignore"):
-            poleward_ecef = poleward_ecef / xp.linalg.norm(
-                poleward_ecef, axis=2
-            )[:, :, None]
+            poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
     else:
-        poleward_ecef = poleward_ecef / xp.linalg.norm(
-            poleward_ecef, axis=2
-        )[:, :, None]
+        poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
 
     # ECEF-to-ENU rotation at each evaluation point.
     ecef_to_enu_matrix = xp.hstack(
@@ -291,9 +285,7 @@ def magnetic_field_matrices(
     ).T
 
     # Unit tangent from each evaluation point towards each pole (N x P x 3).
-    poleward_ecef = (
-        pole_position[None, :, :] - evaluation_position[:, None, :]
-    )
+    poleward_ecef = pole_position[None, :, :] - evaluation_position[:, None, :]
     poleward_ecef = (
         poleward_ecef
         - xp.einsum("ijk,ik->ij", poleward_ecef, evaluation_position)[:, :, None]
@@ -304,13 +296,9 @@ def magnetic_field_matrices(
     # floating-point error policy for the caller.
     if xp is np:
         with np.errstate(invalid="ignore", divide="ignore"):
-            poleward_ecef = poleward_ecef / xp.linalg.norm(
-                poleward_ecef, axis=2
-            )[:, :, None]
+            poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
     else:
-        poleward_ecef = poleward_ecef / xp.linalg.norm(
-            poleward_ecef, axis=2
-        )[:, :, None]
+        poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
 
     ecef_to_enu_matrix = xp.hstack(
         (
@@ -338,9 +326,7 @@ def magnetic_field_matrices(
         )
     )
 
-    poleward_enu = xp.einsum(
-        "lij, lkj->lki", ecef_to_enu_matrix, poleward_ecef
-    )[
+    poleward_enu = xp.einsum("lij, lkj->lki", ecef_to_enu_matrix, poleward_ecef)[
         :, :, :-1
     ]  # Remove the radial component, which is zero to roundoff.
 
@@ -384,13 +370,7 @@ def magnetic_field_matrices(
         theta0 = singularity_limit / source_radius
         if theta0 > 0:
             alpha = 1 / np.tan(theta0 / 2) ** 2
-            regularized = (
-                -MU0
-                * normalization
-                * alpha
-                * xp.tan(theta / 2)
-                / evaluation_radius
-            )
+            regularized = -MU0 * normalization * alpha * xp.tan(theta / 2) / evaluation_radius
             Ge_ = xp.where(theta < theta0, regularized, Ge_)
 
         # zero below current sheet:
@@ -426,7 +406,6 @@ def magnetic_field_matrices(
         Gr = Gr + amplitude_factor * Gr_
 
     return Ge, Gn, Gr
-
 
 
 __all__ = [

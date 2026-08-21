@@ -43,9 +43,7 @@ def test_enu_ecef_round_trip_uses_latitude_longitude_order():
     latitude = np.array([0.0, 45.0, -60.0])
     longitude = np.array([0.0, 90.0, 140.0])
 
-    actual = ecef_to_enu(
-        enu_to_ecef(vectors, latitude, longitude), latitude, longitude
-    )
+    actual = ecef_to_enu(enu_to_ecef(vectors, latitude, longitude), latitude, longitude)
 
     np.testing.assert_allclose(actual, vectors, rtol=1e-14, atol=1e-14)
 
@@ -91,12 +89,9 @@ def test_spherical_coordinate_operations_preserve_jax_backend():
         round_trip = cartesian_to_spherical(cartesian)
         ecef = enu_to_ecef(vectors, latitude, longitude)
         enu = ecef_to_enu(ecef, latitude, longitude)
-        rotated = rotate_spherical_coordinates(
-            latitude, longitude, 0.0, 0.0, 90.0, 0.0
-        )
+        rotated = rotate_spherical_coordinates(latitude, longitude, 0.0, 0.0, 90.0, 0.0)
 
     for value in (cartesian, round_trip, ecef, enu, *rotated):
         assert "jax" in type(value).__module__
     np.testing.assert_allclose(round_trip, spherical, rtol=2e-12, atol=1e-14)
     np.testing.assert_allclose(enu, vectors, rtol=2e-12, atol=1e-14)
-

@@ -199,9 +199,7 @@ class SECSBasis(ScalarBasis):
             coefficients = xp.asarray(coefficients).reshape(self.index_length)
             output = xp.empty((2, grid.size), dtype=xp.result_type(coefficients, float))
             for start, stop in slices():
-                chunk = xp.einsum(
-                    "cnp,p->cn", chunk_matrix(start, stop, xp), coefficients
-                )
+                chunk = xp.einsum("cnp,p->cn", chunk_matrix(start, stop, xp), coefficients)
                 if xp is np:
                     output[:, start:stop] = chunk
                 else:
@@ -226,9 +224,7 @@ class SECSBasis(ScalarBasis):
                 dtype=xp.result_type(coefficients, float),
             )
             for start, stop in slices():
-                chunk = xp.einsum(
-                    "cnp,pk->cnk", chunk_matrix(start, stop, xp), coefficients
-                )
+                chunk = xp.einsum("cnp,pk->cnk", chunk_matrix(start, stop, xp), coefficients)
                 if xp is np:
                     output[:, start:stop] = chunk
                 else:

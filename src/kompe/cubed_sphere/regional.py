@@ -417,9 +417,7 @@ class RegionalCSProjection:
             lat,
             lon,
         )
-        local_ecef = np.einsum(
-            "ij,nj->ni", self.geographic_to_local_matrix, geographic_ecef
-        )
+        local_ecef = np.einsum("ij,nj->ni", self.geographic_to_local_matrix, geographic_ecef)
         cube_matrix = cs_vectors._cartesian_to_cube_matrix(
             xi,
             eta,
@@ -467,9 +465,7 @@ class RegionalCSProjection:
             block=_NORTH_FACE,
         )
         local_ecef = np.einsum("nij,nj->ni", cartesian_matrix, cube)
-        geographic_ecef = np.einsum(
-            "ij,nj->ni", self.local_to_geographic_matrix, local_ecef
-        )
+        geographic_ecef = np.einsum("ij,nj->ni", self.local_to_geographic_matrix, local_ecef)
         geographic = ecef_to_enu(geographic_ecef, lat, lon)
         return lon, lat, geographic[:, 0], geographic[:, 1]
 

@@ -49,12 +49,9 @@ def finite_difference_weights(stencil_points, order=1, h=1, fraction=False):
 
     if fraction:
         fractions = [Fraction(weight).limit_denominator() for weight in weights]
-        common_denominator = _least_common_multiple(
-            [value.denominator for value in fractions]
-        )
+        common_denominator = _least_common_multiple([value.denominator for value in fractions])
         numerators = [
-            value.numerator * common_denominator // value.denominator
-            for value in fractions
+            value.numerator * common_denominator // value.denominator for value in fractions
         ]
         return numerators, common_denominator
     return weights / h**order
