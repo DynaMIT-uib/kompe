@@ -162,6 +162,6 @@ __all__ = [
     "cartesian_to_spherical",
     "ecef_to_enu",
     "enu_to_ecef",
-    "spherical_to_cartesian",
     "rotate_spherical_coordinates",
+    "spherical_to_cartesian",
 ]

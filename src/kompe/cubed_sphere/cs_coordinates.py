@@ -165,12 +165,12 @@ def geographic_to_cube(lon, lat, block=None):
 
 
 __all__ = [
-    "face_coordinate",
-    "face_index",
     "cube_to_cartesian",
     "cube_to_spherical",
-    "metric_delta",
+    "face_coordinate",
+    "face_index",
     "geographic_to_cube",
+    "metric_delta",
     "metric_tensor",
     "surface_metric_tensor",
 ]
