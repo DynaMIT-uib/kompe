@@ -8,8 +8,6 @@ import sys
 
 import pytest
 
-from kompe.math import JAX_AVAILABLE
-
 
 def _run_python(source, *, env=None):
     environment = os.environ.copy()
@@ -31,7 +29,7 @@ def test_importing_kompe_does_not_import_jax():
     assert result.stdout.strip() == "False"
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_enabling_backend_preserves_x64_setting():
     """Backend selection leaves application-wide JAX precision unchanged."""
     source = (

@@ -5,7 +5,7 @@ import pytest
 
 from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
 from kompe.cubed_sphere.global_mesh import _GlobalCSRemapper
-from kompe.math import JAX_AVAILABLE, jax_enabled, set_backend, to_numpy
+from kompe.math import jax_enabled, set_backend, to_numpy
 from kompe.math.least_squares_solver import dense_full_rank_least_squares_map
 
 
@@ -14,6 +14,9 @@ def _regular_grid():
     lon = np.linspace(0.0, 330.0, 12)
     lat_grid, lon_grid = np.meshgrid(lat, lon, indexing="ij")
     return SphericalGrid(lat=lat_grid.reshape(-1), lon=lon_grid.reshape(-1))
+
+
+# Scalar SH analysis and transform caches
 
 
 def test_transform_cache_controls_rebuild_equivalent_analysis():
@@ -192,6 +195,9 @@ def test_direct_analysis_cache_treats_zero_regularization_as_none():
     assert len(transform._input_transforms) == 1
 
 
+# Spectral regularization
+
+
 def test_spherical_transform_regularization_uses_diagonal_operators():
     """Keep surface smoothness structured in least-squares."""
     basis = SHBasis(4, 2, mean_free=True)
@@ -326,6 +332,9 @@ def test_regularized_transform_does_not_expose_unregularized_analysis_operator()
         _ = transform.helmholtz_analysis_operator
 
 
+# Tangential and batched analysis
+
+
 def test_spherical_transform_analyzes_tangential_grid_values():
     """Tangential analysis recovers Helmholtz coefficients."""
     basis = SHBasis(3, 2, mean_free=True)
@@ -382,6 +391,9 @@ def test_spherical_transform_least_squares_use_operator_properties():
     assert helmholtz_problem.A[0] is transform.helmholtz_synthesis_operator
     assert "scalar_synthesis_matrix" not in transform.__dict__
     assert "helmholtz_synthesis_matrix" not in transform.__dict__
+
+
+# Cubed-sphere remapping and analysis
 
 
 def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch):
@@ -772,6 +784,9 @@ def test_cs_non_native_helmholtz_analysis_solves_against_remap_operator():
     np.testing.assert_allclose(transform.synthesize_helmholtz(actual), values, atol=1e-10)
 
 
+# Optimized Helmholtz analysis
+
+
 @pytest.mark.parametrize("area_weighted", [False, True])
 def test_mean_free_sh_helmholtz_analysis_uses_full_rank_factorization(area_weighted):
     """Gauge-free SH analysis avoids a tall SVD on either backend."""
@@ -895,7 +910,10 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
         np.testing.assert_allclose(compiled, actual, rtol=2e-11, atol=2e-11)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+# Backend preservation
+
+
+@pytest.mark.requires_jax
 def test_spherical_transform_synthesis_preserves_jax_backend():
     """Coefficient-to-grid synthesis uses LinearMap backend handling."""
     previous_backend = jax_enabled()
@@ -932,7 +950,7 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         set_backend(previous_backend)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_spherical_transform_preserves_explicit_jax_coefficients():
     """Explicit JAX coefficients reach the LinearMap apply path."""
     import jax.numpy as jnp

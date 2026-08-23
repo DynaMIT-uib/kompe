@@ -7,7 +7,6 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from kompe.math import (
-    JAX_AVAILABLE,
     einsum_linear_map,
     einsum_linear_map_from_matvec,
     get_array_module,
@@ -26,6 +25,8 @@ from kompe.math.linear_map import (
     take_linear_map,
     vstack_linear_maps,
 )
+
+# Core maps and shaped operations
 
 
 def test_dense_linear_map_matches_matrix_operations():
@@ -300,7 +301,7 @@ def test_pointwise_matrix_linear_map_matches_local_component_transform():
     np.testing.assert_allclose(linear_map.to_matrix(backend="numpy"), expected_dense)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_structured_dense_builders_preserve_jax_backend(monkeypatch):
     """New structured maps should materialize matrices on JAX."""
     import jax.numpy as jnp
@@ -328,6 +329,9 @@ def test_structured_dense_builders_preserve_jax_backend(monkeypatch):
     assert "jax" in type(selector_dense).__module__
     np.testing.assert_allclose(np.asarray(pointwise_dense), pointwise.to_matrix(backend="numpy"))
     np.testing.assert_allclose(np.asarray(selector_dense), selector.to_matrix(backend="numpy"))
+
+
+# Composition and materialization
 
 
 def test_diagonal_composition_avoids_dense_diagonal_materialization():
@@ -555,7 +559,10 @@ def test_linear_map_to_array_returns_shaped_dense_representation():
         assert np.shares_memory(linear_map.array, linear_map.to_matrix())
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+# Backend ownership
+
+
+@pytest.mark.requires_jax
 def test_dense_linear_map_accepts_numpy_inputs_with_jax_backend():
     """Dense maps stay NumPy-facing until called with JAX inputs."""
     previous_backend = jax_enabled()
@@ -572,7 +579,7 @@ def test_dense_linear_map_accepts_numpy_inputs_with_jax_backend():
         set_backend(previous_backend)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_pointwise_linear_map_accepts_numpy_inputs_with_jax_backend():
     """Pointwise maps stay NumPy-facing until called with JAX inputs."""
     previous_backend = jax_enabled()
@@ -590,7 +597,7 @@ def test_pointwise_linear_map_accepts_numpy_inputs_with_jax_backend():
     np.testing.assert_allclose(result, np.einsum("abg,bg->ag", matrix, values).reshape(-1))
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_dense_linear_map_preserves_jax_dense_source(monkeypatch):
     """JAX dense inputs should not materialize during creation."""
     import jax.numpy as jnp
@@ -618,7 +625,7 @@ def test_dense_linear_map_preserves_jax_dense_source(monkeypatch):
     np.testing.assert_allclose(np.asarray(dense), np.asarray(matrix))
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_diagonal_linear_map_preserves_jax_dense_source(monkeypatch):
     """JAX diagonal inputs should not materialize during creation."""
     import jax.numpy as jnp
@@ -646,7 +653,7 @@ def test_diagonal_linear_map_preserves_jax_dense_source(monkeypatch):
     np.testing.assert_allclose(np.asarray(dense), np.diag(np.asarray(diagonal)))
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_linear_map_dense_uses_active_backend():
     """Dense materialization can stay on the active backend."""
     previous_backend = jax_enabled()
@@ -671,7 +678,7 @@ def test_linear_map_dense_uses_active_backend():
     np.testing.assert_allclose(dense, matrix)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_linear_map_backend_operands_drives_matrix_free_batches():
     """Matrix-free batching follows operator backend context."""
     import jax.numpy as jnp
@@ -709,6 +716,9 @@ def test_linear_map_backend_operands_drives_matrix_free_batches():
     np.testing.assert_allclose(np.asarray(adjoint_result), matrix.T)
 
 
+# Sparse maps
+
+
 def test_sparse_linear_map_uses_sparse_normal_diagonal():
     """Sparse maps avoid generic densifying for normal diagonals."""
     matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
@@ -718,7 +728,7 @@ def test_sparse_linear_map_uses_sparse_normal_diagonal():
     np.testing.assert_allclose(linear_map.to_matrix(backend="numpy"), matrix)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_jax_sparse_linear_map_uses_sparse_normal_diagonal():
     """JAX sparse maps expose sparse normal diagonals."""
     from jax.experimental.sparse import BCOO
@@ -740,7 +750,7 @@ def test_jax_sparse_linear_map_uses_sparse_normal_diagonal():
     )
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_sparse_linear_map_preserves_explicit_jax_inputs_when_numpy_active():
     """Sparse maps follow explicit JAX operands."""
     import jax.numpy as jnp
@@ -782,6 +792,9 @@ def test_composed_linear_map_normal_diagonal_uses_matmat_path():
     expected = np.sum((weights[:, None] * matrix) ** 2, axis=0)
 
     np.testing.assert_allclose(composed.normal_matrix_diag(), expected)
+
+
+# Tensor and einsum maps
 
 
 def test_einsum_linear_map_matches_matrix_operations():
@@ -1248,7 +1261,7 @@ def test_einsum_linear_map_from_matvec_rejects_ambiguous_labels():
         )
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_einsum_linear_map_dense_materialization_uses_active_backend():
     """Einsum-backed dense materialization can stay on JAX."""
     previous_backend = jax_enabled()
@@ -1272,7 +1285,7 @@ def test_einsum_linear_map_dense_materialization_uses_active_backend():
     np.testing.assert_allclose(np.asarray(dense), matrix)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_einsum_linear_map_dense_uses_active_backend():
     """Einsum-backed LinearMap preserves the active matrix backend."""
     previous_backend = jax_enabled()
@@ -1296,7 +1309,7 @@ def test_einsum_linear_map_dense_uses_active_backend():
     np.testing.assert_allclose(np.asarray(dense), matrix)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_einsum_linear_map_dtype_does_not_materialize_jax_components(monkeypatch):
     """Einsum-backed dtype should only inspect dtype metadata."""
     import jax.numpy as jnp
@@ -1340,6 +1353,9 @@ def test_einsum_linear_map_complex_adjoint_matches_dense():
     np.testing.assert_allclose(linear_map.rmatvec(y), dense.conj().T @ y)
     np.testing.assert_allclose(linear_map.rmatmat(y_block), dense.conj().T @ y_block)
     np.testing.assert_allclose(linear_map.normal_matrix_diag(), np.sum(np.abs(dense) ** 2, axis=0))
+
+
+# Least-squares integration
 
 
 def test_least_squares_accepts_linear_map_and_sparse_inputs():

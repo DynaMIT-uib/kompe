@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy.sparse.linalg import lsmr as scipy_lsmr
 
-from kompe.math import JAX_AVAILABLE, LinearMap, as_linear_map, jax_enabled, set_backend
+from kompe.math import LinearMap, as_linear_map, jax_enabled, set_backend
 from kompe.math.least_squares_problem import LeastSquaresProblem
 from kompe.math.least_squares_solver import (
     LEAST_SQUARES_SOLVER_ENV,
@@ -15,6 +15,8 @@ from kompe.math.least_squares_solver import (
     get_default_least_squares_solver,
     sparse_constrained_least_squares_map,
 )
+
+# Problem definition and regularization
 
 
 def test_default_solver_reads_only_the_canonical_environment(monkeypatch):
@@ -79,6 +81,9 @@ def test_positive_strength_on_zero_regularization_operator_is_explicit():
 
     with pytest.raises(ValueError, match="is zero but has positive strength"):
         problem.system_operator()
+
+
+# Explicit least-squares maps
 
 
 @pytest.mark.parametrize("complex_data", [False, True])
@@ -179,7 +184,7 @@ def test_dense_full_rank_least_squares_map_matches_weighted_lstsq_and_adjoint():
     )
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_dense_full_rank_least_squares_map_is_jittable_with_jax():
     """Factorized dense analysis preserves the runtime array backend."""
     import jax
@@ -194,6 +199,9 @@ def test_dense_full_rank_least_squares_map_is_jittable_with_jax():
 
     assert "jax" in type(actual).__module__
     np.testing.assert_allclose(actual, expected, rtol=1e-13, atol=1e-13)
+
+
+# SciPy LSMR diagnostics
 
 
 @pytest.mark.parametrize("stop_code", [0, 1, 2])
@@ -216,6 +224,9 @@ def test_lsmr_limit_stop_codes_warn(stop_code):
     """Condition and iteration limit termination remains visible."""
     with pytest.warns(RuntimeWarning, match=rf"stop_code={stop_code}"):
         LeastSquaresSolver._warn_if_lsmr_not_converged(stop_code, column=0)
+
+
+# Dense solvers and reusable factorizations
 
 
 def test_normal_pinv_solves_block_rhs():
@@ -372,7 +383,10 @@ def test_normal_pinv_solve_reuses_cached_pseudo_inverse(monkeypatch):
     assert calls == (0 if jax_enabled() else 1)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+# Dense JAX solves
+
+
+@pytest.mark.requires_jax
 @pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv"])
 def test_dense_solvers_preserve_jax_output_when_backend_enabled(solver_name):
     """Dense solvers preserve JAX output when JAX is active."""
@@ -397,7 +411,7 @@ def test_dense_solvers_preserve_jax_output_when_backend_enabled(solver_name):
     np.testing.assert_allclose(solution, expected, rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_svd_solver_preserves_jax_output_when_backend_enabled():
     """SVD solver keeps JAX-facing assembly and output."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
@@ -421,7 +435,7 @@ def test_svd_solver_preserves_jax_output_when_backend_enabled():
     np.testing.assert_allclose(solution, expected, rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_least_squares_problem_follows_jax_operator_context_when_numpy_active():
     """JAX-backed operator terms should drive matrix-free assembly."""
     import jax.numpy as jnp
@@ -443,7 +457,7 @@ def test_least_squares_problem_follows_jax_operator_context_when_numpy_active():
     np.testing.assert_allclose(np.asarray(system_block), A)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_normal_pinv_matches_numpy_hermitian_reference_when_jax_enabled():
     """JAX normal-pinv matches the hermitian reference."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
@@ -461,6 +475,9 @@ def test_normal_pinv_matches_numpy_hermitian_reference_when_jax_enabled():
     A_H = A.T.conj()
     expected = np.linalg.pinv(A_H @ A, rtol=solver.tolerance, hermitian=True) @ (A_H @ rhs)
     np.testing.assert_allclose(solution, expected, rtol=1e-12, atol=1e-12)
+
+
+# Iterative solvers
 
 
 @pytest.mark.parametrize("solver_name", ["lsmr", "cgls"])
@@ -522,7 +539,7 @@ def test_iterative_jacobi_preconditioner_does_not_materialize_dense_system(
     np.testing.assert_allclose(solution, expected, rtol=1e-10, atol=1e-10)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 @pytest.mark.parametrize("solver_name", ["cgls", "lsmr"])
 @pytest.mark.parametrize("preconditioner_type", [None, "jacobi", "pinv"])
 def test_iterative_solvers_preserve_jax_output_when_backend_enabled(
@@ -549,7 +566,7 @@ def test_iterative_solvers_preserve_jax_output_when_backend_enabled(
     np.testing.assert_allclose(solution, expected, rtol=1e-10, atol=1e-10)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_jax_lsmr_solves_underdetermined_block_rhs():
     """Internal JAX LSMR handles rectangular underdetermined systems."""
     A = np.array([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, -1.0]])
@@ -569,7 +586,7 @@ def test_jax_lsmr_solves_underdetermined_block_rhs():
     np.testing.assert_allclose(solution, expected, rtol=1e-10, atol=1e-10)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 @pytest.mark.parametrize("complex_system", [False, True])
 def test_jax_lsmr_recurrence_matches_scipy(complex_system):
     """Internal LSMR matches SciPy for damping and an initial guess."""
@@ -602,7 +619,7 @@ def test_jax_lsmr_recurrence_matches_scipy(complex_system):
     np.testing.assert_allclose(actual[3:], expected[3:], rtol=1e-11, atol=1e-12)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_jax_lsmr_zero_rhs_discards_non_solution_initial_guess():
     """A zero RHS rejects an initial guess that is not a solution."""
     import jax.numpy as jnp
@@ -620,7 +637,7 @@ def test_jax_lsmr_zero_rhs_discards_non_solution_initial_guess():
     np.testing.assert_allclose(actual[0], expected[0])
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_jax_lsmr_uses_complex_operator_dtype():
     """A complex operator promotes real right-hand sides correctly."""
     import jax.numpy as jnp
@@ -639,6 +656,9 @@ def test_jax_lsmr_uses_complex_operator_dtype():
     assert np.issubdtype(solution.dtype, np.complexfloating)
     expected = np.linalg.lstsq(matrix, rhs, rcond=None)[0]
     np.testing.assert_allclose(solution, expected, rtol=1e-10, atol=1e-10)
+
+
+# Public solver validation
 
 
 @pytest.mark.parametrize("weight", [-1.0, np.inf, np.nan, np.array([1.0, 2.0])])

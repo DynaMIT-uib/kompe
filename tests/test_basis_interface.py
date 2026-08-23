@@ -14,7 +14,6 @@ from kompe import (
 )
 from kompe.basis import BasisSubset
 from kompe.math import (
-    JAX_AVAILABLE,
     is_identity_linear_map,
     jax_enabled,
     set_backend,
@@ -27,6 +26,8 @@ from kompe.spherical_transform import (
     grid_sqrt_area_weights,
     resolve_sqrt_weights,
 )
+
+# Public basis roles
 
 
 def test_public_sphere_package_is_canonical():
@@ -122,6 +123,9 @@ def test_basis_metadata_arrays_are_immutable_values():
             values.flat[0] = 0
 
 
+# Spherical sample-grid values
+
+
 def test_grid_signature_matches_equivalent_coordinates():
     """SphericalGrid equality uses robust coordinate signatures."""
     lat = np.array([60.0, 61.0, 62.0])
@@ -200,6 +204,9 @@ def test_basis_coefficient_compatibility_uses_coefficient_space():
     assert GlobalCSBasis(4).coefficients_are_compatible_with(GlobalCSBasis(4))
     assert not GlobalCSBasis(4).coefficients_are_compatible_with(GlobalCSBasis(6))
     assert not sh_basis.coefficients_are_compatible_with(GlobalCSBasis(4))
+
+
+# Shared surface operators and solid harmonics
 
 
 def test_surface_operator_builders_match_component_matrices():
@@ -301,6 +308,9 @@ def test_solid_harmonics_match_reference_radius_shift_formulas():
         (sh_basis.n + 1) * solid_harmonics.poloidal_to_irregular_potential_factor,
         sh_basis.n * (sh_basis.n + 1),
     )
+
+
+# Global cubed-sphere basis
 
 
 def test_csbasis_evaluates_with_finite_difference_derivatives():
@@ -488,6 +498,9 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
         np.testing.assert_allclose(multi[component_index], expected)
 
 
+# Analysis weights and regularization boundaries
+
+
 def test_grid_basis_regularization_requires_degree_metadata():
     """Degree-weighted regularization declares basis support."""
     cs_basis = GlobalCSBasis(8)
@@ -560,6 +573,9 @@ def test_weighted_tensor_pinv_matches_explicit_weighted_least_squares():
     expected = np.linalg.solve(A.T @ weight_matrix @ A, A.T @ weight_matrix)
 
     np.testing.assert_allclose(actual, expected)
+
+
+# Differential accuracy, scalar gauge, and caching
 
 
 def test_csbasis_derivatives_match_first_spherical_harmonics():
@@ -680,7 +696,10 @@ def test_csbasis_cache_controls_do_not_change_numerical_results():
     np.testing.assert_allclose(basis.scalar_evaluation_matrix(grid), expected)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+# Backend preservation
+
+
+@pytest.mark.requires_jax
 def test_csbasis_mean_free_projection_preserves_jax_arrays():
     """CS gauge projection preserves backend arrays."""
     previous_backend = jax_enabled()
@@ -700,7 +719,7 @@ def test_csbasis_mean_free_projection_preserves_jax_arrays():
         set_backend(previous_backend)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_csbasis_surface_operators_preserve_jax_inputs():
     """CS surface operators accept backend arrays."""
     previous_backend = jax_enabled()
@@ -732,7 +751,7 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
         set_backend(previous_backend)
 
 
-@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX is not installed.")
+@pytest.mark.requires_jax
 def test_shbasis_surface_operators_preserve_jax_inputs():
     """SH surface operators accept backend arrays."""
     previous_backend = jax_enabled()
@@ -760,6 +779,9 @@ def test_shbasis_surface_operators_preserve_jax_inputs():
         assert "jax" in type(shifted).__module__
     finally:
         set_backend(previous_backend)
+
+
+# Mean-free and subset coefficient spaces
 
 
 def test_shbasis_mean_free_option_matches_nmin_one_space():
@@ -850,6 +872,9 @@ def test_shbasis_rejects_inconsistent_mean_free_options():
         SHBasis(3, 2, min_degree=0, mean_free=True)
 
 
+# Basis-owned operator caches
+
+
 def test_spherical_transform_reuses_sh_evaluation_context(monkeypatch):
     """Basis-owned grid cache reuses expensive SH work."""
     sh_basis = SHBasis(4, 3)
@@ -900,6 +925,9 @@ def test_csbasis_reuses_native_operator_cache():
     assert cs_basis.helmholtz_synthesis_operator(grid) is cs_basis.helmholtz_synthesis_operator(
         same_grid
     )
+
+
+# Abstract-interface enforcement
 
 
 def test_incomplete_basis_subclass_is_rejected():
