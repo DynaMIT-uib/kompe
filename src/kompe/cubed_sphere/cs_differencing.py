@@ -29,167 +29,186 @@ def _shift_rows_into_bounds(values, lower, upper):
     return values - np.minimum(row_min, lower) + lower - np.maximum(row_max, upper) + upper
 
 
-class CSFiniteDifferences:
-    """Build finite-difference and cross-face interpolation matrices."""
+def global_cs_derivative_matrices(
+    projection,
+    cells_per_face,
+    *,
+    stencil_half_width=1,
+    cross_face_points=4,
+):
+    """Return the native-grid ``(d/dxi, d/deta)`` matrices."""
+    if stencil_half_width < 1:
+        raise ValueError("stencil_half_width must be at least 1")
 
-    def __init__(self, basis):
-        self.basis = basis
+    shape = (6, cells_per_face, cells_per_face)
+    size = np.prod(shape)
+    h = cs_coordinates.face_coordinate(1, cells_per_face) - cs_coordinates.face_coordinate(
+        0, cells_per_face
+    )
+    face, i, j = map(
+        np.ravel,
+        np.meshgrid(
+            np.arange(6),
+            np.arange(cells_per_face),
+            np.arange(cells_per_face),
+            indexing="ij",
+        ),
+    )
 
-    def difference_matrix(self, N, coordinate="xi", Ns=1, Ni=4, order=1):
-        """Return a scalar-field finite-difference matrix."""
-        if coordinate not in ["xi", "eta", "both"]:
-            raise ValueError(
-                f'coordinate must be either "xi", "eta", or "both". Not  {coordinate}.'
-            )
+    offsets = np.hstack(
+        (np.r_[-stencil_half_width:0], np.r_[1 : stencil_half_width + 1])
+    )
+    offset_count = len(offsets)
+    weights = np.repeat(_first_derivative_weights(offsets, h), size)
+    face_repeated = np.tile(face, offset_count)
+    i_repeated = np.tile(i, offset_count)
+    j_repeated = np.tile(j, offset_count)
+    rows = np.tile(np.ravel_multi_index((face, i, j), shape), offset_count)
 
-        if Ns < order:
-            raise ValueError(f"Ns must be >= order. You gave {Ns} and {order}")
+    dxi = _cross_face_interpolation_matrix(
+        projection,
+        face_repeated,
+        np.hstack([i + offset for offset in offsets]),
+        j_repeated,
+        cells_per_face,
+        cross_face_points,
+        rows=rows,
+        weights=weights,
+    )
+    deta = _cross_face_interpolation_matrix(
+        projection,
+        face_repeated,
+        i_repeated,
+        np.hstack([j + offset for offset in offsets]),
+        cells_per_face,
+        cross_face_points,
+        rows=rows,
+        weights=weights,
+    )
+    return dxi, deta
 
-        if order != 1:
-            raise NotImplementedError("Only first order differentiation is supported.")
 
-        shape = (6, N, N)
-        size = 6 * N * N
+def _cross_face_interpolation_matrix(
+    projection,
+    face,
+    i,
+    j,
+    cells_per_face,
+    point_count,
+    *,
+    weights=None,
+    rows=None,
+):
+    """Interpolate off-face stencil points from the adjoining face."""
+    if point_count > cells_per_face:
+        raise ValueError("cross_face_points cannot exceed cells_per_face")
 
-        h = cs_coordinates.face_coordinate(1, N) - cs_coordinates.face_coordinate(0, N)
+    face, i, j = map(np.ravel, [face, i, j])
+    shape = (6, cells_per_face, cells_per_face)
+    size = np.prod(shape)
 
-        k, i, j = map(
-            np.ravel, np.meshgrid(np.arange(6), np.arange(N), np.arange(N), indexing="ij")
+    if rows is None:
+        rows = np.arange(face.size)
+    if weights is None:
+        weights = np.ones(face.size)
+    weights = weights / point_count
+
+    h = cs_coordinates.face_coordinate(1, cells_per_face) - cs_coordinates.face_coordinate(
+        0, cells_per_face
+    )
+    columns = np.full(face.size, -1, dtype=np.int64)
+
+    xi = cs_coordinates.face_coordinate(i + 0.5, cells_per_face)
+    eta = cs_coordinates.face_coordinate(j + 0.5, cells_per_face)
+    _, theta, phi = projection.cube_to_spherical(
+        xi, eta, face, radius=1.0, degrees=True
+    )
+    new_xi, new_eta, new_face = projection.geographic_to_cube(phi, 90 - theta)
+    new_i = new_xi / h + (cells_per_face - 1) / 2
+    new_j = new_eta / h + (cells_per_face - 1) / 2
+
+    on_i_grid_line = np.isclose(new_i - np.rint(new_i), 0)
+    on_j_grid_line = np.isclose(new_j - np.rint(new_j), 0)
+    if not np.all(on_i_grid_line | on_j_grid_line):
+        raise RuntimeError(
+            "Cross-face interpolation points must align with at least one target-grid axis."
         )
 
-        stencil_points = np.hstack((np.r_[-Ns:0], np.r_[1 : Ns + 1]))
-        stencil_count = len(stencil_points)
-        stencil_weight = _first_derivative_weights(stencil_points, h)
+    integer_pairs = on_i_grid_line & on_j_grid_line
+    columns[integer_pairs] = np.ravel_multi_index(
+        (
+            new_face[integer_pairs],
+            np.rint(new_i[integer_pairs]).astype(np.int64),
+            np.rint(new_j[integer_pairs]).astype(np.int64),
+        ),
+        shape,
+    )
 
-        i_diff = np.hstack([i + point for point in stencil_points])
-        j_diff = np.hstack([j + point for point in stencil_points])
-        k_const, i_const, j_const = (
-            np.tile(k, stencil_count),
-            np.tile(i, stencil_count),
-            np.tile(j, stencil_count),
+    interpolate_i = ~on_i_grid_line
+    interpolate_j = ~on_j_grid_line
+    if np.any(interpolate_i & interpolate_j):
+        raise RuntimeError(
+            "Cross-face interpolation cannot interpolate along both grid axes at once."
         )
-        weights = np.repeat(stencil_weight, size)
-
-        rows = np.tile(np.ravel_multi_index((k, i, j), shape), stencil_count)
-        if coordinate in ["xi", "both"]:
-            dxi = self.interpolation_matrix(
-                k_const, i_diff, j_const, N, Ni, rows=rows, weights=weights
-            )
-        if coordinate in ["eta", "both"]:
-            deta = self.interpolation_matrix(
-                k_const, i_const, j_diff, N, Ni, rows=rows, weights=weights
-            )
-
-        if coordinate == "both":
-            return dxi, deta
-        if coordinate == "xi":
-            return dxi
-        return deta
-
-    def interpolation_matrix(self, k, i, j, N, Ni, weights=None, rows=None):
-        """Return a cross-face interpolation matrix."""
-        if Ni > N:
-            raise ValueError("Ni must be <= N")
-
-        basis = self.basis
-        k, i, j = map(np.ravel, [k, i, j])
-
-        shape = (6, N, N)
-        size = 6 * N**2
-
-        if rows is None:
-            rows = np.arange(k.size)
-
-        if weights is None:
-            weights = np.ones(k.size)
-        weights = weights / Ni
-
-        h = cs_coordinates.face_coordinate(1, N) - cs_coordinates.face_coordinate(0, N)
-        cols = np.full(k.size, -1, dtype=np.int64)
-
-        xi = cs_coordinates.face_coordinate(i + 0.5, N)
-        eta = cs_coordinates.face_coordinate(j + 0.5, N)
-        _, theta, phi = basis.mesh.projection.cube_to_spherical(
-            xi, eta, k, radius=1.0, degrees=True
-        )
-        new_xi, new_eta, new_k = basis.mesh.projection.geographic_to_cube(phi, 90 - theta)
-        new_i, new_j = new_xi / h + (N - 1) / 2, new_eta / h + (N - 1) / 2
-
-        on_i_grid_line = np.isclose(new_i - np.rint(new_i), 0)
-        on_j_grid_line = np.isclose(new_j - np.rint(new_j), 0)
-        if not np.all(on_i_grid_line | on_j_grid_line):
-            raise RuntimeError(
-                "Cross-face interpolation points must align with at least one target-grid axis."
-            )
-
-        integer_pairs = on_i_grid_line & on_j_grid_line
-        cols[integer_pairs] = np.ravel_multi_index(
-            (
-                new_k[integer_pairs],
-                np.rint(new_i[integer_pairs]).astype(np.int64),
-                np.rint(new_j[integer_pairs]).astype(np.int64),
-            ),
-            shape,
+    if np.count_nonzero(interpolate_i | interpolate_j) != np.count_nonzero(columns == -1):
+        raise RuntimeError(
+            "Cross-face interpolation classification is inconsistent with target columns."
         )
 
-        i_is_float = ~on_i_grid_line
-        j_is_float = ~on_j_grid_line
+    fractional_i = new_i[interpolate_i].reshape((-1, 1))
+    fractional_j = new_j[interpolate_j].reshape((-1, 1))
+    points = np.arange(point_count).reshape((1, -1))
+    i_points = _shift_rows_into_bounds(
+        points + np.int64(np.ceil(fractional_i)) - point_count // 2,
+        0,
+        cells_per_face - 1,
+    )
+    j_points = _shift_rows_into_bounds(
+        points + np.int64(np.ceil(fractional_j)) - point_count // 2,
+        0,
+        cells_per_face - 1,
+    )
 
-        if np.any(i_is_float & j_is_float):
-            raise RuntimeError(
-                "Cross-face interpolation cannot interpolate along both grid axes at once."
-            )
-        if np.count_nonzero(i_is_float | j_is_float) != np.count_nonzero(cols == -1):
-            raise RuntimeError(
-                "Cross-face interpolation classification is inconsistent with target columns."
-            )
+    i_distances = fractional_i - i_points
+    j_distances = fractional_j - j_points
+    barycentric_weights = (-1) ** points * binom(point_count - 1, points)
+    i_weights = barycentric_weights / i_distances
+    i_weights /= np.sum(i_weights, axis=1).reshape((-1, 1))
+    j_weights = barycentric_weights / j_distances
+    j_weights /= np.sum(j_weights, axis=1).reshape((-1, 1))
 
-        j_floats = new_j[j_is_float].reshape((-1, 1))
-        i_floats = new_i[i_is_float].reshape((-1, 1))
+    stacked_weights = np.tile(weights, (point_count, 1)).T
+    stacked_columns = np.tile(columns, (point_count, 1)).T
+    stacked_rows = np.tile(rows, (point_count, 1)).T
 
-        interpolation_points = np.arange(Ni).reshape((1, -1))
-        j_interpolation_points = _shift_rows_into_bounds(
-            interpolation_points + np.int64(np.ceil(j_floats)) - Ni // 2, 0, N - 1
-        )
-        i_interpolation_points = _shift_rows_into_bounds(
-            interpolation_points + np.int64(np.ceil(i_floats)) - Ni // 2, 0, N - 1
-        )
+    stacked_columns[interpolate_i] = np.ravel_multi_index(
+        (
+            np.tile(new_face[interpolate_i], (point_count, 1)).T,
+            i_points,
+            np.rint(np.tile(new_j[interpolate_i], (point_count, 1))).astype(np.int64).T,
+        ),
+        shape,
+    )
+    stacked_columns[interpolate_j] = np.ravel_multi_index(
+        (
+            np.tile(new_face[interpolate_j], (point_count, 1)).T,
+            np.rint(np.tile(new_i[interpolate_j], (point_count, 1))).astype(np.int64).T,
+            j_points,
+        ),
+        shape,
+    )
+    stacked_weights[interpolate_i] *= i_weights * point_count
+    stacked_weights[interpolate_j] *= j_weights * point_count
 
-        j_distances = j_floats - j_interpolation_points
-        i_distances = i_floats - i_interpolation_points
-        w = (-1) ** interpolation_points * binom(Ni - 1, interpolation_points)
-        w_i = w / i_distances / np.sum(w / i_distances, axis=1).reshape((-1, 1))
-        w_j = w / j_distances / np.sum(w / j_distances, axis=1).reshape((-1, 1))
-
-        stacked_weights = np.tile(weights, (Ni, 1)).T
-        stacked_cols = np.tile(cols, (Ni, 1)).T
-        stacked_rows = np.tile(rows, (Ni, 1)).T
-
-        stacked_cols[i_is_float] = np.ravel_multi_index(
-            (
-                np.tile(new_k[i_is_float], (Ni, 1)).T,
-                i_interpolation_points,
-                np.rint(np.tile(new_j[i_is_float], (Ni, 1))).astype(np.int64).T,
-            ),
-            shape,
-        )
-        stacked_cols[j_is_float] = np.ravel_multi_index(
-            (
-                np.tile(new_k[j_is_float], (Ni, 1)).T,
-                np.rint(np.tile(new_i[j_is_float], (Ni, 1))).astype(np.int64).T,
-                j_interpolation_points,
-            ),
-            shape,
-        )
-        stacked_weights[i_is_float] = stacked_weights[i_is_float] * w_i * Ni
-        stacked_weights[j_is_float] = stacked_weights[j_is_float] * w_j * Ni
-
-        matrix = coo_matrix(
-            (stacked_weights.reshape(-1), (stacked_rows.reshape(-1), stacked_cols.reshape(-1))),
-            shape=(rows.max() + 1, size),
-        )
-        matrix.sum_duplicates()
-        return matrix
+    matrix = coo_matrix(
+        (
+            stacked_weights.reshape(-1),
+            (stacked_rows.reshape(-1), stacked_columns.reshape(-1)),
+        ),
+        shape=(rows.max() + 1, size),
+    )
+    matrix.sum_duplicates()
+    return matrix
 
 
-__all__ = ["CSFiniteDifferences"]
+__all__ = ["global_cs_derivative_matrices"]

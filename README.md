@@ -27,7 +27,7 @@ The public implementations include:
   transfer operators;
 - backend-neutral `LinearMap` objects and least-squares solvers.
 
-The package depends only on NumPy, SciPy, and Packaging. JAX support is
+The package depends only on NumPy and SciPy. JAX support is
 optional and loaded only when requested; Kompe does not change JAX's global
 precision configuration. It never imports PynaMIT, Lompe, or secsy; those
 libraries are consumers or compatibility facades.

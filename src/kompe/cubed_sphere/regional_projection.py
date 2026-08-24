@@ -36,11 +36,9 @@ class RegionalCSProjection:
     def __init__(self, position, orientation):
         """Set up a regional cubed-sphere chart.
 
-        The RegionalCSProjection is set up by
-        1) rotating to a local coordinate system in which 'position'
-        is at the pole, and 'orientation' defines the x axis (prime meridian)
-        2) applying the Ronchi et al. conversions to xi, eta coords on the
-        local coordinates
+        The chart first rotates ``position`` to the north pole, with increasing
+        xi aligned with ``orientation``, and then applies the Ronchi et al.
+        north-face transformation to the local coordinates.
 
         Parameters
         ----------
@@ -48,13 +46,10 @@ class RegionalCSProjection:
             Centre at which the cube surface is tangential to the sphere,
             in degrees. The tuple order is explicitly longitude first,
             latitude second.
-        orientation: scalar or 2-element array-like
-            orientation of the cube surface.
-            if scalar: angle in degrees that defines the xi axis: orientation = 0 / 180
-            implies a xi axis in the east-west direction, positive towards east / west.
-            orientation = 90 / 270 implies a xi axis towards north / south.
-            if 2-element array-like: The elements denote the eastward and northward components
-            of a vector that is aligned with the xi axis.
+        orientation : scalar or 2-element array-like
+            Direction of increasing xi at ``position``. A scalar is an angle
+            in degrees: 0 points east, 90 north, 180 west, and 270 south. A
+            two-element value gives the eastward and northward components.
         """
         self.position = np.asarray(position, dtype=float)
         if self.position.shape != (2,) or not np.isfinite(self.position).all():
@@ -66,13 +61,13 @@ class RegionalCSProjection:
         if not np.isfinite(self.orientation).all():
             raise ValueError("orientation must contain finite values")
 
-        if self.orientation.size == 2:  # interpreted as a east, north component:
+        if self.orientation.size == 2:  # Eastward and northward components.
             orientation_norm = np.linalg.norm(self.orientation)
             if orientation_norm == 0:
                 raise ValueError("orientation must be non-zero")
             if not np.isclose(orientation_norm, 1.0, rtol=0.0, atol=1e-15):
                 self.orientation = self.orientation / orientation_norm
-        else:  # interpreted as scalar
+        else:  # Angle in degrees.
             if self.orientation.size != 1:
                 raise ValueError("orientation must be either scalar or have 2 elements")
             angle = float(self.orientation.reshape(-1)[0])
@@ -103,7 +98,7 @@ class RegionalCSProjection:
         # Complete the right-handed local Cartesian frame.
         self.local_x_axis = np.cross(self.local_y_axis, self.local_z_axis)
 
-        # define rotation matrices for rotations between local and geocentric:
+        # Rotation matrices between local and geocentric Cartesian coordinates.
         self.geographic_to_local_matrix = np.vstack(
             (self.local_x_axis, self.local_y_axis, self.local_z_axis)
         )  # rotation matrix from GEO to rotated coords (ECEF)
@@ -145,17 +140,17 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        lon: array
+        lon : array
             geocentric longitude(s) [deg] to convert to cube coords
-        lat: array:
+        lat : array
             geocentric latitude(s) [deg] to convert to cube coords.
 
         Returns
         -------
-        xi: array
+        xi : array
             xi, as defined in Ronchi et al, after lon, lat have been
             converted to local coordinates. Unit is radians.
-        eta: array
+        eta : array
             eta, as defined in Ronchi et al., after lon, lat have been
             converted to local coordinates. Unit is radians.
 
@@ -181,16 +176,16 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        xi: array
+        xi : array
             Cubed-sphere xi coordinate(s) [rad].
-        eta: array
+        eta : array
             Cubed-sphere eta coordinate(s) [rad].
 
         Returns
         -------
-        lon: array
+        lon : array
             Geocentric longitude(s) [deg].
-        lat: array
+        lat : array
             Geocentric latitude(s) [deg].
 
 
@@ -211,17 +206,17 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        lon: array-like
-            array of longitudes [deg]
-        lat: array-like
-            array of latitudes [deg]
+        lon : array-like
+            Geocentric longitude [deg].
+        lat : array-like
+            Geocentric latitude [deg].
 
         Returns
         -------
-        lon: array-like
-            array of longitudes [deg] in new coordinate system
-        lat: array-like
-            array of latitudes [deg] in new coordinate system
+        lon : array-like
+            Longitude in the rotated coordinate system [deg].
+        lat : array-like
+            Latitude in the rotated coordinate system [deg].
         """
         return _rotate_spherical_coordinates(lon, lat, self.geographic_to_local_matrix)
 
@@ -232,17 +227,17 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        lon: array-like
-            array of longitudes [deg]
-        lat: array-like
-            array of latitudes [deg]
+        lon : array-like
+            Longitude in the rotated coordinate system [deg].
+        lat : array-like
+            Latitude in the rotated coordinate system [deg].
 
         Returns
         -------
-        lon: array-like
-            array of longitudes [deg] in new coordinate system
-        lat: array-like
-            array of latitudes [deg] in new coordinate system
+        lon : array-like
+            Geocentric longitude [deg].
+        lat : array-like
+            Geocentric latitude [deg].
 
         """
         return _rotate_spherical_coordinates(lon, lat, self.local_to_geographic_matrix)
@@ -252,14 +247,14 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        lon: array-like
+        lon : array-like
             array of longitudes (local coords) for which rotation matrices should be calculated
-        lat: array-like
+        lat : array-like
             array of latitudes (local coords) for which rotation matrices should be calculated
 
         Returns
         -------
-        R_localenu2geoenu: array
+        R_localenu2geoenu : array
             Rotation matrices that rotate ENU vectors in local coordinates to ENU vectors
             in geocentric coordinates. Shape is (N, 2, 2). To get the opposite rotation,
             use the transpose by swapping the last two axes of the array. The rotation
@@ -288,24 +283,24 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        east: array-like
+        east : array-like
             Array of N eastward (geo) components
-        north: array-like
+        north : array-like
             Array of N northward (geo) components
-        lon: array-like
+        lon : array-like
             Array of N longitudes that represent vector positions
-        lat: array-like
+        lat : array-like
             Array of N latitudes that represent vector positions
 
         Returns
         -------
-        xi: array-like
+        xi : array-like
             N element array of xi coordinates
-        eta: array-like
+        eta : array-like
             N element array of eta coordinates
-        Axi: array-like
+        Axi : array-like
             N element array of vector components in xi direction
-        Aeta: array-like
+        Aeta : array-like
             N element array of vector components in eta direction
 
         """
@@ -334,24 +329,24 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        Axi: array-like
+        Axi : array-like
             Array of N xi components
-        Aeta: array-like
+        Aeta : array-like
             Array of N eta components
-        xi: array-like
+        xi : array-like
             Array of N xi coords that represent vector positions
-        eta: array-like
+        eta : array-like
             Array of N eta coords that represent vector positions
 
         Returns
         -------
-        lon: array-like
+        lon : array-like
             N element array of lon coordinates
-        lat: array-like
+        lat : array-like
             N element array of lat coordinates
-        east: array-like
+        east : array-like
             N element array of vector components in east direction
-        north: array-like
+        north : array-like
             N element array of vector components in north direction
 
         """
@@ -384,9 +379,8 @@ class RegionalCSProjection:
 
         Implementation of equations 18-20 of Ronchi et al.
 
-        Broadcasting rules apply, so that output will have the shape of
-        the combination of input parameters:
-        dS.shape will be equal to (xi * eta * dxi * deta).shape
+        Inputs are broadcast together and all outputs have the resulting
+        shape.
 
         xi, eta, dxi, deta must all be given in radians. dlxi and dleta
         will be given in units of R, and dS in units of R squared (default
@@ -394,26 +388,26 @@ class RegionalCSProjection:
 
         Parameters
         ----------
-        xi: array-like
+        xi : array-like
             xi coordinate(s) of surface element(s)
-        eta: array-like
+        eta : array-like
             eta coordinate(s) of surface element(s)
-        dxi: array-like
+        dxi : array-like
             dimension(s) of surface element(s) in xi direction
-        deta: array-like
+        deta : array-like
             dimension(s) of surface element(s) in eta direction
-        radius: float, optional
+        radius : float, optional
             radius of the sphere - default is 1
 
         Returns
         -------
-        dlxi: array-like
+        dlxi : array-like
             Length of line element(s), in radians or in units of ``radius``,
             along xi direction
-        dleta: array-like
+        dleta : array-like
             Length of line element(s), in radians or in units of ``radius``,
             along eta direction
-        dS: array-like
+        dS : array-like
             Area(s) of surface element(s), in steradians or in
             squared units of ``radius``
         """

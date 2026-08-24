@@ -6,7 +6,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from kompe.basis import SurfaceDifferentialBasis
-from kompe.cubed_sphere.cs_differencing import CSFiniteDifferences
+from kompe.cubed_sphere.cs_differencing import global_cs_derivative_matrices
 from kompe.cubed_sphere.global_mesh import GlobalCSMesh
 from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
 from kompe.math import as_linear_map, identity_linear_map
@@ -89,7 +89,6 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         self._laplacian_cache = {}
         self._laplacian_sparse_cache = {}
         self._remapper = _GlobalCSRemapper(self)
-        self._finite_differences = CSFiniteDifferences(self)
         self._surface_matrix_cache = OrderedDict()
         self._surface_operator_cache = OrderedDict()
 
@@ -317,12 +316,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     def _get_derivative_bundle(self):
         """Build native-grid angular derivative operators."""
         if self._derivative_bundle is None:
-            dxi, deta = self._finite_differences.difference_matrix(
+            dxi, deta = global_cs_derivative_matrices(
+                self.mesh.projection,
                 self.cells_per_face,
-                coordinate="both",
-                Ns=1,
-                Ni=4,
-                order=1,
             )
             dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi = self._coordinate_derivatives()
 

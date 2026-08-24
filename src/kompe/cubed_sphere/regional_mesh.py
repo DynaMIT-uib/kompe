@@ -92,40 +92,36 @@ class RegionalCSMesh(StructuredSurfaceMesh):
     ):
         """Construct a regional cubed-sphere mesh.
 
-        Create a regular grid in xi,eta-coordinates. The grid will cover a
-        region of the cube surface that is L by W, where L is the dimension along
-        the projection.orientation vector. The center of the grid is located at
-        projection.position.
+        Create a regular grid in xi, eta coordinates. ``length`` is the extent
+        along the projection's xi axis; ``width`` is the extent along eta. The
+        grid is centred at ``projection.position``.
 
         Parameters
         ----------
-        projection: RegionalCSProjection
-            RegionalCSProjection
-        length: float
-            Dimension of grid along RegionalCSProjection.orientation, i.e. the "length"
-            of the grid. Dimension corresponds to the dimension of R at the
-            cube-sphere intersection point
-        width: float
-            Dimension of grid perpendicular RegionalCSProjection.orientation, i.e. the
-            "width" of the grid. Dimension corresponds to the dimension of R at
-            the cube-sphere intersection point
-        radius: float
+        projection : RegionalCSProjection
+            Coordinate projection that sets the mesh centre and orientation.
+        length : float
+            Physical extent along xi, parallel to ``projection.orientation``.
+        width : float
+            Physical extent along eta, perpendicular to
+            ``projection.orientation``.
+        radius : float
             Radius of the sphere, in the same units as the dimensions and any
             cell sizes. It is required so that the mesh never
             silently assumes kilometres or metres.
-        shape: tuple of int, optional
+        shape : tuple of int, optional
             Number of cells along the ``(eta, xi)`` axes.
-        cell_size: tuple of float, optional
+        cell_size : tuple of float, optional
             Persisted ``(eta, xi)`` form of the physical cell sizes. Interactive
             code should prefer the explicitly named cell-size parameters below.
-        xi_cell_size, eta_cell_size: float, optional
+        xi_cell_size, eta_cell_size : float, optional
             Target physical cell sizes parallel and perpendicular to the projection
             orientation, respectively. The final uniform spacing is adjusted slightly
             so the requested extent is exact. Both values must be provided together.
-        xi_edges, eta_edges: array-like, optional
+        xi_edges, eta_edges : array-like, optional
             Exact uniformly spaced computational-coordinate edges in radians. Prefer
             :meth:`from_edges` when constructing a mesh this way.
-        xi_shift: float, optional
+        xi_shift : float, optional
             Physical displacement along the xi axis, in the same units as ``radius``.
 
         Notes
@@ -202,7 +198,7 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         self.xi_min, self.xi_max = xi_edge.min(), xi_edge.max()
         self.eta_min, self.eta_max = eta_edge.min(), eta_edge.max()
 
-        # number of grid cells in L (eta) and W (xi) directions:
+        # Number of cells along the eta and xi array axes.
         self.n_eta, self.n_xi = len(eta_edge) - 1, len(xi_edge) - 1
 
         # size of grid cells in xi, eta coordinates:
@@ -360,9 +356,9 @@ class RegionalCSMesh(StructuredSurfaceMesh):
     def unravel_index(self, flat_index):
         """Return eta and xi indices for flattened cell indices.
 
-        Parammeters
-        -----------
-        flat_index: array-like of int
+        Parameters
+        ----------
+        flat_index : array-like of int
             Flattened cell indices.
 
         Returns
@@ -446,11 +442,11 @@ class RegionalCSMesh(StructuredSurfaceMesh):
 
         Parameters
         ----------
-        lon: array
+        lon : array
             array of longitudes [degrees] - must have same shape as lat
-        lat: array
+        lat : array
             array of latitudes [degrees] - must have same shape as lon
-        margin_cells: float, optional
+        margin_cells : float, optional
             Number of cell widths by which to extend the boundary. Negative
             values contract it.
 
