@@ -6,33 +6,10 @@ import numpy as np
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
 from kompe.math.backend import get_array_module, to_numpy
-from kompe.spherical import ecef_to_enu, enu_to_ecef
+from kompe.spherical import ecef_to_enu, enu_to_ecef, rotate_spherical_by_matrix
 
 _DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 _NORTH_FACE = 4
-
-
-def _rotate_spherical_coordinates(lon, lat, rotation):
-    """Rotate spherical coordinates with a Cartesian rotation matrix."""
-    xp = get_array_module(lon, lat)
-    lon, lat = xp.broadcast_arrays(xp.asarray(lon), xp.asarray(lat))
-    shape = lon.shape
-    lon = xp.deg2rad(lon.reshape(-1))
-    lat = xp.deg2rad(lat.reshape(-1))
-    xyz = xp.stack(
-        (
-            xp.cos(lat) * xp.cos(lon),
-            xp.cos(lat) * xp.sin(lon),
-            xp.sin(lat),
-        ),
-        axis=1,
-    )
-    rotated = xp.einsum("ij,nj->ni", xp.asarray(rotation), xyz)
-    rotated_lon = xp.rad2deg(xp.arctan2(rotated[:, 1], rotated[:, 0]))
-    rotated_lat = xp.rad2deg(
-        xp.arctan2(rotated[:, 2], xp.hypot(rotated[:, 0], rotated[:, 1]))
-    )
-    return rotated_lon.reshape(shape), rotated_lat.reshape(shape)
 
 
 class RegionalCSProjection:
@@ -227,7 +204,10 @@ class RegionalCSProjection:
         lat : array-like
             Latitude in the rotated coordinate system [deg].
         """
-        return _rotate_spherical_coordinates(lon, lat, self.geographic_to_local_matrix)
+        local_lat, local_lon = rotate_spherical_by_matrix(
+            lat, lon, self.geographic_to_local_matrix
+        )
+        return local_lon, local_lat
 
     def local_to_geographic(self, lon, lat):
         """Convert rotated local coordinates to geocentric coordinates.
@@ -249,7 +229,10 @@ class RegionalCSProjection:
             Geocentric latitude [deg].
 
         """
-        return _rotate_spherical_coordinates(lon, lat, self.local_to_geographic_matrix)
+        geographic_lat, geographic_lon = rotate_spherical_by_matrix(
+            lat, lon, self.local_to_geographic_matrix
+        )
+        return geographic_lon, geographic_lat
 
     def local_to_geographic_enu_rotation(self, lon, lat):
         """Return rotation matrices from local ENU to geocentric ENU.

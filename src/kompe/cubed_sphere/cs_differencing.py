@@ -7,16 +7,7 @@ from scipy.sparse import coo_matrix
 from scipy.special import binom
 
 from kompe.cubed_sphere import cs_coordinates
-
-
-def _first_derivative_weights(sample_offsets, step_size):
-    """Return finite-difference weights at zero for sample offsets."""
-    sample_offsets = np.asarray(sample_offsets, dtype=float).reshape(-1)
-    powers = np.arange(sample_offsets.size).reshape(-1, 1)
-    taylor_system = sample_offsets.reshape(1, -1) ** powers
-    derivative = np.zeros(sample_offsets.size)
-    derivative[1] = 1.0
-    return np.linalg.solve(taylor_system, derivative) / float(step_size)
+from kompe.cubed_sphere.finite_differences import finite_difference_weights
 
 
 def _shift_rows_into_bounds(values, lower, upper):
@@ -59,7 +50,7 @@ def global_cs_derivative_matrices(
         (np.r_[-stencil_half_width:0], np.r_[1 : stencil_half_width + 1])
     )
     offset_count = len(offsets)
-    weights = np.repeat(_first_derivative_weights(offsets, h), size)
+    weights = np.repeat(finite_difference_weights(offsets, order=1, h=h), size)
     face_repeated = np.tile(face, offset_count)
     i_repeated = np.tile(i, offset_count)
     j_repeated = np.tile(j, offset_count)
