@@ -212,9 +212,7 @@ def test_regional_projection_algebra_stays_on_jax_backend():
         lon, lat = projection.cube_to_geographic(xi, eta)
         actual_xi, actual_eta = projection.geographic_to_cube(lon, lat)
         rotation = projection.local_to_geographic_enu_rotation(lon, lat)
-        _, _, cube_xi, cube_eta = projection.geographic_vector_to_cube(
-            east, north, lon, lat
-        )
+        _, _, cube_xi, cube_eta = projection.geographic_vector_to_cube(east, north, lon, lat)
         _, _, actual_east, actual_north = projection.cube_vector_to_geographic(
             cube_xi, cube_eta, xi, eta
         )

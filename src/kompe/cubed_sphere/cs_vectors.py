@@ -19,9 +19,7 @@ def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
     ``(d x/dxi, d x/deta, d x/dr)`` in ECEF components.
     """
     xp = get_array_module(xi, eta, r, block)
-    xi, eta, r, block = (
-        value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, r, block)
-    )
+    xi, eta, r, block = (value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, r, block))
     block = block.astype(int)
 
     X = xp.tan(xi)
@@ -37,12 +35,10 @@ def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
     dface_dxi = xp.stack((zeros, dX_dxi, zeros), axis=1)
     dface_deta = xp.stack((zeros, zeros, dY_deta), axis=1)
     dunit_dxi = (
-        dface_dxi / sqrt_delta[:, None]
-        - face_position * (X * dX_dxi / delta**1.5)[:, None]
+        dface_dxi / sqrt_delta[:, None] - face_position * (X * dX_dxi / delta**1.5)[:, None]
     )
     dunit_deta = (
-        dface_deta / sqrt_delta[:, None]
-        - face_position * (Y * dY_deta / delta**1.5)[:, None]
+        dface_deta / sqrt_delta[:, None] - face_position * (Y * dY_deta / delta**1.5)[:, None]
     )
 
     local_jacobian = xp.stack(
@@ -83,14 +79,11 @@ def _face_to_face_matrix(xi, eta, block_i, block_j):
     """Return component transforms between CS blocks."""
     xp = get_array_module(xi, eta, block_i, block_j)
     xi_i, eta_i, block_i, block_j = (
-        value.reshape(-1)
-        for value in xp.broadcast_arrays(xi, eta, block_i, block_j)
+        value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, block_i, block_j)
     )
 
     source_to_cartesian = _cube_to_cartesian_matrix(xi_i, eta_i, block=block_i)
-    _, theta, phi = cs_coordinates.cube_to_spherical(
-        xi_i, eta_i, block_i, deg=True
-    )
+    _, theta, phi = cs_coordinates.cube_to_spherical(xi_i, eta_i, block_i, deg=True)
     xi_j, eta_j, _ = cs_coordinates.geographic_to_cube(phi, 90 - theta, block=block_j)
     cartesian_to_target = _cartesian_to_cube_matrix(xi_j, eta_j, block=block_j)
 

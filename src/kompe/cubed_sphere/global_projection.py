@@ -108,9 +108,7 @@ class GlobalCSProjection:
             block=face,
         )
         cartesian_to_cube = invert_3x3_matrices(cube_to_cartesian)
-        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(
-            cube_to_cartesian[:, :, 2]
-        )
+        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(cube_to_cartesian[:, :, 2])
         xp = get_array_module(cartesian_to_cube, enu_to_cartesian)
         return xp.einsum("nij,njk->nik", cartesian_to_cube, enu_to_cartesian)
 
@@ -123,9 +121,7 @@ class GlobalCSProjection:
             r=radius,
             block=face,
         )
-        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(
-            cube_to_cartesian[:, :, 2]
-        )
+        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(cube_to_cartesian[:, :, 2])
         xp = get_array_module(enu_to_cartesian, cube_to_cartesian)
         cartesian_to_enu = xp.swapaxes(enu_to_cartesian, 1, 2)
         return xp.einsum("nij,njk->nik", cartesian_to_enu, cube_to_cartesian)

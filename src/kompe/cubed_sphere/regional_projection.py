@@ -255,16 +255,12 @@ class RegionalCSProjection:
             N is the size of lon and lat (they will be flattened)
         """
         xp = get_array_module(lon, lat)
-        lon, lat = (
-            value.reshape(-1) for value in xp.broadcast_arrays(lon, lat)
-        )
+        lon, lat = (value.reshape(-1) for value in xp.broadcast_arrays(lon, lat))
         geographic_lon, geographic_lat = self.local_to_geographic(lon, lat)
         local_enu_basis = xp.broadcast_to(xp.eye(3), (lon.size, 3, 3))
         local_ecef_basis = enu_to_ecef(local_enu_basis, lat[:, None], lon[:, None])
         local_to_geographic = xp.asarray(self.local_to_geographic_matrix)
-        geographic_ecef_basis = xp.einsum(
-            "ij,nkj->nki", local_to_geographic, local_ecef_basis
-        )
+        geographic_ecef_basis = xp.einsum("ij,nkj->nki", local_to_geographic, local_ecef_basis)
         geographic_enu_basis = ecef_to_enu(
             geographic_ecef_basis,
             geographic_lat[:, None],
@@ -300,8 +296,7 @@ class RegionalCSProjection:
         """
         xp = get_array_module(east, north, lon, lat)
         east, north, lon, lat = (
-            value.reshape(-1)
-            for value in xp.broadcast_arrays(east, north, lon, lat)
+            value.reshape(-1) for value in xp.broadcast_arrays(east, north, lon, lat)
         )
         xi, eta = self.geographic_to_cube(lon, lat)
         geographic_ecef = enu_to_ecef(
@@ -351,8 +346,7 @@ class RegionalCSProjection:
         """
         xp = get_array_module(Axi, Aeta, xi, eta)
         Axi, Aeta, xi, eta = (
-            value.reshape(-1)
-            for value in xp.broadcast_arrays(Axi, Aeta, xi, eta)
+            value.reshape(-1) for value in xp.broadcast_arrays(Axi, Aeta, xi, eta)
         )
         lon, lat = self.cube_to_geographic(xi, eta)
         cube = xp.stack((Axi, Aeta, xp.zeros_like(Axi)), axis=1)
@@ -416,16 +410,12 @@ class RegionalCSProjection:
             squared units of ``radius``
         """
         xp = get_array_module(xi, eta, dxi, deta, radius)
-        xi, eta, dxi, deta, radius = xp.broadcast_arrays(
-            xi, eta, dxi, deta, radius
-        )
+        xi, eta, dxi, deta, radius = xp.broadcast_arrays(xi, eta, dxi, deta, radius)
         metric = cs_coordinates.surface_metric_tensor(xi, eta, r=radius).reshape(xi.shape + (2, 2))
 
         dlxi = xp.sqrt(metric[..., 0, 0]) * dxi
         dleta = xp.sqrt(metric[..., 1, 1]) * deta
-        area_scale = xp.sqrt(
-            metric[..., 0, 0] * metric[..., 1, 1] - metric[..., 0, 1] ** 2
-        )
+        area_scale = xp.sqrt(metric[..., 0, 0] * metric[..., 1, 1] - metric[..., 0, 1] ** 2)
         dS = area_scale * dxi * deta
 
         return dlxi, dleta, dS

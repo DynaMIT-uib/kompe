@@ -46,9 +46,7 @@ def global_cs_derivative_matrices(
         ),
     )
 
-    offsets = np.hstack(
-        (np.r_[-stencil_half_width:0], np.r_[1 : stencil_half_width + 1])
-    )
+    offsets = np.hstack((np.r_[-stencil_half_width:0], np.r_[1 : stencil_half_width + 1]))
     offset_count = len(offsets)
     weights = np.repeat(finite_difference_weights(offsets, order=1, h=h), size)
     face_repeated = np.tile(face, offset_count)
@@ -111,9 +109,7 @@ def _cross_face_interpolation_matrix(
 
     xi = cs_coordinates.face_coordinate(i + 0.5, cells_per_face)
     eta = cs_coordinates.face_coordinate(j + 0.5, cells_per_face)
-    _, theta, phi = projection.cube_to_spherical(
-        xi, eta, face, radius=1.0, degrees=True
-    )
+    _, theta, phi = projection.cube_to_spherical(xi, eta, face, radius=1.0, degrees=True)
     new_xi, new_eta, new_face = projection.geographic_to_cube(phi, 90 - theta)
     new_i = new_xi / h + (cells_per_face - 1) / 2
     new_j = new_eta / h + (cells_per_face - 1) / 2

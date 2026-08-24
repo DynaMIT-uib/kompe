@@ -78,9 +78,7 @@ def test_global_projection_enu_basis_matches_ecef_convention():
     cube_to_cartesian = projection.cube_to_cartesian_vector_matrix(
         xi, eta, radius=radius, face=face
     )
-    enu_to_cube = projection.enu_to_cube_vector_matrix(
-        xi, eta, radius=radius, face=face
-    )
+    enu_to_cube = projection.enu_to_cube_vector_matrix(xi, eta, radius=radius, face=face)
     actual = np.einsum("nij,njk->nik", cube_to_cartesian, enu_to_cube)
 
     _, theta, longitude = projection.cube_to_spherical(
@@ -105,12 +103,8 @@ def test_global_projection_enu_transforms_are_finite_at_poles():
     xi = np.zeros(2)
     eta = np.zeros(2)
 
-    cube_to_enu = projection.cube_to_enu_vector_matrix(
-        xi, eta, radius=radius, face=face
-    )
-    enu_to_cube = projection.enu_to_cube_vector_matrix(
-        xi, eta, radius=radius, face=face
-    )
+    cube_to_enu = projection.cube_to_enu_vector_matrix(xi, eta, radius=radius, face=face)
+    enu_to_cube = projection.enu_to_cube_vector_matrix(xi, eta, radius=radius, face=face)
     expected_cube_to_enu = np.zeros((2, 3, 3))
     expected_cube_to_enu[:, 0, 0] = radius
     expected_cube_to_enu[:, 1, 1] = radius
@@ -145,9 +139,7 @@ def test_cube_vector_matrix_is_the_coordinate_jacobian():
     """Vector columns are derivatives of the coordinate transformation."""
     projection = GlobalCSProjection()
     xi, eta, radius, face = _interior_face_points()
-    jacobian = projection.cube_to_cartesian_vector_matrix(
-        xi, eta, radius=radius, face=face
-    )
+    jacobian = projection.cube_to_cartesian_vector_matrix(xi, eta, radius=radius, face=face)
     step = 1e-7
 
     derivatives = []
@@ -176,9 +168,7 @@ def test_global_projection_algebra_stays_on_jax_backend():
     projection = GlobalCSProjection()
 
     with backend_context("jax"):
-        xi, eta, radius, face = (
-            to_jax(values) for values in _interior_face_points()
-        )
+        xi, eta, radius, face = (to_jax(values) for values in _interior_face_points())
         longitude = to_jax(np.array([10.0, 100.0, -170.0, -80.0, 25.0, 25.0]))
         latitude = to_jax(np.array([10.0, 10.0, -10.0, -10.0, 70.0, -70.0]))
         cube_coordinates = projection.geographic_to_cube(longitude, latitude)
@@ -191,18 +181,10 @@ def test_global_projection_algebra_stays_on_jax_backend():
             *cube_coordinates,
             *cartesian,
             *spherical,
-            projection.cartesian_to_cube_vector_matrix(
-                xi, eta, radius=radius, face=face
-            ),
-            projection.cube_to_cartesian_vector_matrix(
-                xi, eta, radius=radius, face=face
-            ),
-            projection.enu_to_cube_vector_matrix(
-                xi, eta, radius=radius, face=face
-            ),
-            projection.cube_to_enu_vector_matrix(
-                xi, eta, radius=radius, face=face
-            ),
+            projection.cartesian_to_cube_vector_matrix(xi, eta, radius=radius, face=face),
+            projection.cube_to_cartesian_vector_matrix(xi, eta, radius=radius, face=face),
+            projection.enu_to_cube_vector_matrix(xi, eta, radius=radius, face=face),
+            projection.cube_to_enu_vector_matrix(xi, eta, radius=radius, face=face),
             projection.face_to_face_vector_matrix(xi, eta, face, (face + 1) % 6),
         )
         compiled_cartesian = jit(

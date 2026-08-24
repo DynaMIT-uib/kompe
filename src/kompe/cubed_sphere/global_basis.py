@@ -313,10 +313,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
         # These coefficients immediately enter SciPy sparse matrices. Keep
         # that CPU boundary explicit when the active numerical backend is JAX.
-        return tuple(
-            to_numpy(values)
-            for values in (dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi)
-        )
+        return tuple(to_numpy(values) for values in (dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi))
 
     def _get_derivative_bundle(self):
         """Build native-grid angular derivative operators."""

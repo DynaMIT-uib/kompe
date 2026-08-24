@@ -127,9 +127,7 @@ def rotate_spherical_by_matrix(
     if east is None:
         latitude, longitude = xp.broadcast_arrays(latitude, longitude)
     else:
-        latitude, longitude, east, north = xp.broadcast_arrays(
-            latitude, longitude, east, north
-        )
+        latitude, longitude, east, north = xp.broadcast_arrays(latitude, longitude, east, north)
     latitude = xp.asarray(latitude)
     longitude = xp.asarray(longitude)
     rotation = xp.asarray(rotation)
@@ -178,9 +176,7 @@ def _enu_basis(latitude, longitude, *, degrees=True):
     latitude = xp.asarray(latitude) * angle_scale
     longitude = xp.asarray(longitude) * angle_scale
 
-    east = xp.stack(
-        (-xp.sin(longitude), xp.cos(longitude), xp.zeros_like(longitude)), axis=-1
-    )
+    east = xp.stack((-xp.sin(longitude), xp.cos(longitude), xp.zeros_like(longitude)), axis=-1)
     north = xp.stack(
         (
             -xp.sin(latitude) * xp.cos(longitude),

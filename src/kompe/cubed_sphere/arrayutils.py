@@ -73,34 +73,25 @@ def invert_3x3_matrices(matrices):
 
     row_0 = xp.stack(
         (
-            matrices[:, 1, 1] * matrices[:, 2, 2]
-            - matrices[:, 1, 2] * matrices[:, 2, 1],
-            matrices[:, 0, 2] * matrices[:, 2, 1]
-            - matrices[:, 0, 1] * matrices[:, 2, 2],
-            matrices[:, 0, 1] * matrices[:, 1, 2]
-            - matrices[:, 0, 2] * matrices[:, 1, 1],
+            matrices[:, 1, 1] * matrices[:, 2, 2] - matrices[:, 1, 2] * matrices[:, 2, 1],
+            matrices[:, 0, 2] * matrices[:, 2, 1] - matrices[:, 0, 1] * matrices[:, 2, 2],
+            matrices[:, 0, 1] * matrices[:, 1, 2] - matrices[:, 0, 2] * matrices[:, 1, 1],
         ),
         axis=1,
     )
     row_1 = xp.stack(
         (
-            matrices[:, 1, 2] * matrices[:, 2, 0]
-            - matrices[:, 1, 0] * matrices[:, 2, 2],
-            matrices[:, 0, 0] * matrices[:, 2, 2]
-            - matrices[:, 0, 2] * matrices[:, 2, 0],
-            matrices[:, 0, 2] * matrices[:, 1, 0]
-            - matrices[:, 0, 0] * matrices[:, 1, 2],
+            matrices[:, 1, 2] * matrices[:, 2, 0] - matrices[:, 1, 0] * matrices[:, 2, 2],
+            matrices[:, 0, 0] * matrices[:, 2, 2] - matrices[:, 0, 2] * matrices[:, 2, 0],
+            matrices[:, 0, 2] * matrices[:, 1, 0] - matrices[:, 0, 0] * matrices[:, 1, 2],
         ),
         axis=1,
     )
     row_2 = xp.stack(
         (
-            matrices[:, 1, 0] * matrices[:, 2, 1]
-            - matrices[:, 1, 1] * matrices[:, 2, 0],
-            matrices[:, 0, 1] * matrices[:, 2, 0]
-            - matrices[:, 0, 0] * matrices[:, 2, 1],
-            matrices[:, 0, 0] * matrices[:, 1, 1]
-            - matrices[:, 0, 1] * matrices[:, 1, 0],
+            matrices[:, 1, 0] * matrices[:, 2, 1] - matrices[:, 1, 1] * matrices[:, 2, 0],
+            matrices[:, 0, 1] * matrices[:, 2, 0] - matrices[:, 0, 0] * matrices[:, 2, 1],
+            matrices[:, 0, 0] * matrices[:, 1, 1] - matrices[:, 0, 1] * matrices[:, 1, 0],
         ),
         axis=1,
     )

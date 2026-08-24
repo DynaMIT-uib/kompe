@@ -77,9 +77,7 @@ def test_identity_rotated_frame_preserves_coordinates(degrees):
 
 
 def test_matrix_rotation_rotates_positions_and_tangent_vectors_together():
-    quarter_turn_about_z = np.array(
-        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
-    )
+    quarter_turn_about_z = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
     latitude = np.array([[0.0], [45.0]])
     longitude = np.array([0.0, 30.0, -120.0])
     east = np.ones((2, 3))
@@ -105,9 +103,7 @@ def test_enu_ecef_round_trip_preserves_broadcast_grid_shape():
     longitude = np.array([0.0, 90.0, 140.0])
     vectors = np.arange(18.0).reshape(2, 3, 3)
 
-    actual = ecef_to_enu(
-        enu_to_ecef(vectors, latitude, longitude), latitude, longitude
-    )
+    actual = ecef_to_enu(enu_to_ecef(vectors, latitude, longitude), latitude, longitude)
 
     np.testing.assert_allclose(actual, vectors, rtol=1e-14, atol=1e-14)
 
