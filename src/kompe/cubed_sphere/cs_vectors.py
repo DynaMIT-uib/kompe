@@ -53,68 +53,30 @@ def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
     return xp.einsum("nij,njk->nik", face_rotation, local_jacobian)
 
 
-def _geographic_coordinate_to_cartesian_matrix(xi, eta, r=1, block=0):
-    """Return ``(longitude, latitude, radius)`` coordinate basis vectors."""
-    xp = get_array_module(xi, eta, r, block)
-    r, theta, phi = cs_coordinates.cube_to_spherical(
-        xi,
-        eta,
-        block,
-        r=r,
-        deg=False,
-    )
-    r, theta, phi = (value.reshape(-1) for value in xp.broadcast_arrays(r, theta, phi))
-    latitude = xp.pi / 2 - theta
-    sin_latitude = xp.sin(latitude)
-    cos_latitude = xp.cos(latitude)
-    sin_longitude = xp.sin(phi)
-    cos_longitude = xp.cos(phi)
+def _enu_to_cartesian_matrix(up):
+    """Return local east, north, and up basis vectors in ECEF components."""
+    xp = get_array_module(up)
+    up = xp.asarray(up)
+    longitude = xp.arctan2(up[:, 1], up[:, 0])
+    sin_longitude = xp.sin(longitude)
+    cos_longitude = xp.cos(longitude)
+    sin_colatitude = xp.hypot(up[:, 0], up[:, 1])
+    cos_colatitude = up[:, 2]
+    zeros = xp.zeros_like(longitude)
 
-    dposition_dlongitude = xp.stack(
+    east = xp.stack(
+        (-sin_longitude, cos_longitude, zeros),
+        axis=1,
+    )
+    north = xp.stack(
         (
-            -r * cos_latitude * sin_longitude,
-            r * cos_latitude * cos_longitude,
-            xp.zeros_like(r),
+            -cos_colatitude * cos_longitude,
+            -cos_colatitude * sin_longitude,
+            sin_colatitude,
         ),
         axis=1,
     )
-    dposition_dlatitude = xp.stack(
-        (
-            -r * sin_latitude * cos_longitude,
-            -r * sin_latitude * sin_longitude,
-            r * cos_latitude,
-        ),
-        axis=1,
-    )
-    dposition_dradius = xp.stack(
-        (
-            cos_latitude * cos_longitude,
-            cos_latitude * sin_longitude,
-            sin_latitude,
-        ),
-        axis=1,
-    )
-    return xp.stack(
-        (dposition_dlongitude, dposition_dlatitude, dposition_dradius),
-        axis=2,
-    )
-
-
-def _geographic_coordinate_to_cube_matrix(xi, eta, r=1, block=0):
-    """Return geographic-coordinate-to-CS component matrices."""
-    xp = get_array_module(xi, eta, r, block)
-    cartesian_to_cube = _cartesian_to_cube_matrix(xi, eta, r=r, block=block)
-    geographic_to_cartesian = _geographic_coordinate_to_cartesian_matrix(
-        xi, eta, r=r, block=block
-    )
-    return xp.einsum("nij,njk->nik", cartesian_to_cube, geographic_to_cartesian)
-
-
-def _cube_to_geographic_coordinate_matrix(xi, eta, r=1, block=0):
-    """Return CS-to-geographic-coordinate component matrices."""
-    return invert_3x3_matrices(
-        _geographic_coordinate_to_cube_matrix(xi, eta, r=r, block=block)
-    )
+    return xp.stack((east, north, up), axis=2)
 
 
 def _face_to_face_matrix(xi, eta, block_i, block_j):
@@ -133,19 +95,3 @@ def _face_to_face_matrix(xi, eta, block_i, block_j):
     cartesian_to_target = _cartesian_to_cube_matrix(xi_j, eta_j, block=block_j)
 
     return xp.einsum("nij,njk->nik", cartesian_to_target, source_to_cartesian)
-
-
-def _geographic_coordinate_to_enu_matrix(lat, r):
-    """Return geographic-coordinate-to-ENU component matrices."""
-    xp = get_array_module(lat, r)
-    lat, r = (value.reshape(-1) for value in xp.broadcast_arrays(lat, r))
-    scales = xp.stack(
-        (r * xp.cos(xp.deg2rad(lat)), r, xp.ones_like(r)),
-        axis=1,
-    )
-    return xp.eye(3, dtype=scales.dtype)[None, :, :] * scales[:, None, :]
-
-
-def _enu_to_geographic_coordinate_matrix(lat, r):
-    """Return ENU-to-geographic-coordinate component matrices."""
-    return invert_3x3_matrices(_geographic_coordinate_to_enu_matrix(lat, r))

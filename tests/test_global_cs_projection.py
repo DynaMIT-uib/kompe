@@ -5,6 +5,7 @@ import pytest
 
 from kompe import GlobalCSProjection
 from kompe.math import backend_context, jit, to_jax, to_numpy
+from kompe.spherical import enu_to_ecef
 
 
 def _interior_face_points():
@@ -66,6 +67,61 @@ def test_global_projection_vector_components_round_trip_on_every_face():
         np.linalg.norm(enu_vectors, axis=1),
         np.linalg.norm(cartesian_vectors, axis=1),
         rtol=2e-14,
+        atol=3e-15,
+    )
+
+
+def test_global_projection_enu_basis_matches_ecef_convention():
+    """The direct ENU bridge agrees with the shared geographic convention."""
+    projection = GlobalCSProjection()
+    xi, eta, radius, face = _interior_face_points()
+    cube_to_cartesian = projection.cube_to_cartesian_vector_matrix(
+        xi, eta, radius=radius, face=face
+    )
+    enu_to_cube = projection.enu_to_cube_vector_matrix(
+        xi, eta, radius=radius, face=face
+    )
+    actual = np.einsum("nij,njk->nik", cube_to_cartesian, enu_to_cube)
+
+    _, theta, longitude = projection.cube_to_spherical(
+        xi, eta, radius=radius, face=face, degrees=True
+    )
+    enu_basis_vectors = np.tile(np.eye(3), (face.size, 1))
+    expected = enu_to_ecef(
+        enu_basis_vectors,
+        np.repeat(90.0 - theta, 3),
+        np.repeat(longitude, 3),
+    ).reshape(face.size, 3, 3)
+    expected = expected.transpose(0, 2, 1)
+
+    np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=3e-15)
+
+
+def test_global_projection_enu_transforms_are_finite_at_poles():
+    """Direct Cartesian ENU bases avoid longitude-coordinate singularities."""
+    projection = GlobalCSProjection()
+    radius = np.array([1.0, 2.0])
+    face = np.array([4, 5])
+    xi = np.zeros(2)
+    eta = np.zeros(2)
+
+    cube_to_enu = projection.cube_to_enu_vector_matrix(
+        xi, eta, radius=radius, face=face
+    )
+    enu_to_cube = projection.enu_to_cube_vector_matrix(
+        xi, eta, radius=radius, face=face
+    )
+    expected_cube_to_enu = np.zeros((2, 3, 3))
+    expected_cube_to_enu[:, 0, 0] = radius
+    expected_cube_to_enu[:, 1, 1] = radius
+    expected_cube_to_enu[:, 2, 2] = 1.0
+
+    assert np.isfinite(cube_to_enu).all()
+    assert np.isfinite(enu_to_cube).all()
+    np.testing.assert_allclose(cube_to_enu, expected_cube_to_enu, atol=3e-15)
+    np.testing.assert_allclose(
+        np.einsum("nij,njk->nik", cube_to_enu, enu_to_cube),
+        np.broadcast_to(np.eye(3), (2, 3, 3)),
         atol=3e-15,
     )
 

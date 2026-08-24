@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
+from kompe.cubed_sphere.arrayutils import invert_3x3_matrices
 from kompe.math.backend import get_array_module
 
 
@@ -100,48 +101,34 @@ class GlobalCSProjection:
     @staticmethod
     def enu_to_cube_vector_matrix(xi, eta, radius=1, face=0):
         """Return ENU-to-``(xi, eta, radial)`` component matrices."""
-        _, theta, _ = cs_coordinates.cube_to_spherical(
-            xi,
-            eta,
-            face,
-            r=radius,
-            deg=True,
-        )
-        geographic_to_cube = cs_vectors._geographic_coordinate_to_cube_matrix(
+        cube_to_cartesian = cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
             r=radius,
             block=face,
         )
-        enu_to_geographic = cs_vectors._enu_to_geographic_coordinate_matrix(
-            90.0 - theta,
-            radius,
+        cartesian_to_cube = invert_3x3_matrices(cube_to_cartesian)
+        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(
+            cube_to_cartesian[:, :, 2]
         )
-        xp = get_array_module(geographic_to_cube, enu_to_geographic)
-        return xp.einsum("nij,njk->nik", geographic_to_cube, enu_to_geographic)
+        xp = get_array_module(cartesian_to_cube, enu_to_cartesian)
+        return xp.einsum("nij,njk->nik", cartesian_to_cube, enu_to_cartesian)
 
     @staticmethod
     def cube_to_enu_vector_matrix(xi, eta, radius=1, face=0):
         """Return ``(xi, eta, radial)``-to-ENU component matrices."""
-        _, theta, _ = cs_coordinates.cube_to_spherical(
-            xi,
-            eta,
-            face,
-            r=radius,
-            deg=True,
-        )
-        cube_to_geographic = cs_vectors._cube_to_geographic_coordinate_matrix(
+        cube_to_cartesian = cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
             r=radius,
             block=face,
         )
-        geographic_to_enu = cs_vectors._geographic_coordinate_to_enu_matrix(
-            90.0 - theta,
-            radius,
+        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(
+            cube_to_cartesian[:, :, 2]
         )
-        xp = get_array_module(geographic_to_enu, cube_to_geographic)
-        return xp.einsum("nij,njk->nik", geographic_to_enu, cube_to_geographic)
+        xp = get_array_module(enu_to_cartesian, cube_to_cartesian)
+        cartesian_to_enu = xp.swapaxes(enu_to_cartesian, 1, 2)
+        return xp.einsum("nij,njk->nik", cartesian_to_enu, cube_to_cartesian)
 
     @staticmethod
     def face_to_face_vector_matrix(xi, eta, source_face, target_face):
