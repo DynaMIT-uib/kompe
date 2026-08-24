@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
+from kompe.math.backend import get_array_module, to_numpy
 from kompe.spherical import ecef_to_enu, enu_to_ecef
 
 _DATA_PATH = Path(__file__).resolve().parents[1] / "data"
@@ -13,20 +14,24 @@ _NORTH_FACE = 4
 
 def _rotate_spherical_coordinates(lon, lat, rotation):
     """Rotate spherical coordinates with a Cartesian rotation matrix."""
-    lon, lat = np.broadcast_arrays(np.asarray(lon, dtype=float), np.asarray(lat, dtype=float))
+    xp = get_array_module(lon, lat)
+    lon, lat = xp.broadcast_arrays(xp.asarray(lon), xp.asarray(lat))
     shape = lon.shape
-    lon = np.deg2rad(lon.reshape(-1))
-    lat = np.deg2rad(lat.reshape(-1))
-    xyz = np.column_stack(
+    lon = xp.deg2rad(lon.reshape(-1))
+    lat = xp.deg2rad(lat.reshape(-1))
+    xyz = xp.stack(
         (
-            np.cos(lat) * np.cos(lon),
-            np.cos(lat) * np.sin(lon),
-            np.sin(lat),
-        )
+            xp.cos(lat) * xp.cos(lon),
+            xp.cos(lat) * xp.sin(lon),
+            xp.sin(lat),
+        ),
+        axis=1,
     )
-    rotated = np.einsum("ij,nj->ni", rotation, xyz)
-    rotated_lon = np.rad2deg(np.arctan2(rotated[:, 1], rotated[:, 0]))
-    rotated_lat = np.rad2deg(np.arctan2(rotated[:, 2], np.hypot(rotated[:, 0], rotated[:, 1])))
+    rotated = xp.einsum("ij,nj->ni", xp.asarray(rotation), xyz)
+    rotated_lon = xp.rad2deg(xp.arctan2(rotated[:, 1], rotated[:, 0]))
+    rotated_lat = xp.rad2deg(
+        xp.arctan2(rotated[:, 2], xp.hypot(rotated[:, 0], rotated[:, 1]))
+    )
     return rotated_lon.reshape(shape), rotated_lat.reshape(shape)
 
 
@@ -89,10 +94,12 @@ class RegionalCSProjection:
         )
 
         # On the north face, increasing xi follows the local Cartesian y axis.
-        self.local_y_axis = enu_to_ecef(
-            orientation_enu,
-            np.array(self.lat0),
-            np.array(self.lon0),
+        self.local_y_axis = to_numpy(
+            enu_to_ecef(
+                orientation_enu,
+                np.array(self.lat0),
+                np.array(self.lon0),
+            )
         ).flatten()
 
         # Complete the right-handed local Cartesian frame.
@@ -155,7 +162,8 @@ class RegionalCSProjection:
             converted to local coordinates. Unit is radians.
 
         """
-        lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
+        xp = get_array_module(lon, lat)
+        lon, lat = xp.broadcast_arrays(xp.asarray(lon), xp.asarray(lat))
         local_lon, local_lat = self.geographic_to_local(lon, lat)
         xi, eta, _ = cs_coordinates.geographic_to_cube(
             local_lon,
@@ -165,8 +173,8 @@ class RegionalCSProjection:
 
         on_local_hemisphere = local_lat >= 0
         return (
-            np.where(on_local_hemisphere, xi, np.nan),
-            np.where(on_local_hemisphere, eta, np.nan),
+            xp.where(on_local_hemisphere, xi, xp.nan),
+            xp.where(on_local_hemisphere, eta, xp.nan),
         )
 
     def cube_to_geographic(self, xi, eta):
@@ -190,7 +198,8 @@ class RegionalCSProjection:
 
 
         """
-        xi, eta = np.broadcast_arrays(np.asarray(xi, dtype=float), np.asarray(eta, dtype=float))
+        xp = get_array_module(xi, eta)
+        xi, eta = xp.broadcast_arrays(xp.asarray(xi), xp.asarray(eta))
         _, theta, phi = cs_coordinates.cube_to_spherical(
             xi,
             eta,
@@ -262,21 +271,33 @@ class RegionalCSProjection:
             upward component is the same in the two coordinate systems.
             N is the size of lon and lat (they will be flattened)
         """
-        lon, lat = map(np.ravel, np.broadcast_arrays(lon, lat))
+        xp = get_array_module(lon, lat)
+        lon, lat = (
+            value.reshape(-1) for value in xp.broadcast_arrays(lon, lat)
+        )
         geographic_lon, geographic_lat = self.local_to_geographic(lon, lat)
-        local_east = enu_to_ecef(np.tile((1.0, 0.0, 0.0), (lon.size, 1)), lat, lon)
-        local_north = enu_to_ecef(np.tile((0.0, 1.0, 0.0), (lon.size, 1)), lat, lon)
+        local_east = enu_to_ecef(
+            xp.broadcast_to(xp.asarray((1.0, 0.0, 0.0)), (lon.size, 3)),
+            lat,
+            lon,
+        )
+        local_north = enu_to_ecef(
+            xp.broadcast_to(xp.asarray((0.0, 1.0, 0.0)), (lon.size, 3)),
+            lat,
+            lon,
+        )
+        local_to_geographic = xp.asarray(self.local_to_geographic_matrix)
         geographic_east = ecef_to_enu(
-            np.einsum("ij,nj->ni", self.local_to_geographic_matrix, local_east),
+            xp.einsum("ij,nj->ni", local_to_geographic, local_east),
             geographic_lat,
             geographic_lon,
         )[:, :2]
         geographic_north = ecef_to_enu(
-            np.einsum("ij,nj->ni", self.local_to_geographic_matrix, local_north),
+            xp.einsum("ij,nj->ni", local_to_geographic, local_north),
             geographic_lat,
             geographic_lon,
         )[:, :2]
-        return np.stack((geographic_east, geographic_north), axis=2)
+        return xp.stack((geographic_east, geographic_north), axis=2)
 
     def geographic_vector_to_cube(self, east, north, lon, lat):
         """Project geographic tangent vectors into cube-coordinate components.
@@ -304,24 +325,29 @@ class RegionalCSProjection:
             N element array of vector components in eta direction
 
         """
-        east, north, lon, lat = map(
-            np.ravel,
-            np.broadcast_arrays(east, north, lon, lat),
+        xp = get_array_module(east, north, lon, lat)
+        east, north, lon, lat = (
+            value.reshape(-1)
+            for value in xp.broadcast_arrays(east, north, lon, lat)
         )
         xi, eta = self.geographic_to_cube(lon, lat)
         geographic_ecef = enu_to_ecef(
-            np.column_stack((east, north, np.zeros_like(east))),
+            xp.stack((east, north, xp.zeros_like(east)), axis=1),
             lat,
             lon,
         )
-        local_ecef = np.einsum("ij,nj->ni", self.geographic_to_local_matrix, geographic_ecef)
+        local_ecef = xp.einsum(
+            "ij,nj->ni",
+            xp.asarray(self.geographic_to_local_matrix),
+            geographic_ecef,
+        )
         cube_matrix = cs_vectors._cartesian_to_cube_matrix(
             xi,
             eta,
             r=1.0,
             block=_NORTH_FACE,
         )
-        cube = np.einsum("nij,nj->ni", cube_matrix, local_ecef)
+        cube = xp.einsum("nij,nj->ni", cube_matrix, local_ecef)
         return xi, eta, cube[:, 0], cube[:, 1]
 
     def cube_vector_to_geographic(self, Axi, Aeta, xi, eta):
@@ -350,20 +376,25 @@ class RegionalCSProjection:
             N element array of vector components in north direction
 
         """
-        Axi, Aeta, xi, eta = map(
-            np.ravel,
-            np.broadcast_arrays(Axi, Aeta, xi, eta),
+        xp = get_array_module(Axi, Aeta, xi, eta)
+        Axi, Aeta, xi, eta = (
+            value.reshape(-1)
+            for value in xp.broadcast_arrays(Axi, Aeta, xi, eta)
         )
         lon, lat = self.cube_to_geographic(xi, eta)
-        cube = np.column_stack((Axi, Aeta, np.zeros_like(Axi)))
+        cube = xp.stack((Axi, Aeta, xp.zeros_like(Axi)), axis=1)
         cartesian_matrix = cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
             r=1.0,
             block=_NORTH_FACE,
         )
-        local_ecef = np.einsum("nij,nj->ni", cartesian_matrix, cube)
-        geographic_ecef = np.einsum("ij,nj->ni", self.local_to_geographic_matrix, local_ecef)
+        local_ecef = xp.einsum("nij,nj->ni", cartesian_matrix, cube)
+        geographic_ecef = xp.einsum(
+            "ij,nj->ni",
+            xp.asarray(self.local_to_geographic_matrix),
+            local_ecef,
+        )
         geographic = ecef_to_enu(geographic_ecef, lat, lon)
         return lon, lat, geographic[:, 0], geographic[:, 1]
 
@@ -411,12 +442,17 @@ class RegionalCSProjection:
             Area(s) of surface element(s), in steradians or in
             squared units of ``radius``
         """
-        xi, eta, dxi, deta, radius = np.broadcast_arrays(xi, eta, dxi, deta, radius)
+        xp = get_array_module(xi, eta, dxi, deta, radius)
+        xi, eta, dxi, deta, radius = xp.broadcast_arrays(
+            xi, eta, dxi, deta, radius
+        )
         metric = cs_coordinates.surface_metric_tensor(xi, eta, r=radius).reshape(xi.shape + (2, 2))
 
-        dlxi = np.sqrt(metric[..., 0, 0]) * dxi
-        dleta = np.sqrt(metric[..., 1, 1]) * deta
-        area_scale = np.sqrt(metric[..., 0, 0] * metric[..., 1, 1] - metric[..., 0, 1] ** 2)
+        dlxi = xp.sqrt(metric[..., 0, 0]) * dxi
+        dleta = xp.sqrt(metric[..., 1, 1]) * deta
+        area_scale = xp.sqrt(
+            metric[..., 0, 0] * metric[..., 1, 1] - metric[..., 0, 1] ** 2
+        )
         dS = area_scale * dxi * deta
 
         return dlxi, dleta, dS

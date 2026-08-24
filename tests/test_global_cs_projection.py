@@ -1,8 +1,10 @@
 """Tests for global cubed-sphere coordinate and vector transformations."""
 
 import numpy as np
+import pytest
 
 from kompe import GlobalCSProjection
+from kompe.math import backend_context, jit, to_jax, to_numpy
 
 
 def _interior_face_points():
@@ -81,3 +83,96 @@ def test_global_projection_coordinate_directions_are_tangential():
 
     np.testing.assert_allclose(xi_enu[:, 2], 0.0, rtol=0.0, atol=2e-15)
     np.testing.assert_allclose(eta_enu[:, 2], 0.0, rtol=0.0, atol=2e-15)
+
+
+def test_cube_vector_matrix_is_the_coordinate_jacobian():
+    """Vector columns are derivatives of the coordinate transformation."""
+    projection = GlobalCSProjection()
+    xi, eta, radius, face = _interior_face_points()
+    jacobian = projection.cube_to_cartesian_vector_matrix(
+        xi, eta, radius=radius, face=face
+    )
+    step = 1e-7
+
+    derivatives = []
+    for dxi, deta, dr in ((step, 0.0, 0.0), (0.0, step, 0.0), (0.0, 0.0, step)):
+        plus = projection.cube_to_cartesian(
+            xi + dxi,
+            eta + deta,
+            radius=radius + dr,
+            face=face,
+        )
+        minus = projection.cube_to_cartesian(
+            xi - dxi,
+            eta - deta,
+            radius=radius - dr,
+            face=face,
+        )
+        derivatives.append((np.stack(plus, axis=1) - np.stack(minus, axis=1)) / (2 * step))
+
+    finite_difference_jacobian = np.stack(derivatives, axis=2)
+    np.testing.assert_allclose(jacobian, finite_difference_jacobian, rtol=2e-8, atol=2e-9)
+
+
+@pytest.mark.requires_jax
+def test_global_projection_algebra_stays_on_jax_backend():
+    """Coordinate, metric, and vector algebra preserve device arrays."""
+    projection = GlobalCSProjection()
+
+    with backend_context("jax"):
+        xi, eta, radius, face = (
+            to_jax(values) for values in _interior_face_points()
+        )
+        longitude = to_jax(np.array([10.0, 100.0, -170.0, -80.0, 25.0, 25.0]))
+        latitude = to_jax(np.array([10.0, 10.0, -10.0, -10.0, 70.0, -70.0]))
+        cube_coordinates = projection.geographic_to_cube(longitude, latitude)
+        cartesian = projection.cube_to_cartesian(xi, eta, radius=radius, face=face)
+        spherical = projection.cube_to_spherical(xi, eta, radius=radius, face=face)
+        arrays = (
+            projection.metric_delta(xi, eta),
+            projection.metric_tensor(xi, eta, radius=radius),
+            projection.face_index(longitude, latitude),
+            *cube_coordinates,
+            *cartesian,
+            *spherical,
+            projection.cartesian_to_cube_vector_matrix(
+                xi, eta, radius=radius, face=face
+            ),
+            projection.cube_to_cartesian_vector_matrix(
+                xi, eta, radius=radius, face=face
+            ),
+            projection.enu_to_cube_vector_matrix(
+                xi, eta, radius=radius, face=face
+            ),
+            projection.cube_to_enu_vector_matrix(
+                xi, eta, radius=radius, face=face
+            ),
+            projection.face_to_face_vector_matrix(xi, eta, face, (face + 1) % 6),
+        )
+        compiled_cartesian = jit(
+            lambda xi_values, eta_values, face_values: projection.cube_to_cartesian(
+                xi_values,
+                eta_values,
+                face=face_values,
+            )
+        )(xi, eta, face)
+        compiled_vector_matrix = jit(
+            lambda xi_values, eta_values, radius_values, face_values: (
+                projection.enu_to_cube_vector_matrix(
+                    xi_values,
+                    eta_values,
+                    radius=radius_values,
+                    face=face_values,
+                )
+            )
+        )(xi, eta, radius, face)
+
+    assert all("jax" in type(array).__module__ for array in arrays)
+    assert all("jax" in type(array).__module__ for array in compiled_cartesian)
+    assert "jax" in type(compiled_vector_matrix).__module__
+    np.testing.assert_allclose(
+        np.linalg.norm(np.column_stack(tuple(map(to_numpy, cartesian))), axis=1),
+        to_numpy(radius),
+        rtol=2e-14,
+        atol=2e-15,
+    )

@@ -311,7 +311,12 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         deta_dtheta = pc[:, 1, 0] * dx_dtheta + pc[:, 1, 1] * dy_dtheta + pc[:, 1, 2] * dz_dtheta
         deta_dphi = pc[:, 1, 0] * dx_dphi + pc[:, 1, 1] * dy_dphi + pc[:, 1, 2] * dz_dphi
 
-        return dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi
+        # These coefficients immediately enter SciPy sparse matrices. Keep
+        # that CPU boundary explicit when the active numerical backend is JAX.
+        return tuple(
+            to_numpy(values)
+            for values in (dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi)
+        )
 
     def _get_derivative_bundle(self):
         """Build native-grid angular derivative operators."""

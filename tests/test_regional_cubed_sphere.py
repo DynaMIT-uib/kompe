@@ -18,6 +18,7 @@ from kompe import (
 )
 from kompe.cubed_sphere import REGIONAL_CS_MESH_SCHEMA, REGIONAL_CS_MESH_SCHEMA_VERSION
 from kompe.cubed_sphere.regional_plotting import RegionalCSPlotter
+from kompe.math import backend_context, jit, to_jax, to_numpy
 
 
 def _longitude_error(actual, expected):
@@ -189,6 +190,67 @@ def test_regional_vector_components_roundtrip_at_face_centre_and_away():
     np.testing.assert_allclose(actual_lat, lat, atol=2e-14)
     np.testing.assert_allclose(actual_east, east, atol=2e-14)
     np.testing.assert_allclose(actual_north, north, atol=2e-14)
+
+
+@pytest.mark.requires_jax
+def test_regional_projection_algebra_stays_on_jax_backend():
+    """Regional coordinate, vector, and metric operations preserve JAX arrays."""
+    projection = RegionalCSProjection((18.0, 67.0), 37.0)
+    mesh = RegionalCSMesh(
+        projection,
+        1800.0,
+        1400.0,
+        shape=(5, 4),
+        radius=6371.2,
+    )
+
+    with backend_context("jax"):
+        xi = to_jax(np.array([0.0, 0.07, -0.11, 0.23]))
+        eta = to_jax(np.array([0.0, -0.08, 0.16, 0.12]))
+        east = to_jax(np.array([1.0, 1.2, -0.7, 0.3]))
+        north = to_jax(np.array([0.0, -0.4, 0.9, 1.4]))
+        lon, lat = projection.cube_to_geographic(xi, eta)
+        actual_xi, actual_eta = projection.geographic_to_cube(lon, lat)
+        rotation = projection.local_to_geographic_enu_rotation(lon, lat)
+        _, _, cube_xi, cube_eta = projection.geographic_vector_to_cube(
+            east, north, lon, lat
+        )
+        _, _, actual_east, actual_north = projection.cube_vector_to_geographic(
+            cube_xi, cube_eta, xi, eta
+        )
+        elements = projection.differential_elements(xi, eta, 0.03, 0.04)
+        values = to_jax(2 * mesh.xi - 3 * mesh.eta)
+        interpolated = mesh.operators.interpolate_scalar(
+            values,
+            to_jax(mesh.lon),
+            to_jax(mesh.lat),
+        )
+        compiled_interpolation = jit(mesh.operators.interpolate_scalar)(
+            values,
+            to_jax(mesh.lon),
+            to_jax(mesh.lat),
+        )
+
+    arrays = (
+        lon,
+        lat,
+        actual_xi,
+        actual_eta,
+        rotation,
+        cube_xi,
+        cube_eta,
+        actual_east,
+        actual_north,
+        *elements,
+        interpolated,
+        compiled_interpolation,
+    )
+    assert all("jax" in type(array).__module__ for array in arrays)
+    np.testing.assert_allclose(to_numpy(actual_xi), to_numpy(xi), atol=2e-14)
+    np.testing.assert_allclose(to_numpy(actual_eta), to_numpy(eta), atol=2e-14)
+    np.testing.assert_allclose(to_numpy(actual_east), to_numpy(east), atol=2e-14)
+    np.testing.assert_allclose(to_numpy(actual_north), to_numpy(north), atol=2e-14)
+    np.testing.assert_allclose(to_numpy(interpolated), to_numpy(values), atol=2e-14)
 
 
 def test_regional_vector_components_match_coordinate_directional_derivative():

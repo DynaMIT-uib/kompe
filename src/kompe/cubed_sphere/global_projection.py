@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
+from kompe.math.backend import get_array_module
 
 
 class GlobalCSProjection:
@@ -108,17 +107,18 @@ class GlobalCSProjection:
             r=radius,
             deg=True,
         )
-        coordinate_to_cube = cs_vectors._spherical_coordinate_to_cube_matrix(
+        geographic_to_cube = cs_vectors._geographic_coordinate_to_cube_matrix(
             xi,
             eta,
             r=radius,
             block=face,
         )
-        enu_to_coordinate = cs_vectors._enu_to_spherical_coordinate_matrix(
+        enu_to_geographic = cs_vectors._enu_to_geographic_coordinate_matrix(
             90.0 - theta,
             radius,
         )
-        return np.einsum("nij,njk->nik", coordinate_to_cube, enu_to_coordinate)
+        xp = get_array_module(geographic_to_cube, enu_to_geographic)
+        return xp.einsum("nij,njk->nik", geographic_to_cube, enu_to_geographic)
 
     @staticmethod
     def cube_to_enu_vector_matrix(xi, eta, radius=1, face=0):
@@ -130,17 +130,18 @@ class GlobalCSProjection:
             r=radius,
             deg=True,
         )
-        cube_to_coordinate = cs_vectors._cube_to_spherical_coordinate_matrix(
+        cube_to_geographic = cs_vectors._cube_to_geographic_coordinate_matrix(
             xi,
             eta,
             r=radius,
             block=face,
         )
-        coordinate_to_enu = cs_vectors._spherical_coordinate_to_enu_matrix(
+        geographic_to_enu = cs_vectors._geographic_coordinate_to_enu_matrix(
             90.0 - theta,
             radius,
         )
-        return np.einsum("nij,njk->nik", coordinate_to_enu, cube_to_coordinate)
+        xp = get_array_module(geographic_to_enu, cube_to_geographic)
+        return xp.einsum("nij,njk->nik", geographic_to_enu, cube_to_geographic)
 
     @staticmethod
     def face_to_face_vector_matrix(xi, eta, source_face, target_face):

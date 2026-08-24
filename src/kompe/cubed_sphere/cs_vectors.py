@@ -2,215 +2,150 @@
 
 from __future__ import annotations
 
-import numpy as np
-
 from kompe.cubed_sphere import cs_coordinates
 from kompe.cubed_sphere.arrayutils import invert_3x3_matrices
+from kompe.math.backend import get_array_module
 
 
 def _cartesian_to_cube_matrix(xi, eta, r=1, block=0):
     """Return Cartesian-to-CS contravariant transform matrices."""
-    xi, et, r, block = map(np.ravel, np.broadcast_arrays(xi, eta, r, block))
-    delta = cs_coordinates.metric_delta(xi, et)
-    pc = np.empty((delta.size, 3, 3))
-
-    rsec2xi = r / np.cos(xi) ** 2
-    rsec2et = r / np.cos(et) ** 2
-
-    mask = block == 0
-    pc[mask, 0, 0] = -np.sqrt(delta[mask]) * np.tan(xi[mask]) / rsec2xi[mask]
-    pc[mask, 0, 1] = np.sqrt(delta[mask]) / rsec2xi[mask]
-    pc[mask, 0, 2] = 0
-    pc[mask, 1, 0] = -np.sqrt(delta[mask]) * np.tan(et[mask]) / rsec2et[mask]
-    pc[mask, 1, 1] = 0
-    pc[mask, 1, 2] = np.sqrt(delta[mask]) / rsec2et[mask]
-    pc[mask, 2, 0] = 1 / np.sqrt(delta[mask])
-    pc[mask, 2, 1] = np.tan(xi[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 2] = np.tan(et[mask]) / np.sqrt(delta[mask])
-
-    mask = block == 1
-    pc[mask, 0, 0] = -np.sqrt(delta[mask]) / rsec2xi[mask]
-    pc[mask, 0, 1] = -np.sqrt(delta[mask]) * np.tan(xi[mask]) / rsec2xi[mask]
-    pc[mask, 0, 2] = 0
-    pc[mask, 1, 0] = 0
-    pc[mask, 1, 1] = -np.sqrt(delta[mask]) * np.tan(et[mask]) / rsec2et[mask]
-    pc[mask, 1, 2] = np.sqrt(delta[mask]) / rsec2et[mask]
-    pc[mask, 2, 0] = -np.tan(xi[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 1] = 1 / np.sqrt(delta[mask])
-    pc[mask, 2, 2] = np.tan(et[mask]) / np.sqrt(delta[mask])
-
-    mask = block == 2
-    pc[mask, 0, 0] = np.sqrt(delta[mask]) * np.tan(xi[mask]) / rsec2xi[mask]
-    pc[mask, 0, 1] = -np.sqrt(delta[mask]) / rsec2xi[mask]
-    pc[mask, 0, 2] = 0
-    pc[mask, 1, 0] = np.sqrt(delta[mask]) * np.tan(et[mask]) / rsec2et[mask]
-    pc[mask, 1, 1] = 0
-    pc[mask, 1, 2] = np.sqrt(delta[mask]) / rsec2et[mask]
-    pc[mask, 2, 0] = -1 / np.sqrt(delta[mask])
-    pc[mask, 2, 1] = -np.tan(xi[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 2] = np.tan(et[mask]) / np.sqrt(delta[mask])
-
-    mask = block == 3
-    pc[mask, 0, 0] = np.sqrt(delta[mask]) / rsec2xi[mask]
-    pc[mask, 0, 1] = np.sqrt(delta[mask]) * np.tan(xi[mask]) / rsec2xi[mask]
-    pc[mask, 0, 2] = 0
-    pc[mask, 1, 0] = 0
-    pc[mask, 1, 1] = np.sqrt(delta[mask]) * np.tan(et[mask]) / rsec2et[mask]
-    pc[mask, 1, 2] = np.sqrt(delta[mask]) / rsec2et[mask]
-    pc[mask, 2, 0] = np.tan(xi[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 1] = -1 / np.sqrt(delta[mask])
-    pc[mask, 2, 2] = np.tan(et[mask]) / np.sqrt(delta[mask])
-
-    mask = block == 4
-    pc[mask, 0, 0] = 0
-    pc[mask, 0, 1] = np.sqrt(delta[mask]) / rsec2xi[mask]
-    pc[mask, 0, 2] = -np.sqrt(delta[mask]) * np.tan(xi[mask]) / rsec2xi[mask]
-    pc[mask, 1, 0] = -np.sqrt(delta[mask]) / rsec2et[mask]
-    pc[mask, 1, 1] = 0
-    pc[mask, 1, 2] = -np.sqrt(delta[mask]) * np.tan(et[mask]) / rsec2et[mask]
-    pc[mask, 2, 0] = -np.tan(et[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 1] = np.tan(xi[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 2] = 1 / np.sqrt(delta[mask])
-
-    mask = block == 5
-    pc[mask, 0, 0] = 0
-    pc[mask, 0, 1] = np.sqrt(delta[mask]) / rsec2xi[mask]
-    pc[mask, 0, 2] = np.sqrt(delta[mask]) * np.tan(xi[mask]) / rsec2xi[mask]
-    pc[mask, 1, 0] = np.sqrt(delta[mask]) / rsec2et[mask]
-    pc[mask, 1, 1] = 0
-    pc[mask, 1, 2] = np.sqrt(delta[mask]) * np.tan(et[mask]) / rsec2et[mask]
-    pc[mask, 2, 0] = np.tan(et[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 1] = np.tan(xi[mask]) / np.sqrt(delta[mask])
-    pc[mask, 2, 2] = -1 / np.sqrt(delta[mask])
-
-    return pc
+    return invert_3x3_matrices(_cube_to_cartesian_matrix(xi, eta, r=r, block=block))
 
 
 def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
-    """Return CS-to-Cartesian contravariant transform matrices."""
-    return invert_3x3_matrices(_cartesian_to_cube_matrix(xi, eta, r=r, block=block))
+    """Return CS-to-Cartesian contravariant transform matrices.
 
-
-def _spherical_coordinate_to_cube_matrix(xi, eta, r=1, block=0):
-    """Return spherical-to-CS contravariant transform matrices."""
-    xi, et, r, block = map(np.ravel, np.broadcast_arrays(xi, eta, r, block))
-    delta = cs_coordinates.metric_delta(xi, et)
-    ps = np.empty((delta.size, 3, 3))
-
-    mask = block == 0
-    ps[mask, 0, 0] = 1
-    ps[mask, 0, 1] = 0
-    ps[mask, 0, 2] = 0
-    ps[mask, 1, 0] = np.tan(xi[mask]) * np.sin(et[mask]) * np.cos(et[mask])
-    ps[mask, 1, 1] = np.cos(xi[mask]) * np.sin(et[mask]) ** 2 + np.cos(et[mask]) ** 2 / np.cos(
-        xi[mask]
+    The columns are the coordinate basis vectors
+    ``(d x/dxi, d x/deta, d x/dr)`` in ECEF components.
+    """
+    xp = get_array_module(xi, eta, r, block)
+    xi, eta, r, block = (
+        value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, r, block)
     )
-    ps[mask, 1, 2] = 0
-    ps[mask, 2, 0] = 0
-    ps[mask, 2, 1] = 0
-    ps[mask, 2, 2] = 1
+    block = block.astype(int)
 
-    mask = block == 1
-    ps[mask, 0, 0] = 1
-    ps[mask, 0, 1] = 0
-    ps[mask, 0, 2] = 0
-    ps[mask, 1, 0] = np.tan(xi[mask]) * np.sin(et[mask]) * np.cos(et[mask])
-    ps[mask, 1, 1] = np.cos(xi[mask]) * np.sin(et[mask]) ** 2 + np.cos(et[mask]) ** 2 / np.cos(
-        xi[mask]
+    X = xp.tan(xi)
+    Y = xp.tan(eta)
+    delta = 1 + X**2 + Y**2
+    sqrt_delta = xp.sqrt(delta)
+    face_position = xp.stack((xp.ones_like(X), X, Y), axis=1)
+    unit_position = face_position / sqrt_delta[:, None]
+
+    dX_dxi = 1 + X**2
+    dY_deta = 1 + Y**2
+    zeros = xp.zeros_like(X)
+    dface_dxi = xp.stack((zeros, dX_dxi, zeros), axis=1)
+    dface_deta = xp.stack((zeros, zeros, dY_deta), axis=1)
+    dunit_dxi = (
+        dface_dxi / sqrt_delta[:, None]
+        - face_position * (X * dX_dxi / delta**1.5)[:, None]
     )
-    ps[mask, 1, 2] = 0
-    ps[mask, 2, 0] = 0
-    ps[mask, 2, 1] = 0
-    ps[mask, 2, 2] = 1
-
-    mask = block == 2
-    ps[mask, 0, 0] = 1
-    ps[mask, 0, 1] = 0
-    ps[mask, 0, 2] = 0
-    ps[mask, 1, 0] = np.tan(xi[mask]) * np.sin(et[mask]) * np.cos(et[mask])
-    ps[mask, 1, 1] = np.cos(xi[mask]) * np.sin(et[mask]) ** 2 + np.cos(et[mask]) ** 2 / np.cos(
-        xi[mask]
+    dunit_deta = (
+        dface_deta / sqrt_delta[:, None]
+        - face_position * (Y * dY_deta / delta**1.5)[:, None]
     )
-    ps[mask, 1, 2] = 0
-    ps[mask, 2, 0] = 0
-    ps[mask, 2, 1] = 0
-    ps[mask, 2, 2] = 1
 
-    mask = block == 3
-    ps[mask, 0, 0] = 1
-    ps[mask, 0, 1] = 0
-    ps[mask, 0, 2] = 0
-    ps[mask, 1, 0] = np.tan(xi[mask]) * np.sin(et[mask]) * np.cos(et[mask])
-    ps[mask, 1, 1] = np.cos(xi[mask]) * np.sin(et[mask]) ** 2 + np.cos(et[mask]) ** 2 / np.cos(
-        xi[mask]
+    local_jacobian = xp.stack(
+        (r[:, None] * dunit_dxi, r[:, None] * dunit_deta, unit_position),
+        axis=2,
     )
-    ps[mask, 1, 2] = 0
-    ps[mask, 2, 0] = 0
-    ps[mask, 2, 1] = 0
-    ps[mask, 2, 2] = 1
+    face_rotation = xp.asarray(cs_coordinates._FACE_TO_CARTESIAN)[block]
+    return xp.einsum("nij,njk->nik", face_rotation, local_jacobian)
 
-    mask = block == 4
-    ps[mask, 0, 0] = -(np.cos(xi[mask]) ** 2) * np.tan(et[mask])
-    ps[mask, 0, 1] = (
-        -delta[mask] * np.tan(xi[mask]) * np.cos(xi[mask]) ** 2 / np.sqrt(delta[mask] - 1)
+
+def _geographic_coordinate_to_cartesian_matrix(xi, eta, r=1, block=0):
+    """Return ``(longitude, latitude, radius)`` coordinate basis vectors."""
+    xp = get_array_module(xi, eta, r, block)
+    r, theta, phi = cs_coordinates.cube_to_spherical(
+        xi,
+        eta,
+        block,
+        r=r,
+        deg=False,
     )
-    ps[mask, 0, 2] = 0
-    ps[mask, 1, 0] = np.cos(et[mask]) ** 2 * np.tan(xi[mask])
-    ps[mask, 1, 1] = (
-        -delta[mask] * np.tan(et[mask]) * np.cos(et[mask]) ** 2 / np.sqrt(delta[mask] - 1)
+    r, theta, phi = (value.reshape(-1) for value in xp.broadcast_arrays(r, theta, phi))
+    latitude = xp.pi / 2 - theta
+    sin_latitude = xp.sin(latitude)
+    cos_latitude = xp.cos(latitude)
+    sin_longitude = xp.sin(phi)
+    cos_longitude = xp.cos(phi)
+
+    dposition_dlongitude = xp.stack(
+        (
+            -r * cos_latitude * sin_longitude,
+            r * cos_latitude * cos_longitude,
+            xp.zeros_like(r),
+        ),
+        axis=1,
     )
-    ps[mask, 1, 2] = 0
-    ps[mask, 2, 0] = 0
-    ps[mask, 2, 1] = 0
-    ps[mask, 2, 2] = 1
-
-    mask = block == 5
-    ps[mask, 0, 0] = np.cos(xi[mask]) ** 2 * np.tan(et[mask])
-    ps[mask, 0, 1] = (
-        delta[mask] * np.tan(xi[mask]) * np.cos(xi[mask]) ** 2 / np.sqrt(delta[mask] - 1)
+    dposition_dlatitude = xp.stack(
+        (
+            -r * sin_latitude * cos_longitude,
+            -r * sin_latitude * sin_longitude,
+            r * cos_latitude,
+        ),
+        axis=1,
     )
-    ps[mask, 0, 2] = 0
-    ps[mask, 1, 0] = -(np.cos(et[mask]) ** 2) * np.tan(xi[mask])
-    ps[mask, 1, 1] = (
-        delta[mask] * np.tan(et[mask]) * np.cos(et[mask]) ** 2 / np.sqrt(delta[mask] - 1)
+    dposition_dradius = xp.stack(
+        (
+            cos_latitude * cos_longitude,
+            cos_latitude * sin_longitude,
+            sin_latitude,
+        ),
+        axis=1,
     )
-    ps[mask, 1, 2] = 0
-    ps[mask, 2, 0] = 0
-    ps[mask, 2, 1] = 0
-    ps[mask, 2, 2] = 1
-
-    return ps
+    return xp.stack(
+        (dposition_dlongitude, dposition_dlatitude, dposition_dradius),
+        axis=2,
+    )
 
 
-def _cube_to_spherical_coordinate_matrix(xi, eta, r=1, block=0):
-    """Return CS-to-spherical-coordinate component matrices."""
-    return invert_3x3_matrices(_spherical_coordinate_to_cube_matrix(xi, eta, r=r, block=block))
+def _geographic_coordinate_to_cube_matrix(xi, eta, r=1, block=0):
+    """Return geographic-coordinate-to-CS component matrices."""
+    xp = get_array_module(xi, eta, r, block)
+    cartesian_to_cube = _cartesian_to_cube_matrix(xi, eta, r=r, block=block)
+    geographic_to_cartesian = _geographic_coordinate_to_cartesian_matrix(
+        xi, eta, r=r, block=block
+    )
+    return xp.einsum("nij,njk->nik", cartesian_to_cube, geographic_to_cartesian)
+
+
+def _cube_to_geographic_coordinate_matrix(xi, eta, r=1, block=0):
+    """Return CS-to-geographic-coordinate component matrices."""
+    return invert_3x3_matrices(
+        _geographic_coordinate_to_cube_matrix(xi, eta, r=r, block=block)
+    )
 
 
 def _face_to_face_matrix(xi, eta, block_i, block_j):
     """Return component transforms between CS blocks."""
-    xi_i, eta_i, block_i, block_j = map(np.ravel, np.broadcast_arrays(xi, eta, block_i, block_j))
+    xp = get_array_module(xi, eta, block_i, block_j)
+    xi_i, eta_i, block_i, block_j = (
+        value.reshape(-1)
+        for value in xp.broadcast_arrays(xi, eta, block_i, block_j)
+    )
 
-    source_to_spherical = _cube_to_spherical_coordinate_matrix(xi_i, eta_i, r=1, block=block_i)
-    _, theta, phi = cs_coordinates.cube_to_spherical(xi_i, eta_i, r=1, block=block_i, deg=True)
+    source_to_cartesian = _cube_to_cartesian_matrix(xi_i, eta_i, block=block_i)
+    _, theta, phi = cs_coordinates.cube_to_spherical(
+        xi_i, eta_i, block_i, deg=True
+    )
     xi_j, eta_j, _ = cs_coordinates.geographic_to_cube(phi, 90 - theta, block=block_j)
-    spherical_to_target = _spherical_coordinate_to_cube_matrix(xi_j, eta_j, r=1, block=block_j)
+    cartesian_to_target = _cartesian_to_cube_matrix(xi_j, eta_j, block=block_j)
 
-    return np.einsum("nij, njk -> nik", spherical_to_target, source_to_spherical)
-
-
-def _spherical_coordinate_to_enu_matrix(lat, r):
-    """Return spherical component normalization matrices."""
-    lat, r = map(np.ravel, np.broadcast_arrays(lat, r))
-
-    q = np.zeros((lat.size, 3, 3), dtype=np.float64)
-    q[:, 0, 0] = r * np.cos(np.deg2rad(lat))
-    q[:, 1, 1] = r
-    q[:, 2, 2] = 1
-
-    return q
+    return xp.einsum("nij,njk->nik", cartesian_to_target, source_to_cartesian)
 
 
-def _enu_to_spherical_coordinate_matrix(lat, r):
-    """Return ENU-to-spherical-coordinate component matrices."""
-    return invert_3x3_matrices(_spherical_coordinate_to_enu_matrix(lat, r))
+def _geographic_coordinate_to_enu_matrix(lat, r):
+    """Return geographic-coordinate-to-ENU component matrices."""
+    xp = get_array_module(lat, r)
+    lat, r = (value.reshape(-1) for value in xp.broadcast_arrays(lat, r))
+    scales = xp.stack(
+        (r * xp.cos(xp.deg2rad(lat)), r, xp.ones_like(r)),
+        axis=1,
+    )
+    return xp.eye(3, dtype=scales.dtype)[None, :, :] * scales[:, None, :]
+
+
+def _enu_to_geographic_coordinate_matrix(lat, r):
+    """Return ENU-to-geographic-coordinate component matrices."""
+    return invert_3x3_matrices(_geographic_coordinate_to_enu_matrix(lat, r))

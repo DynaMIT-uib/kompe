@@ -8,16 +8,17 @@ from scipy import sparse as scipy_sparse
 from kompe.cubed_sphere import cs_coordinates, cs_vectors, finite_differences
 from kompe.cubed_sphere.regional_mesh import RegionalCSMesh
 from kompe.cubed_sphere.regional_projection import _NORTH_FACE
-from kompe.math import as_linear_map
+from kompe.math import as_linear_map, get_array_module
 
 
 def _interpolation_axis(position, first_center, spacing, count):
     """Return neighbouring indices and fractions on one uniform cell-centre axis."""
+    xp = get_array_module(position)
     if count == 1:
-        index = np.zeros(position.size, dtype=int)
-        return index, index, np.zeros(position.size)
+        index = xp.zeros(position.size, dtype=int)
+        return index, index, xp.zeros(position.size)
     coordinate = (position - first_center) / spacing
-    lower = np.clip(np.floor(coordinate).astype(int), 0, count - 2)
+    lower = xp.clip(xp.floor(coordinate).astype(int), 0, count - 2)
     return lower, lower + 1, coordinate - lower
 
 
@@ -293,8 +294,9 @@ class RegionalCSOperators:
         locations.
         """
         grid = self.mesh
-        lon, lat = np.broadcast_arrays(np.asarray(lon), np.asarray(lat))
-        scalar_values = np.asarray(values).reshape(-1)
+        xp = get_array_module(values, lon, lat)
+        lon, lat = xp.broadcast_arrays(xp.asarray(lon), xp.asarray(lat))
+        scalar_values = xp.asarray(values).reshape(-1)
         if scalar_values.size != grid.size:
             raise ValueError(
                 f"values must contain {grid.size} grid values; got {scalar_values.size}"
@@ -307,35 +309,31 @@ class RegionalCSOperators:
             & (eta >= grid.eta_min - coordinate_tolerance)
             & (eta <= grid.eta_max + coordinate_tolerance)
         )
-        xi_inside = xi[inside]
-        eta_inside = eta[inside]
+        # Outside values are replaced only for safe array indexing; the final
+        # result retains NaN there. This also avoids dynamic boolean slices in
+        # JAX-compiled interpolation.
+        xi_for_interpolation = xp.where(inside, xi, grid.xi[0, 0])
+        eta_for_interpolation = xp.where(inside, eta, grid.eta[0, 0])
         i0, i1, eta_fraction = _interpolation_axis(
-            eta_inside,
+            eta_for_interpolation,
             grid.eta[0, 0],
             grid.deta,
             grid.n_eta,
         )
         j0, j1, xi_fraction = _interpolation_axis(
-            xi_inside,
+            xi_for_interpolation,
             grid.xi[0, 0],
             grid.dxi,
             grid.n_xi,
         )
         field = scalar_values.reshape(grid.shape)
-        interpolated_inside = (
+        interpolated = (
             (1 - eta_fraction) * (1 - xi_fraction) * field[i0, j0]
             + eta_fraction * (1 - xi_fraction) * field[i1, j0]
             + eta_fraction * xi_fraction * field[i1, j1]
             + (1 - eta_fraction) * xi_fraction * field[i0, j1]
         )
-        interpolated = np.full(
-            lat.size,
-            np.nan,
-            dtype=np.result_type(interpolated_inside, float),
-        )
-        interpolated[inside] = interpolated_inside
-
-        return interpolated.reshape(lat.shape)
+        return xp.where(inside, interpolated, xp.nan).reshape(lat.shape)
 
 
 __all__ = ["RegionalCSOperators"]
