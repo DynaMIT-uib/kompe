@@ -259,28 +259,18 @@ class RegionalCSProjection:
             value.reshape(-1) for value in xp.broadcast_arrays(lon, lat)
         )
         geographic_lon, geographic_lat = self.local_to_geographic(lon, lat)
-        local_east = enu_to_ecef(
-            xp.broadcast_to(xp.asarray((1.0, 0.0, 0.0)), (lon.size, 3)),
-            lat,
-            lon,
-        )
-        local_north = enu_to_ecef(
-            xp.broadcast_to(xp.asarray((0.0, 1.0, 0.0)), (lon.size, 3)),
-            lat,
-            lon,
-        )
+        local_enu_basis = xp.broadcast_to(xp.eye(3), (lon.size, 3, 3))
+        local_ecef_basis = enu_to_ecef(local_enu_basis, lat[:, None], lon[:, None])
         local_to_geographic = xp.asarray(self.local_to_geographic_matrix)
-        geographic_east = ecef_to_enu(
-            xp.einsum("ij,nj->ni", local_to_geographic, local_east),
-            geographic_lat,
-            geographic_lon,
-        )[:, :2]
-        geographic_north = ecef_to_enu(
-            xp.einsum("ij,nj->ni", local_to_geographic, local_north),
-            geographic_lat,
-            geographic_lon,
-        )[:, :2]
-        return xp.stack((geographic_east, geographic_north), axis=2)
+        geographic_ecef_basis = xp.einsum(
+            "ij,nkj->nki", local_to_geographic, local_ecef_basis
+        )
+        geographic_enu_basis = ecef_to_enu(
+            geographic_ecef_basis,
+            geographic_lat[:, None],
+            geographic_lon[:, None],
+        )
+        return xp.swapaxes(geographic_enu_basis, -1, -2)[:, :2, :2]
 
     def geographic_vector_to_cube(self, east, north, lon, lat):
         """Project geographic tangent vectors into cube-coordinate components.

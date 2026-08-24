@@ -4,6 +4,7 @@ import numpy as np
 
 from kompe.constants import EARTH_RADIUS_M, MU0
 from kompe.math.backend import get_array_module
+from kompe.spherical import ecef_to_enu
 
 DEGREES_TO_RADIANS = np.pi / 180
 
@@ -27,6 +28,36 @@ def _unit_ecef_vectors(xp, latitude, longitude):
         axis=1,
     )
     return position
+
+
+def _spherical_secs_geometry(lat, lon, pole_latitudes, pole_longitudes):
+    """Return angular distance and poleward directions for SECS kernels."""
+    xp = get_array_module(lat, lon, pole_latitudes, pole_longitudes)
+    evaluation_position = _unit_ecef_vectors(xp, lat, lon)
+    pole_position = _unit_ecef_vectors(xp, pole_latitudes, pole_longitudes)
+
+    # Unit tangent from each evaluation point towards each pole (N x P x 3).
+    poleward_ecef = pole_position[None, :, :] - evaluation_position[:, None, :]
+    poleward_ecef -= (
+        xp.einsum("npi,ni->np", poleward_ecef, evaluation_position)[..., None]
+        * evaluation_position[:, None, :]
+    )
+    poleward_norm = xp.linalg.norm(poleward_ecef, axis=-1)[..., None]
+    if xp is np:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            poleward_ecef = poleward_ecef / poleward_norm
+    else:
+        poleward_ecef = poleward_ecef / poleward_norm
+
+    poleward_enu = ecef_to_enu(
+        poleward_ecef,
+        xp.asarray(lat).reshape(-1, 1),
+        xp.asarray(lon).reshape(-1, 1),
+    )[..., :2]
+    theta = xp.arccos(
+        _clip_dot_product(xp.einsum("ni,pi->np", evaluation_position, pole_position))
+    )
+    return xp, evaluation_position, poleward_enu, theta
 
 
 def angular_distance(lat, lon, pole_latitudes, pole_longitudes, return_degrees=False):
@@ -115,74 +146,9 @@ def surface_current_matrices(
         Juusola (2020).
     """
 
-    xp = get_array_module(lat, lon, pole_latitudes, pole_longitudes)
-
-    # Coordinates are columns so point-pole combinations broadcast naturally.
-    evaluation_latitude = xp.asarray(lat).flatten()[:, None] * DEGREES_TO_RADIANS
-    evaluation_longitude = xp.asarray(lon).flatten()[:, None] * DEGREES_TO_RADIANS
-    pole_latitude = xp.asarray(pole_latitudes).flatten()[None, :] * DEGREES_TO_RADIANS
-    pole_longitude = xp.asarray(pole_longitudes).flatten()[None, :] * DEGREES_TO_RADIANS
-
-    # Unit ECEF positions: N evaluation points and P poles.
-    evaluation_position = xp.hstack(
-        (
-            xp.cos(evaluation_latitude) * xp.cos(evaluation_longitude),
-            xp.cos(evaluation_latitude) * xp.sin(evaluation_longitude),
-            xp.sin(evaluation_latitude),
-        )
+    xp, _, poleward_enu, theta = _spherical_secs_geometry(
+        lat, lon, pole_latitudes, pole_longitudes
     )
-
-    pole_position = xp.vstack(
-        (
-            xp.cos(pole_latitude) * xp.cos(pole_longitude),
-            xp.cos(pole_latitude) * xp.sin(pole_longitude),
-            xp.sin(pole_latitude),
-        )
-    ).T
-
-    # Unit tangent from each evaluation point towards each pole (N x P x 3).
-    poleward_ecef = pole_position[None, :, :] - evaluation_position[:, None, :]
-    poleward_ecef = (
-        poleward_ecef
-        - xp.einsum("ijk,ik->ij", poleward_ecef, evaluation_position)[:, :, None]
-        * evaluation_position[:, None, :]
-    )
-    if xp is np:
-        with np.errstate(invalid="ignore", divide="ignore"):
-            poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
-    else:
-        poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
-
-    # ECEF-to-ENU rotation at each evaluation point.
-    ecef_to_enu_matrix = xp.hstack(
-        (
-            xp.dstack(
-                (
-                    -xp.sin(evaluation_longitude),
-                    xp.cos(evaluation_longitude),
-                    xp.zeros_like(evaluation_latitude),
-                )
-            ),
-            xp.dstack(
-                (
-                    -xp.cos(evaluation_longitude) * xp.sin(evaluation_latitude),
-                    -xp.sin(evaluation_longitude) * xp.sin(evaluation_latitude),
-                    xp.cos(evaluation_latitude),
-                )
-            ),
-            xp.dstack(
-                (
-                    xp.cos(evaluation_longitude) * xp.cos(evaluation_latitude),
-                    xp.sin(evaluation_longitude) * xp.cos(evaluation_latitude),
-                    xp.sin(evaluation_latitude),
-                )
-            ),
-        )
-    )
-
-    poleward_enu = xp.einsum("lij, lkj->lki", ecef_to_enu_matrix, poleward_ecef)[
-        :, :, :-1
-    ]  # Remove the radial component, which is zero to roundoff.
 
     if current_type == "divergence_free":
         # Rotate the poleward tangent clockwise in the local horizontal plane.
@@ -194,10 +160,6 @@ def surface_current_matrices(
     else:
         raise ValueError('current_type must be "divergence_free" or "curl_free"')
 
-    theta = xp.arccos(
-        _clip_dot_product(xp.einsum("ij,kj->ik", pole_position, evaluation_position))
-    )
-    # This equation is pole-by-point; transpose once at the public return boundary.
     current_magnitude = normalization / xp.tan(theta / 2) / source_radius
 
     # Equations 2.43--2.44 in Vanhamäki and Juusola (2020).
@@ -207,9 +169,9 @@ def surface_current_matrices(
         regularized = normalization * alpha * xp.tan(theta / 2) / source_radius
         current_magnitude = xp.where(theta < theta0, regularized, current_magnitude)
 
-    east = current_magnitude * current_direction[:, :, 0].T
-    north = current_magnitude * current_direction[:, :, 1].T
-    return east.T, north.T
+    east = current_magnitude * current_direction[:, :, 0]
+    north = current_magnitude * current_direction[:, :, 1]
+    return east, north
 
 
 def magnetic_field_matrices(
@@ -256,83 +218,20 @@ def magnetic_field_matrices(
     """
 
     xp = get_array_module(lat, lon, r, pole_latitudes, pole_longitudes)
-
-    evaluation_latitude = xp.asarray(lat).flatten()[:, None] * DEGREES_TO_RADIANS
-    evaluation_longitude = xp.asarray(lon).flatten()[:, None] * DEGREES_TO_RADIANS
-    pole_latitude = xp.asarray(pole_latitudes).flatten()[None, :] * DEGREES_TO_RADIANS
-    pole_longitude = xp.asarray(pole_longitudes).flatten()[None, :] * DEGREES_TO_RADIANS
+    xp, evaluation_position, poleward_enu, theta = _spherical_secs_geometry(
+        xp.asarray(lat),
+        xp.asarray(lon),
+        xp.asarray(pole_latitudes),
+        xp.asarray(pole_longitudes),
+    )
 
     evaluation_radius = xp.asarray(r)
     if evaluation_radius.size == 1:
-        evaluation_radius = xp.ones_like(evaluation_latitude) * evaluation_radius
+        evaluation_radius = xp.broadcast_to(
+            evaluation_radius.reshape(1, 1), (evaluation_position.shape[0], 1)
+        )
     else:
         evaluation_radius = evaluation_radius.flatten()[:, None]
-
-    evaluation_position = xp.hstack(
-        (
-            xp.cos(evaluation_latitude) * xp.cos(evaluation_longitude),
-            xp.cos(evaluation_latitude) * xp.sin(evaluation_longitude),
-            xp.sin(evaluation_latitude),
-        )
-    )
-
-    pole_position = xp.vstack(
-        (
-            xp.cos(pole_latitude) * xp.cos(pole_longitude),
-            xp.cos(pole_latitude) * xp.sin(pole_longitude),
-            xp.sin(pole_latitude),
-        )
-    ).T
-
-    # Unit tangent from each evaluation point towards each pole (N x P x 3).
-    poleward_ecef = pole_position[None, :, :] - evaluation_position[:, None, :]
-    poleward_ecef = (
-        poleward_ecef
-        - xp.einsum("ijk,ik->ij", poleward_ecef, evaluation_position)[:, :, None]
-        * evaluation_position[:, None, :]
-    )
-    # Coincident evaluation and pole locations are singular by construction.
-    # Suppress those local warnings without changing NumPy's process-global
-    # floating-point error policy for the caller.
-    if xp is np:
-        with np.errstate(invalid="ignore", divide="ignore"):
-            poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
-    else:
-        poleward_ecef = poleward_ecef / xp.linalg.norm(poleward_ecef, axis=2)[:, :, None]
-
-    ecef_to_enu_matrix = xp.hstack(
-        (
-            xp.dstack(
-                (
-                    -xp.sin(evaluation_longitude),
-                    xp.cos(evaluation_longitude),
-                    xp.zeros_like(evaluation_latitude),
-                )
-            ),
-            xp.dstack(
-                (
-                    -xp.cos(evaluation_longitude) * xp.sin(evaluation_latitude),
-                    -xp.sin(evaluation_longitude) * xp.sin(evaluation_latitude),
-                    xp.cos(evaluation_latitude),
-                )
-            ),
-            xp.dstack(
-                (
-                    xp.cos(evaluation_longitude) * xp.cos(evaluation_latitude),
-                    xp.sin(evaluation_longitude) * xp.cos(evaluation_latitude),
-                    xp.sin(evaluation_latitude),
-                )
-            ),
-        )
-    )
-
-    poleward_enu = xp.einsum("lij, lkj->lki", ecef_to_enu_matrix, poleward_ecef)[
-        :, :, :-1
-    ]  # Remove the radial component, which is zero to roundoff.
-
-    theta = xp.arccos(
-        _clip_dot_product(xp.einsum("ij, kj -> ik", evaluation_position, pole_position))
-    )
 
     below_current_sheet = evaluation_radius.flatten() <= source_radius
 
