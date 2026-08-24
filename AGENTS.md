@@ -1,23 +1,49 @@
 # Kompe development style
 
-Write numerical code for scientists who read, test, and compose it interactively.
+Write mathematical and numerical code for scientists who read, test, and compose it
+interactively.
 
-- Put mathematical objects, equations, and coordinate conventions before software machinery.
-  Organize numerical code so the derivation can be followed locally; keep caching,
+- Put mathematical objects, equations, units, and coordinate conventions before software
+  machinery. Organize numerical code so the derivation can be followed locally; keep caching,
   serialization, compatibility, and backend handling at clearly named boundaries.
+- Use `theta` (colatitude) and `phi` (longitude) for internal spherical coordinates. Canonical
+  tangential components are ordered `(theta, phi)`, equivalent to `(south, east)`. Use
+  latitude/longitude and east/north at geographic interfaces, state angle units explicitly,
+  and make conversions visible.
+- Keep mathematical roles precise: a grid stores evaluation points, a mesh owns topology and
+  geometry, a basis maps coefficients to fields and derivatives, a projection maps coordinates,
+  and a transform performs analysis and synthesis. Do not give one object several unrelated
+  roles merely for convenience.
 - Prefer direct equations and ordinary Python statements. Keep a helper only when it is reused,
-  isolates a difficult backend or numerical boundary, or makes an equation clearer.
-- Do not add a class, dataclass, protocol, registry, or wrapper when a function, dictionary,
-  array, or direct call says the same thing plainly.
-- Validate public inputs and numerical assumptions once. Internal routines should trust those
-  normalized values instead of accumulating repeated defensive checks and fallback paths.
-- Make unsupported behavior fail explicitly. Do not guess a backend, basis, shape, or algorithm
-  when the caller has not provided enough information.
-- Keep arrays, operators, bases, grids, and transforms inspectable from IPython. Abstractions
-  should correspond to real mathematical roles or ownership of reusable state.
-- Retain standard scientific symbols when they make comparison with equations easier. Prefer
-  plain, descriptive names for software-only concepts.
-- Add an abstraction only after identifying the concrete duplication or state ownership it
-  removes. Delete forwarding-only and single-use helpers when inlining is clearer.
+  isolates a difficult backend or numerical boundary, or makes an equation clearer. Delete
+  forwarding-only and single-use helpers when inlining is easier to follow.
+- Use a class or other abstraction when it represents a stable mathematical concept, owns
+  meaningful reusable state, isolates a necessary boundary, or removes concrete duplication.
+  Do not add a dataclass, protocol, registry, wrapper, or object merely to relay calls that a
+  function, dictionary, array, or direct expression states plainly.
+- Validate public inputs, coordinate and unit conversions, and numerical assumptions once.
+  Internal routines should trust normalized values instead of accumulating defensive checks
+  and fallback paths.
+- Make unsupported behavior fail explicitly. Do not guess a basis, shape, coordinate system,
+  or algorithm when the caller has not provided enough information.
+- Use one canonical public name and representation for each mathematical operation. Retain
+  standard symbols when they make comparison with equations easier, and prefer plain,
+  descriptive names for software-only concepts. Keep any necessary compatibility alias at a
+  public boundary rather than propagating it through the implementation.
+- Use Kompe's configured array-backend interface for operations supported by NumPy and JAX.
+  Do not add isolated NumPy/JAX branches or silently transfer device arrays to NumPy. Keep
+  SciPy algorithms, serialization, and plotting at explicit CPU boundaries, and make necessary
+  conversions visible.
+- Preserve useful operator structure such as diagonal, sparse, or matrix-free forms. Materialize
+  an operator only when repeated use benefits from it, reuse that materialization afterward,
+  and do not turn a diagonal vector into a dense matrix without a numerical reason.
+- Keep arrays, operators, bases, grids, meshes, projections, and transforms readily inspectable
+  from IPython. Composition should expose the mathematical action rather than hide it behind
+  dispatch or configuration machinery.
+- Test mathematical identities, coordinate conventions, operator action, numerical accuracy,
+  and rank-deficient or boundary cases at the level where they matter. Exercise portable
+  numerical paths with both NumPy and JAX, and test structured operators without requiring
+  unnecessary dense materialization.
 
-Preserve numerical behavior and backend compatibility, and run the relevant tests after changes.
+Preserve numerical behavior, performance, and backend compatibility, and run the relevant tests
+after changes.
