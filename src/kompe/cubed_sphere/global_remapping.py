@@ -269,6 +269,35 @@ class _GlobalCSRemapper:
             )
         return self.operator_cache[key]
 
+    def _panel_interpolation_points(self, theta, phi, xi_target, eta_target, face_target):
+        """Yield source and target points for interpolation on each cube face."""
+        th, ph = np.deg2rad(theta), np.deg2rad(phi)
+        position = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)))
+
+        for face in range(6):
+            _, theta_center, phi_center = self.basis.mesh.projection.cube_to_spherical(
+                0, 0, face, degrees=False
+            )
+            face_center = np.array(
+                [
+                    np.sin(theta_center) * np.cos(phi_center),
+                    np.sin(theta_center) * np.sin(phi_center),
+                    np.cos(theta_center),
+                ]
+            ).reshape(3, 1)
+            source_mask = np.sum(face_center * position, axis=0) > 0
+            xi_source, eta_source, _ = self.basis.mesh.projection.geographic_to_cube(
+                phi, 90 - theta, face=face
+            )
+            target_mask = face_target == face
+            yield (
+                face,
+                source_mask,
+                target_mask,
+                np.column_stack((xi_source[source_mask], eta_source[source_mask])),
+                np.column_stack((xi_target[target_mask], eta_target[target_mask])),
+            )
+
     def interpolate_vector(
         self, u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
     ):
@@ -306,9 +335,6 @@ class _GlobalCSRemapper:
             theta = theta_b.reshape(-1)
             phi = phi_b.reshape(-1)
 
-        th, ph = np.deg2rad(theta), np.deg2rad(phi)
-        position = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)))
-
         u_xi, u_eta, u_block = basis.mesh.projection.geographic_to_cube(phi, 90 - theta)
         geographic_to_panel = basis.mesh.projection.enu_to_cube_vector_matrix(
             u_xi, u_eta, radius=1, face=u_block
@@ -317,31 +343,21 @@ class _GlobalCSRemapper:
         panel_values = np.einsum("nij,nj...->ni...", geographic_to_panel, enu_values)
 
         interpolated_panel = np.empty((block.size, 3) + value_shape, dtype=np.float64)
-        for block_index in range(6):
+        for (
+            block_index,
+            source_mask,
+            target_mask,
+            source_points,
+            target_points,
+        ) in self._panel_interpolation_points(theta, phi, xi, eta, block):
             panel_rotation = basis.mesh.projection.face_to_face_vector_matrix(
                 u_xi, u_eta, u_block, block_index
             )
             values_on_panel = np.einsum("nij,nj...->ni...", panel_rotation, panel_values)
-
-            _, panel_theta, panel_phi = basis.mesh.projection.cube_to_spherical(
-                0, 0, block_index, degrees=False
-            )
-            panel_center = np.hstack(
-                (
-                    np.sin(panel_theta) * np.cos(panel_phi),
-                    np.sin(panel_theta) * np.sin(panel_phi),
-                    np.cos(panel_theta),
-                )
-            ).reshape((-1, 1))
-            source_mask = np.sum(panel_center * position, axis=0) > 0
-            source_xi, source_eta, _ = basis.mesh.projection.geographic_to_cube(
-                phi, 90 - theta, face=block_index
-            )
-            target_mask = block == block_index
             interpolated_panel[target_mask] = griddata(
-                np.column_stack((source_xi[source_mask], source_eta[source_mask])),
+                source_points,
                 values_on_panel[source_mask],
-                np.column_stack((xi[target_mask], eta[target_mask])),
+                target_points,
                 **kwargs,
             )
 
@@ -383,30 +399,19 @@ class _GlobalCSRemapper:
             theta = theta_broadcast.reshape(-1)
             phi = phi_broadcast.reshape(-1)
 
-        th, ph = np.deg2rad(theta), np.deg2rad(phi)
-        position = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)))
         interpolated = np.empty((block.size,) + value_shape, dtype=np.float64)
 
-        for block_index in range(6):
-            _, panel_theta, panel_phi = basis.mesh.projection.cube_to_spherical(
-                0, 0, block_index, degrees=False
-            )
-            panel_center = np.hstack(
-                (
-                    np.sin(panel_theta) * np.cos(panel_phi),
-                    np.sin(panel_theta) * np.sin(panel_phi),
-                    np.cos(panel_theta),
-                )
-            ).reshape((-1, 1))
-            source_mask = np.sum(panel_center * position, axis=0) > 0
-            source_xi, source_eta, _ = basis.mesh.projection.geographic_to_cube(
-                phi, 90 - theta, face=block_index
-            )
-            target_mask = block == block_index
+        for (
+            _,
+            source_mask,
+            target_mask,
+            source_points,
+            target_points,
+        ) in self._panel_interpolation_points(theta, phi, xi, eta, block):
             interpolated[target_mask] = griddata(
-                np.column_stack((source_xi[source_mask], source_eta[source_mask])),
+                source_points,
                 scalar_values[source_mask],
-                np.column_stack((xi[target_mask], eta[target_mask])),
+                target_points,
                 **kwargs,
             )
 

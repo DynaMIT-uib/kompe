@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from kompe.math.backend import get_array_module, to_numpy
-from kompe.math.linear_map import LinearMap
+from kompe.math.linear_map import LinearMap, _normal_matrix_diag_from_matmat
 
 _EINSUM_BATCH_LABELS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
@@ -325,21 +325,8 @@ class _EinsumMap:
 
     def _normal_matrix_diag_probe(self) -> np.ndarray:
         """Compute ``diag(A* A)`` by applying identity blocks."""
-        flat_in = math.prod(self.input_shape)
-        diag = np.zeros(flat_in, dtype=np.float64)
-        if flat_in == 0:
-            return diag
-
-        block_size = min(32, flat_in)
-        block = np.zeros((flat_in, block_size), dtype=self.dtype)
-        for start in range(0, flat_in, block_size):
-            stop = min(flat_in, start + block_size)
-            cols = stop - start
-            block[:, :cols] = 0
-            block[start:stop, :cols] = np.eye(cols, dtype=self.dtype)
-            res = np.asarray(self.matmat(block[:, :cols]))
-            diag[start:stop] = np.sum(np.abs(res) ** 2, axis=0).real
-        return diag
+        shape = (math.prod(self.output_shape), math.prod(self.input_shape))
+        return _normal_matrix_diag_from_matmat(shape, self.dtype, self.matmat)
 
     def _normal_diag_string(self) -> str:
         """Return an einsum string for ``diag(A* A)``."""

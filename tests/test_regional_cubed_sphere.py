@@ -63,9 +63,9 @@ def test_regional_plotter_rejects_unimplemented_grid_options():
 def test_regional_plotter_text_can_override_plot_limits(capsys):
     plotter = object.__new__(RegionalCSPlotter)
     plotter.ax = Mock()
-    plotter.grid = Mock()
-    plotter.grid.projection.geographic_to_cube.return_value = (0.25, -0.5)
-    plotter.grid.contains.return_value = False
+    plotter.mesh = Mock()
+    plotter.mesh.projection.geographic_to_cube.return_value = (0.25, -0.5)
+    plotter.mesh.contains.return_value = False
     plotted_text = object()
     plotter.ax.text.return_value = plotted_text
 
@@ -84,7 +84,7 @@ def test_km_grid_samples_each_axis_from_its_own_limits():
 
     plotter = object.__new__(RegionalCSPlotter)
     plotter.ax = Mock()
-    plotter.grid = Mock(
+    plotter.mesh = Mock(
         xi_min=-0.4,
         xi_max=0.4,
         eta_min=-0.1,
@@ -93,13 +93,13 @@ def test_km_grid_samples_each_axis_from_its_own_limits():
         width=400.0,
         radius=6371.2,
     )
-    plotter.grid.projection.differential_elements.side_effect = differential_elements
+    plotter.mesh.projection.differential_elements.side_effect = differential_elements
 
     plotter.add_km_grid(100.0)
 
     xi_for_eta_gridlines = differential_calls[2][0]
-    assert np.min(xi_for_eta_gridlines) == pytest.approx(2 * plotter.grid.xi_min)
-    assert np.max(xi_for_eta_gridlines) > 1.9 * plotter.grid.xi_max
+    assert np.min(xi_for_eta_gridlines) == pytest.approx(2 * plotter.mesh.xi_min)
+    assert np.max(xi_for_eta_gridlines) > 1.9 * plotter.mesh.xi_max
 
 
 @pytest.mark.parametrize("orientation", [0.0, 37.0, [0.6, 0.8]])
