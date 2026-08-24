@@ -412,6 +412,31 @@ def test_dense_solvers_preserve_jax_output_when_backend_enabled(solver_name):
 
 
 @pytest.mark.requires_jax
+def test_uncached_normal_pinv_stays_on_jax(monkeypatch):
+    """An in-memory JAX factorization does not cross through NumPy."""
+    import kompe.math.least_squares_problem as problem_module
+
+    problem = LeastSquaresProblem(
+        A=np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]]),
+        solution_shape=2,
+        data_shapes=3,
+    )
+    previous_backend = jax_enabled()
+
+    def reject_host_transfer(_array):
+        raise AssertionError("uncached JAX pseudo-inverse crossed to NumPy")
+
+    monkeypatch.setattr(problem_module, "to_numpy", reject_host_transfer)
+    try:
+        set_backend("jax")
+        normal_pinv = problem.dense_normal_pinv(1e-13)
+    finally:
+        set_backend(previous_backend)
+
+    assert "jax" in type(normal_pinv).__module__
+
+
+@pytest.mark.requires_jax
 def test_svd_solver_preserves_jax_output_when_backend_enabled():
     """SVD solver keeps JAX-facing assembly and output."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])

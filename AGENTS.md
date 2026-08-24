@@ -4,8 +4,18 @@ Write mathematical and numerical code for scientists who read, test, and compose
 interactively.
 
 - Put mathematical objects, equations, units, and coordinate conventions before software
-  machinery. Organize numerical code so the derivation can be followed locally; keep caching,
-  serialization, compatibility, and backend handling at clearly named boundaries.
+  machinery. Build reusable primitives for basis evaluation, coordinate transformations,
+  linear operators, interpolation, solvers, and backend-neutral array operations. Define each
+  at the mathematical level where its contract is complete, then let higher-level code compose
+  those primitives so the mathematical action remains visible.
+- Keep Kompe independent of PynaMIT's physical model. Functionality belongs here when it is
+  useful and meaningful as general spherical or numerical mathematics without MIT-specific
+  concepts; reuse alone is not a reason to widen Kompe's scope.
+- Organize modules around cohesive mathematical, numerical, or infrastructure roles, not around
+  line count or one class per file. Split a module when it mixes independently understandable
+  calculations or state ownership, but prefer shallow directories and direct navigation. Avoid
+  forwarding-only modules, generic utility collections, and fragmented call chains. Keep
+  caching, serialization, compatibility, and backend handling at clearly named boundaries.
 - Use `theta` (colatitude) and `phi` (longitude) for internal spherical coordinates. Canonical
   tangential components are ordered `(theta, phi)`, equivalent to `(south, east)`. Use
   latitude/longitude and east/north at geographic interfaces, state angle units explicitly,
@@ -30,6 +40,10 @@ interactively.
   standard symbols when they make comparison with equations easier, and prefer plain,
   descriptive names for software-only concepts. Keep any necessary compatibility alias at a
   public boundary rather than propagating it through the implementation.
+- Name transformations by their mathematical direction. Use projection or analysis for sampled
+  values to coefficients, and evaluation or synthesis for coefficients to field values. Make
+  coordinate systems, component order, domains, and codomains explicit at transformation
+  boundaries.
 - Use Kompe's configured array-backend interface for operations supported by NumPy and JAX.
   Do not add isolated NumPy/JAX branches or silently transfer device arrays to NumPy. Keep
   SciPy algorithms, serialization, and plotting at explicit CPU boundaries, and make necessary

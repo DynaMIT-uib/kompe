@@ -7,51 +7,28 @@ import scipy.sparse as sp
 
 from kompe.basis import SurfaceDifferentialBasis
 from kompe.cubed_sphere.cs_differencing import CSFiniteDifferences
-from kompe.cubed_sphere.global_mesh import GlobalCSMesh, _GlobalCSRemapper
+from kompe.cubed_sphere.global_mesh import GlobalCSMesh
+from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
 from kompe.math import as_linear_map, identity_linear_map
 from kompe.math.backend import get_array_module, jax_enabled, to_numpy
 from kompe.math.least_squares_solver import sparse_constrained_least_squares_map
 
 
 class GlobalCSBasis(SurfaceDifferentialBasis):
-    """Class for representing cubed sphere bases.
+    """Cell-centred scalar and Helmholtz basis on a global cubed sphere.
 
-    This module provides an implementation of the cubed sphere grid
-    system following methods from Yin et al. (2017). The cubed sphere
-    grid divides a sphere into six faces of a circumscribed cube,
-    providing nearly uniform grid resolution and avoiding pole
-    singularities. Each face uses a local (xi, eta) coordinate system
-    mapped to global spherical coordinates (theta, phi). It includes
-    tools for coordinate transformations, scalar and vector field
-    interpolation and manipulation, numerical differentiation, and
-    visualization utilities.
-
-    Native CS coefficients are stored at cell centers. Cell areas are
-    computed from the surrounding mapped cell corners, while
-    differential operators act on cell-centered values and return
-    cell-centered derivatives.
+    Each face uses local ``(xi, eta)`` coordinates mapped to spherical
+    ``(theta, phi)`` coordinates. Scalar coefficients live at cell centres;
+    gradients, Helmholtz fields, and Laplacians are evaluated from those
+    values. The associated :attr:`mesh` owns coordinates, topology, metric
+    values, and cell areas.
 
     Attributes
     ----------
     cells_per_face : int
         Number of grid cells along each cube-face edge.
-    xi : ndarray
-        Xi coordinates of native cell centers, in radians.
-    eta : ndarray
-        Eta coordinates of native cell centers, in radians.
-    theta : ndarray
-        Colatitude coordinates of native cell centers, in degrees.
-    phi : ndarray
-        Longitude coordinates of native cell centers, in degrees.
-    face : ndarray
-        Block indices (0-5) of native cell centers.
-    g : ndarray
-        Metric tensor
-    sqrt_detg : ndarray
-        Square root of determinant of the metric tensor.
-    unit_area : ndarray
-        Spherical quadrilateral area of each unit-sphere grid cell,
-        computed from mapped cell corners.
+    mesh : GlobalCSMesh
+        Native six-face mesh and its spherical geometry.
 
     Notes
     -----

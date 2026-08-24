@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
-from kompe.cubed_sphere.global_mesh import _GlobalCSRemapper
+from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
 from kompe.math import jax_enabled, set_backend, to_numpy
 from kompe.math.least_squares_solver import dense_full_rank_least_squares_map
 

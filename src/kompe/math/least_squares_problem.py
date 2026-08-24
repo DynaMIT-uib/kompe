@@ -178,12 +178,10 @@ class LeastSquaresProblem:
         key = (_backend_cache_key(xp), float(tolerance))
         if key not in self._dense_normal_pinv_cache:
 
-            def build():
+            def compute():
                 normal_matrix = self.dense_normal_matrix()
-                normal_pinv = to_numpy(
-                    synchronize_linalg_result(
-                        xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
-                    )
+                normal_pinv = synchronize_linalg_result(
+                    xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
                 )
                 # Repeated solves need the pseudo-inverse and the lazy
                 # system map, not the dense rectangular system or
@@ -195,8 +193,12 @@ class LeastSquaresProblem:
                 return normal_pinv
 
             if self.operator_cache is None or self.cache_identity is None:
-                value = xp.asarray(build())
+                value = compute()
             else:
+
+                def build():
+                    return to_numpy(compute())
+
                 cached = self.operator_cache.get_or_create(
                     "least_squares_normal_pinv",
                     {

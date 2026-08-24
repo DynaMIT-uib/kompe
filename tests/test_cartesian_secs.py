@@ -73,3 +73,21 @@ def test_curl_free_magnetic_field_is_one_sided_across_current_sheet():
 def test_cartesian_kernels_reject_unsupported_current_types(kernel):
     with pytest.raises(ValueError, match="current_type"):
         kernel([1.0], [0.0], [0.0], [0.0], [0.0], [0.0], current_type="potential")
+
+
+@pytest.mark.requires_jax
+@pytest.mark.parametrize("kernel", [cartesian_current_matrices, cartesian_magnetic_field_matrices])
+def test_cartesian_kernels_preserve_jax_arrays(kernel):
+    """Continuous CECS calculations stay on the input array backend."""
+    import jax.numpy as jnp
+
+    components = kernel(
+        jnp.asarray([1.0, 2.0]),
+        jnp.asarray([0.0, 1.0]),
+        jnp.asarray([0.0, 0.0]),
+        jnp.asarray([0.0, -1.0]),
+        jnp.asarray([2.0, -2.0]),
+        jnp.asarray([0.0, 0.0]),
+    )
+
+    assert all("jax" in type(component).__module__ for component in components)

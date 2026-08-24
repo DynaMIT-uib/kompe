@@ -16,8 +16,7 @@ authors = [
 ]
 dependencies = [
     "numpy>=1.26",
-    "packaging",
-    "scipy>=1.11",
+    "scipy>=1.15",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -74,8 +73,6 @@ convention = "numpy"
 [tool.ruff.lint.per-file-ignores]
 "src/kompe/cubed_sphere/diffutils.py" = ["D", "W291"]
 "src/kompe/cubed_sphere/plot.py" = ["B905", "D", "E501", "E701", "UP009", "W291", "W293"]
-"src/kompe/cubed_sphere/regional.py" = ["D", "E501", "W291", "W293"]
 "src/kompe/cubed_sphere/spherical.py" = ["D", "E501", "E712", "E731", "UP031", "W291"]
-"src/kompe/secs/cartesian.py" = ["D", "E501", "W291", "W293"]
 "src/kompe/secs/kernels.py" = ["D", "E501", "W291", "W293"]
 "tests/*.py" = ["D"]

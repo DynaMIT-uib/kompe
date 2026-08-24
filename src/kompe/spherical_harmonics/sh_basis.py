@@ -1,12 +1,10 @@
 """Spherical Harmonic Basis Class."""
 
 import math
-import warnings
 from collections import OrderedDict
 
 import numpy as np
-import scipy
-from packaging import version
+from scipy.special import assoc_legendre_p_all
 
 from kompe.basis import BasisSubset, SurfaceDifferentialBasis, _owned_readonly_array
 from kompe.math import as_linear_map
@@ -17,23 +15,6 @@ from kompe.spherical_harmonics.helpers import (
 )
 
 _EVALUATION_CACHE_VERSION = 1
-
-# Conditional Import for SciPy Version Compatibility
-# Check the SciPy version to import the correct, available function.
-_SCIPY_VERSION = version.parse(scipy.__version__)
-if _SCIPY_VERSION >= version.parse("1.15.0"):
-    _USE_MODERN_SCIPY = True
-    from scipy.special import assoc_legendre_p_all
-
-    # Define lpmn as None for clarity (not used in this path).
-    lpmn = None
-else:
-    _USE_MODERN_SCIPY = False
-    from scipy.special import lpmn
-
-    # Define assoc_legendre_p_all as None so the name exists for type
-    # hinting/clarity.
-    assoc_legendre_p_all = None
 
 
 def _double_factorial(n):
@@ -89,8 +70,7 @@ class SHBasis(SurfaceDifferentialBasis):
     - ``'scipy'``:
         Uses the trusted scipy library, with a precise analytical
         scaling factor applied to ensure identical output to the
-        ``'internal'`` method. It automatically selects the best
-        available scipy function.
+        ``'internal'`` method.
     """
 
     _grid_cache_size = 8
@@ -148,19 +128,8 @@ class SHBasis(SurfaceDifferentialBasis):
         self._init_coefficient_indices()
         self._init_normalization(schmidt_quasi_normalized)
 
-        # Use the flag set during the conditional import.
-        self._use_modern_scipy = _USE_MODERN_SCIPY
-
         if self.legendre_method == "scipy":
             self._compute_scipy_scaling_factors()
-
-            if not self._use_modern_scipy:
-                warnings.warn(
-                    f"Your SciPy version ({scipy.__version__}) is older than 1.15.0. Falling "
-                    "back to the deprecated 'lpmn' function. Please consider upgrading SciPy.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
 
         self.kind = "SH"
         self.index_names = ("n", "m")
@@ -350,14 +319,7 @@ class SHBasis(SurfaceDifferentialBasis):
         self.scipy_scaling_factors = factors
 
     def _get_legendre_scipy(self, theta, compute_derivative=False):
-        """Dispatcher for Scipy Legendre function calculation."""
-        if self._use_modern_scipy:
-            return self._get_legendre_scipy_modern(theta, compute_derivative)
-        else:
-            return self._get_legendre_scipy_legacy(theta, compute_derivative)
-
-    def _get_legendre_scipy_modern(self, theta, compute_derivative=False):
-        """Legendre functions via `assoc_legendre_p_all` function."""
+        """Return Legendre functions from SciPy."""
         cos_theta = np.cos(theta)
         sin_theta = np.sin(theta)
         diff_order = 1 if compute_derivative else 0
@@ -379,26 +341,6 @@ class SHBasis(SurfaceDifferentialBasis):
                 dp_dz_values = dp_dz_all[n, self.max_order + m].T
                 dp_dz = dp_dz_values * cs_phase
                 dP_std[:, i] = dp_dz * (-sin_theta)
-
-        P_scaled = P_std * self.scipy_scaling_factors
-        dP_scaled = dP_std * self.scipy_scaling_factors if compute_derivative else None
-        return P_scaled, dP_scaled
-
-    def _get_legendre_scipy_legacy(self, theta, compute_derivative=False):
-        """Legendre functions via `lpmn` function (SciPy<1.15)."""
-        theta = np.atleast_1d(theta)
-        cos_theta, sin_theta = np.cos(theta), np.sin(theta)
-        P_std = np.empty((theta.size, len(self.index_pairs)), dtype=np.float64)
-        dP_std = np.empty_like(P_std) if compute_derivative else None
-
-        for i, (ct, st) in enumerate(zip(cos_theta, sin_theta, strict=True)):
-            p_all, dp_dz_all = lpmn(self.max_order, self.max_degree, ct)
-            for j, (n, m) in enumerate(self.index_pairs):
-                cs_phase = (-1) ** m
-                P_std[i, j] = p_all[m, n] * cs_phase
-                if compute_derivative:
-                    dp_dz = dp_dz_all[m, n] * cs_phase
-                    dP_std[i, j] = dp_dz * (-st)
 
         P_scaled = P_std * self.scipy_scaling_factors
         dP_scaled = dP_std * self.scipy_scaling_factors if compute_derivative else None
