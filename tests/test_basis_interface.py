@@ -654,6 +654,8 @@ def test_csbasis_mean_free_projection_is_area_weighted_and_operator_preserving()
         cs_basis.scalar_mean_weights,
         cs_basis.mesh.cell_areas.reshape(-1) / np.sum(cs_basis.mesh.cell_areas.reshape(-1)),
     )
+    assert cs_basis.scalar_mean_weights is cs_basis.scalar_mean_weights
+    assert not cs_basis.scalar_mean_weights.flags.writeable
     assert cs_basis.scalar_mean(projected) == pytest.approx(0.0, abs=1e-14)
     np.testing.assert_allclose(
         cs_basis._surface_laplacian() @ projected,
@@ -680,12 +682,12 @@ def test_csbasis_cache_controls_do_not_change_numerical_results():
     expected = basis.scalar_evaluation_matrix(grid)
 
     populated = basis.cache_info()
-    assert populated["surface_matrices"] == 1
-    assert populated["surface_matrices"] <= populated["surface_max_size"]
+    assert populated["surface_operators"] == 1
+    assert populated["surface_operators"] <= populated["surface_max_size"]
 
     basis.clear_cache(shared_remaps=True)
     cleared = basis.cache_info()
-    assert cleared["surface_matrices"] == 0
+    assert cleared["surface_operators"] == 0
     assert cleared["remap_operators"]["size"] == 0
     assert cleared["shared_remap_matrices"]["size"] == 0
     np.testing.assert_allclose(basis.scalar_evaluation_matrix(grid), expected)
@@ -742,6 +744,30 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
         np.testing.assert_allclose(
             to_numpy(laplacian_values), to_numpy(cs_basis._surface_laplacian()) @ to_numpy(values)
         )
+    finally:
+        set_backend(previous_backend)
+
+
+@pytest.mark.requires_jax
+def test_csbasis_surface_operator_cache_is_backend_neutral():
+    """One structured CS remap serves NumPy and JAX inputs."""
+    previous_backend = jax_enabled()
+    try:
+        set_backend("numpy")
+        basis = GlobalCSBasis(4)
+        grid = SphericalGrid(theta=basis.mesh.theta + 0.01, phi=basis.mesh.phi)
+        operator = basis.scalar_evaluation_operator(grid)
+        values = np.arange(basis.index_length, dtype=float)
+        numpy_result = operator.matvec(values)
+
+        set_backend("jax")
+        cached_operator = basis.scalar_evaluation_operator(grid)
+        jax_result = cached_operator.matvec(to_jax(values))
+
+        assert cached_operator is operator
+        assert isinstance(numpy_result, np.ndarray)
+        assert "jax" in type(jax_result).__module__
+        np.testing.assert_allclose(to_numpy(jax_result), numpy_result)
     finally:
         set_backend(previous_backend)
 

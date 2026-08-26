@@ -723,18 +723,43 @@ def test_sparse_linear_map_uses_sparse_normal_diagonal():
     """Sparse maps avoid generic densifying for normal diagonals."""
     matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
     linear_map = as_linear_map(csr_matrix(matrix))
+    x = np.array([0.25, -2.0])
+    y = np.array([1.0, 0.5, -1.0])
 
     np.testing.assert_allclose(linear_map.normal_matrix_diag(), np.sum(matrix**2, axis=0))
     np.testing.assert_allclose(linear_map.to_matrix(backend="numpy"), matrix)
+    np.testing.assert_allclose(linear_map.matvec(x[:, None]), matrix @ x)
+    np.testing.assert_allclose(linear_map.rmatvec(y[:, None]), matrix.T @ y)
+
+
+@pytest.mark.requires_jax
+def test_scipy_sparse_linear_map_stays_numpy_facing_with_jax_backend():
+    """SciPy sparse maps select a device from their input, not construction state."""
+    previous_backend = jax_enabled()
+    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
+    x = np.array([0.25, -2.0])
+
+    try:
+        set_backend("jax")
+        linear_map = as_linear_map(csr_matrix(matrix))
+        result = linear_map.matvec(x)
+    finally:
+        set_backend(previous_backend)
+
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_allclose(result, matrix @ x)
 
 
 @pytest.mark.requires_jax
 def test_jax_sparse_linear_map_uses_sparse_normal_diagonal():
-    """JAX sparse maps expose sparse normal diagonals."""
+    """JAX sparse maps preserve complex adjoints and sparse normal diagonals."""
     from jax.experimental.sparse import BCOO
 
     matrix = np.array([[2.0 + 1.0j, 0.0], [0.0, 3.0 - 2.0j], [1.0, -1.0j]])
     linear_map = as_linear_map(BCOO.from_scipy_sparse(csr_matrix(matrix)))
+    y = np.array([1.0j, 0.5, -1.0 + 2.0j])
+
+    np.testing.assert_allclose(linear_map.rmatvec(y), matrix.conj().T @ y)
 
     def fail_matmat(_block):
         raise AssertionError("normal_matrix_diag should use sparse metadata")
@@ -751,8 +776,8 @@ def test_jax_sparse_linear_map_uses_sparse_normal_diagonal():
 
 
 @pytest.mark.requires_jax
-def test_sparse_linear_map_preserves_explicit_jax_inputs_when_numpy_active():
-    """Sparse maps follow explicit JAX operands."""
+def test_sparse_linear_map_preserves_structure_for_explicit_jax_inputs(monkeypatch):
+    """SciPy sparse maps transfer sparse structure for JAX operands."""
     import jax.numpy as jnp
 
     previous_backend = jax_enabled()
@@ -763,6 +788,11 @@ def test_sparse_linear_map_preserves_explicit_jax_inputs_when_numpy_active():
     try:
         set_backend("numpy")
         linear_map = as_linear_map(csr_matrix(matrix))
+
+        def fail_toarray(*_args, **_kwargs):
+            raise AssertionError("JAX sparse application should not densify")
+
+        monkeypatch.setattr(csr_matrix, "toarray", fail_toarray)
         result = linear_map.matvec(jnp.asarray(x))
         adjoint_result = linear_map.rmatvec(jnp.asarray(y))
     finally:
@@ -770,6 +800,7 @@ def test_sparse_linear_map_preserves_explicit_jax_inputs_when_numpy_active():
 
     assert "jax" in type(result).__module__
     assert "jax" in type(adjoint_result).__module__
+    assert linear_map._dense_cache == {}
     np.testing.assert_allclose(np.asarray(result), matrix @ x)
     np.testing.assert_allclose(np.asarray(adjoint_result), matrix.T.conj() @ y)
 

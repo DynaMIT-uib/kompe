@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from scipy.sparse.linalg import lsmr as scipy_lsmr
 
-from kompe.math import LinearMap, as_linear_map, jax_enabled, set_backend
+from kompe.math import LinearMap, as_linear_map, get_array_module, jax_enabled, set_backend
 from kompe.math.least_squares_problem import LeastSquaresProblem
 from kompe.math.least_squares_solver import (
     LEAST_SQUARES_SOLVER_ENV,
@@ -303,6 +303,32 @@ def test_normal_pinv_response_solver_reuses_factorization(monkeypatch):
     normal_pinv = np.linalg.pinv(A_H @ A, rtol=solver.tolerance, hermitian=True)
     np.testing.assert_allclose(solve_response(rhs_first), normal_pinv @ (A_H @ rhs_first))
     np.testing.assert_allclose(solve_response(rhs_second), normal_pinv @ (A_H @ rhs_second))
+
+
+def test_unregularized_system_reuses_data_operator():
+    """Without regularization there is one canonical system map."""
+    problem = LeastSquaresProblem(A=np.eye(3), solution_shape=3, data_shapes=3)
+
+    assert problem.system_operator() is problem.data_operator
+
+
+def test_normal_pinv_discards_only_derived_regularized_matrix():
+    """Keep the data matrix used by repeated solves, not its augmented copy."""
+    problem = LeastSquaresProblem(
+        A=np.eye(3),
+        solution_shape=3,
+        data_shapes=3,
+        regularization_matrices=np.eye(3),
+        regularization_strengths=0.1,
+    )
+    regularized_system = problem.system_operator()
+
+    problem.dense_normal_pinv(1e-13)
+
+    xp = get_array_module()
+    assert regularized_system is not problem.data_operator
+    assert regularized_system._cached_dense(xp) is None
+    assert problem.data_operator._cached_dense(xp) is not None
 
 
 def test_least_squares_requires_at_least_one_rhs_term():

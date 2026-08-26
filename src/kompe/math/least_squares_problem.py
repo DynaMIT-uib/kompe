@@ -52,9 +52,7 @@ class LeastSquaresProblem:
             (solution_shape,) if isinstance(solution_shape, int) else tuple(solution_shape)
         )
         self.solution_size = math.prod(self.solution_shape)
-        self._system_operator_cache: dict[bool, LinearMap] = {}
-        self._dense_system_matrix_cache: dict[Any, Any] = {}
-        self._dense_normal_equation_cache: dict[Any, tuple[Any, Any, Any]] = {}
+        self._dense_normal_equation_cache: dict[Any, tuple[Any, Any]] = {}
         self._dense_normal_pinv_cache: dict[tuple[Any, float], Any] = {}
         self.operator_cache = operator_cache
         self.cache_identity = cache_identity
@@ -145,19 +143,23 @@ class LeastSquaresProblem:
     @cached_property
     def data_operator(self) -> LinearMap:
         """Assemble the data operator without regularization."""
-        return self.system_operator(include_regularization=False)
+        row_maps = [
+            a_item if self.sqrt_weights[i] is None else self.sqrt_weights[i] @ a_item
+            for i, a_item in enumerate(self.A)
+        ]
+        return vstack_linear_maps(row_maps, input_shape=self.solution_shape)
 
-    @cached_property
+    @property
     def dense_system_matrix(self) -> np.ndarray:
         """Assemble the dense regularized system as NumPy."""
-        return np.asarray(self._dense_system_matrix(np))
+        return np.asarray(self.system_operator().to_matrix(backend="numpy"))
 
     def assemble_dense_system_matrix(self) -> Any:
         """Assemble the dense system on the active backend."""
         xp = get_array_module()
         if xp is np:
             return self.dense_system_matrix
-        return self._dense_system_matrix(xp)
+        return self.system_operator().to_matrix()
 
     def dense_normal_equations(self) -> tuple[Any, Any, Any, Any]:
         """Return dense system, adjoint, and normal matrix."""
@@ -166,9 +168,9 @@ class LeastSquaresProblem:
         if xp not in self._dense_normal_equation_cache:
             system_adjoint = system_matrix.T.conj()
             normal_matrix = system_adjoint @ system_matrix
-            self._dense_normal_equation_cache[xp] = (system_matrix, system_adjoint, normal_matrix)
+            self._dense_normal_equation_cache[xp] = (system_adjoint, normal_matrix)
         else:
-            system_matrix, system_adjoint, normal_matrix = self._dense_normal_equation_cache[xp]
+            system_adjoint, normal_matrix = self._dense_normal_equation_cache[xp]
         return xp, system_matrix, system_adjoint, normal_matrix
 
     def dense_normal_pinv(self, tolerance: float) -> Any:
@@ -183,12 +185,14 @@ class LeastSquaresProblem:
                     xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
                 )
                 # Repeated solves need the pseudo-inverse and the lazy
-                # system map, not the dense rectangular system or
-                # normal matrix used to construct it.
+                # data map, not a separate dense regularized system or
+                # normal matrix used to construct it. Keep a materialized
+                # data map because the following adjoint products reuse it.
                 self._dense_normal_equation_cache.clear()
-                self._dense_system_matrix_cache.clear()
+                regularized_system = self.system_operator()
+                if regularized_system is not self.data_operator:
+                    regularized_system.clear_dense_cache()
                 self._data_normal_matrix_cache = None
-                self.__dict__.pop("dense_system_matrix", None)
                 return normal_pinv
 
             if self.operator_cache is None or self.cache_identity is None:
@@ -253,13 +257,6 @@ class LeastSquaresProblem:
             self._data_normal_matrix_cache = matrix
         return self._data_normal_matrix_cache
 
-    def _dense_system_matrix(self, xp: Any) -> Any:
-        """Return the cached dense system matrix for one backend."""
-        if xp not in self._dense_system_matrix_cache:
-            backend = "numpy" if xp is np else None
-            self._dense_system_matrix_cache[xp] = self.system_operator().to_matrix(backend=backend)
-        return self._dense_system_matrix_cache[xp]
-
     @cached_property
     def svd(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute the SVD of the dense system matrix."""
@@ -297,7 +294,7 @@ class LeastSquaresProblem:
                 blocks.append(xp.zeros((num_a_rows, num_rhs), dtype=dtype))
                 continue
             w_item = self.sqrt_weights[i]
-            if w_item:
+            if w_item is not None:
                 b_col_block = w_item.matmat(b_col_block)
             blocks.append(xp.asarray(b_col_block).reshape(num_a_rows, num_rhs))
 
@@ -309,21 +306,16 @@ class LeastSquaresProblem:
 
     def system_operator(self, include_regularization: bool = True) -> LinearMap:
         """Get the ``LinearMap`` system operator."""
-        if include_regularization not in self._system_operator_cache:
-            self._system_operator_cache[include_regularization] = self._build_system_operator(
-                include_regularization
-            )
-        return self._system_operator_cache[include_regularization]
+        return self._regularized_system_operator if include_regularization else self.data_operator
 
-    def _build_system_operator(self, include_regularization: bool) -> LinearMap:
-        active_regularization_terms = (
-            tuple(self._active_regularization_terms()) if include_regularization else ()
-        )
-        row_maps = []
-        for i, a_item in enumerate(self.A):
-            w_item = self.sqrt_weights[i]
-            row_maps.append(a_item if w_item is None else w_item @ a_item)
-        row_maps.extend(reg_weight * L_item for reg_weight, L_item in active_regularization_terms)
+    @cached_property
+    def _regularized_system_operator(self) -> LinearMap:
+        """Stack active regularization below the canonical data operator."""
+        regularization_terms = self._active_regularization_terms()
+        if not regularization_terms:
+            return self.data_operator
+        row_maps = [self.data_operator]
+        row_maps.extend(weight * matrix for weight, matrix in regularization_terms)
         return vstack_linear_maps(row_maps, input_shape=self.solution_shape)
 
     def _active_regularization_terms(self) -> tuple[tuple[float, LinearMap], ...]:

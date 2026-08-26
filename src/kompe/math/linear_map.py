@@ -16,7 +16,6 @@ from kompe.math.backend import (
     asarray,
     block_until_ready,
     get_array_module,
-    jax_enabled,
     to_numpy,
 )
 
@@ -94,6 +93,10 @@ class LinearMap:
     def _store_dense(self, xp: Any, dense: Any) -> None:
         """Store dense materialization for ``xp``."""
         self._dense_cache[xp] = dense
+
+    def clear_dense_cache(self) -> None:
+        """Discard derived dense materializations of this map."""
+        self._dense_cache.clear()
 
     def matvec(self, x: Any) -> Any:
         """Apply this map to one flattened vector."""
@@ -1144,38 +1147,54 @@ def _linear_map_from_scipy_sparse(
     shape = tuple(int(dim) for dim in sparse.shape)
     out_shape, in_shape = _map_shapes(shape, input_shape, output_shape)
     dtype = sparse.dtype
-    dense_cache: dict[Any, Any] = {}
+    jax_sparse_operators = None
 
-    def cached_dense(xp: Any) -> Any:
-        if xp not in dense_cache:
-            dense_cache[xp] = xp.asarray(sparse.toarray())
-        return dense_cache[xp]
+    def jax_operators(xp):
+        """Transfer sparse structure to JAX once, without densifying it."""
+        nonlocal jax_sparse_operators
+        if jax_sparse_operators is None:
+            from jax.experimental.sparse import BCOO
 
-    def apply(matrix, values, input_size, *, adjoint_dense=False):
+            def as_bcoo(matrix):
+                coo = matrix.tocoo()
+                indices = np.column_stack([coo.row, coo.col])
+                return BCOO(
+                    (xp.asarray(coo.data), xp.asarray(indices)),
+                    shape=coo.shape,
+                    indices_sorted=True,
+                    unique_indices=True,
+                )
+
+            jax_sparse_operators = as_bcoo(sparse), as_bcoo(adjoint)
+        return jax_sparse_operators
+
+    def apply(matrix, values, input_size, *, block=False, use_adjoint=False):
         xp = _runtime_array_module(values)
         values = xp.asarray(values)
-        values = values.reshape(input_size) if values.ndim == 1 else values.reshape(input_size, -1)
+        values = (
+            values.reshape(input_size, -1)
+            if block and values.ndim > 1
+            else values.reshape(input_size)
+        )
         if xp is np:
             return matrix @ values
-        dense = cached_dense(xp)
-        if adjoint_dense:
-            dense = xp.swapaxes(xp.conjugate(dense), -2, -1)
-        return dense @ values
+        forward, reverse = jax_operators(xp)
+        return (reverse if use_adjoint else forward) @ values
 
     def matvec(vec: Any) -> Any:
         return apply(sparse, vec, shape[1])
 
     def rmatvec(vec: Any) -> Any:
-        return apply(adjoint, vec, shape[0], adjoint_dense=True)
+        return apply(adjoint, vec, shape[0], use_adjoint=True)
 
     def matmat(block: Any) -> Any:
-        return apply(sparse, block, shape[1])
+        return apply(sparse, block, shape[1], block=True)
 
     def rmatmat(block: Any) -> Any:
-        return apply(adjoint, block, shape[0], adjoint_dense=True)
+        return apply(adjoint, block, shape[0], block=True, use_adjoint=True)
 
     def dense_array(xp: Any) -> Any:
-        return cached_dense(xp)
+        return xp.asarray(sparse.toarray())
 
     def normal_matrix_diag() -> np.ndarray:
         return np.asarray(sparse.multiply(sparse.conjugate()).sum(axis=0)).reshape(-1).real
@@ -1202,6 +1221,10 @@ def _linear_map_from_jax_sparse(
     shape = tuple(int(dim) for dim in op.shape)
     out_shape, in_shape = _map_shapes(shape, input_shape, output_shape)
     dtype = op.dtype
+    transposed = op.T
+    adjoint = type(transposed)(
+        (transposed.data.conj(), transposed.indices), shape=transposed.shape
+    )
     backend_operands = tuple(
         operand
         for operand in (getattr(op, "data", None), getattr(op, "indices", None))
@@ -1214,7 +1237,7 @@ def _linear_map_from_jax_sparse(
 
     def rmatvec(vec: Any) -> Any:
         xp = get_array_module(vec, *backend_operands)
-        return op.T @ xp.asarray(vec).reshape(shape[0])
+        return adjoint @ xp.asarray(vec).reshape(shape[0])
 
     def matmat(block: Any) -> Any:
         xp = get_array_module(block, *backend_operands)
@@ -1222,7 +1245,7 @@ def _linear_map_from_jax_sparse(
 
     def rmatmat(block: Any) -> Any:
         xp = get_array_module(block, *backend_operands)
-        return op.T @ xp.asarray(block).reshape(shape[0], -1)
+        return adjoint @ xp.asarray(block).reshape(shape[0], -1)
 
     def dense_array(xp: Any) -> Any:
         return xp.asarray(op.todense())
@@ -1335,17 +1358,6 @@ def as_linear_map(
         )
 
     if scipy.sparse.issparse(op):
-        if jax_enabled():
-            try:
-                from jax.experimental.sparse import BCOO
-
-                return _linear_map_from_jax_sparse(
-                    BCOO.from_scipy_sparse(op), input_shape=input_shape, output_shape=output_shape
-                )
-            except (TypeError, ValueError, NotImplementedError):
-                # Some SciPy sparse formats are unsupported by JAX. Preserve
-                # them as SciPy-backed maps instead of failing conversion.
-                pass
         return _linear_map_from_scipy_sparse(
             op, input_shape=input_shape, output_shape=output_shape
         )

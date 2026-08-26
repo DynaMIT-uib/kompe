@@ -11,7 +11,7 @@ from scipy.interpolate import griddata
 from scipy.spatial import Delaunay
 
 from kompe.math import as_linear_map, identity_linear_map
-from kompe.math.backend import jax_enabled, to_numpy
+from kompe.math.backend import to_numpy
 
 
 class _GlobalCSRemapper:
@@ -233,7 +233,7 @@ class _GlobalCSRemapper:
         if source_grid.same_as(target_grid):
             return identity_linear_map((source_grid.size,))
         matrix_key = self.remap_matrix_key("scalar_grid_remap_matrix", source_grid, target_grid)
-        key = ("scalar_grid_remap", matrix_key, bool(jax_enabled()))
+        key = ("scalar_grid_remap", matrix_key)
         if key not in self.operator_cache:
             matrix = self._cached_remap_matrix(
                 matrix_key, lambda: self.build_scalar_grid_remap_matrix(source_grid, target_grid)
@@ -253,7 +253,7 @@ class _GlobalCSRemapper:
         matrix_key = self.remap_matrix_key(
             "tangential_grid_remap_matrix", source_grid, target_grid
         )
-        key = ("tangential_grid_remap", matrix_key, bool(jax_enabled()))
+        key = ("tangential_grid_remap", matrix_key)
         if key not in self.operator_cache:
             matrix = self._cached_remap_matrix(
                 matrix_key,
