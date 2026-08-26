@@ -14,6 +14,7 @@ from kompe import (
 )
 from kompe.basis import BasisSubset
 from kompe.math import (
+    get_backend,
     is_identity_linear_map,
     jax_enabled,
     set_backend,
@@ -552,9 +553,9 @@ def test_area_weight_option_and_explicit_weights_override():
         resolve_sqrt_weights(grid, area_weighted=True, vector=True),
         np.tile(np.sqrt(cs_basis.mesh.cell_areas.reshape(-1)), (2, 1)),
     )
-    assert (
-        resolve_sqrt_weights(grid, sqrt_weights=explicit, area_weighted=True, vector=True)
-        is explicit
+    np.testing.assert_allclose(
+        resolve_sqrt_weights(grid, sqrt_weights=explicit, area_weighted=True, vector=True),
+        np.tile(explicit, (2, 1)),
     )
 
 
@@ -694,6 +695,34 @@ def test_csbasis_cache_controls_do_not_change_numerical_results():
 
 
 # Backend preservation
+
+
+@pytest.mark.requires_jax
+def test_csbasis_sparse_geometry_is_built_on_numpy(monkeypatch):
+    """SciPy derivative geometry should not depend on active JAX arithmetic."""
+    from kompe.cubed_sphere import cs_differencing
+
+    basis = GlobalCSBasis(4)
+    original_face_coordinate = cs_differencing.cs_coordinates.face_coordinate
+    observed_backends = []
+
+    def checked_face_coordinate(*args, **kwargs):
+        observed_backends.append(get_backend())
+        return original_face_coordinate(*args, **kwargs)
+
+    previous_backend = jax_enabled()
+    try:
+        set_backend("jax")
+        monkeypatch.setattr(
+            cs_differencing.cs_coordinates, "face_coordinate", checked_face_coordinate
+        )
+        basis.surface_laplacian_operator()
+        assert get_backend() == "jax"
+    finally:
+        set_backend(previous_backend)
+
+    assert observed_backends
+    assert set(observed_backends) == {"numpy"}
 
 
 @pytest.mark.requires_jax

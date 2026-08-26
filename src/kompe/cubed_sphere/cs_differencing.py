@@ -8,6 +8,7 @@ from scipy.special import binom
 
 from kompe.cubed_sphere import cs_coordinates
 from kompe.cubed_sphere.finite_differences import finite_difference_weights
+from kompe.math.backend import backend_context
 
 
 def _shift_rows_into_bounds(values, lower, upper):
@@ -27,10 +28,32 @@ def global_cs_derivative_matrices(
     stencil_half_width=1,
     cross_face_points=4,
 ):
-    """Return the native-grid ``(d/dxi, d/deta)`` matrices."""
+    """Return the native-grid ``(d/dxi, d/deta)`` SciPy matrices."""
     if stencil_half_width < 1:
         raise ValueError("stencil_half_width must be at least 1")
 
+    # Coordinate round trips classify stencil points on exact cube-face grid
+    # lines before constructing SciPy sparse matrices.  Keep this entire
+    # geometry builder on NumPy: sending it through the active JAX backend
+    # adds a device round trip and makes that discrete classification depend
+    # on JAX's trigonometric implementation.
+    with backend_context("numpy"):
+        return _build_global_cs_derivative_matrices(
+            projection,
+            cells_per_face,
+            stencil_half_width=stencil_half_width,
+            cross_face_points=cross_face_points,
+        )
+
+
+def _build_global_cs_derivative_matrices(
+    projection,
+    cells_per_face,
+    *,
+    stencil_half_width,
+    cross_face_points,
+):
+    """Build global cubed-sphere derivative matrices on NumPy."""
     shape = (6, cells_per_face, cells_per_face)
     size = np.prod(shape)
     h = cs_coordinates.face_coordinate(1, cells_per_face) - cs_coordinates.face_coordinate(

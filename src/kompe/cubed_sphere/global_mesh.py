@@ -17,6 +17,7 @@ from kompe.cubed_sphere.cs_coordinates import (
 )
 from kompe.cubed_sphere.global_projection import GlobalCSProjection
 from kompe.grid import SphericalGrid
+from kompe.math.backend import backend_context
 from kompe.mesh import StructuredSurfaceMesh
 
 
@@ -43,12 +44,17 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             raise ValueError("Cubed sphere mesh dimension must be positive")
 
         cells_per_face = int(cells_per_face)
-        k, i, j = self._gridpoints(cells_per_face)
-        xi = face_coordinate(i[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
-        eta = face_coordinate(j[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
-        face = k[:, :-1, :-1].reshape(-1)
-        _, theta, phi = cube_to_spherical(xi, eta, face, deg=True)
-        cell_metric = metric_tensor(xi, eta)
+        # A mesh owns immutable host geometry. Device arrays belong to field
+        # evaluation, not this one-time topology and cell-area construction.
+        with backend_context("numpy"):
+            k, i, j = self._gridpoints(cells_per_face)
+            xi = face_coordinate(i[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
+            eta = face_coordinate(j[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
+            face = k[:, :-1, :-1].reshape(-1)
+            _, theta, phi = cube_to_spherical(xi, eta, face, deg=True)
+            cell_metric = metric_tensor(xi, eta)
+            sqrt_detg = np.sqrt(determinants_3x3(cell_metric))
+            cell_areas = self._compute_cell_areas(cells_per_face)
 
         for name, value in (
             ("cells_per_face", cells_per_face),
@@ -58,8 +64,8 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             ("theta", theta),
             ("phi", phi),
             ("metric_tensor", cell_metric),
-            ("sqrt_detg", np.sqrt(determinants_3x3(cell_metric))),
-            ("_cell_areas", self._compute_cell_areas(cells_per_face)),
+            ("sqrt_detg", sqrt_detg),
+            ("_cell_areas", cell_areas),
             ("projection", GlobalCSProjection()),
         ):
             object.__setattr__(self, name, value)

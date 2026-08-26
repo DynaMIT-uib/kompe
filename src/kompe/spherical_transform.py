@@ -60,7 +60,12 @@ def grid_sqrt_area_weights(grid):
 def resolve_sqrt_weights(grid, sqrt_weights=None, area_weighted=False, vector=False):
     """Resolve explicit or default grid sqrt weights."""
     if sqrt_weights is not None:
-        return sqrt_weights
+        xp = get_array_module(sqrt_weights)
+        weights = xp.asarray(sqrt_weights)
+        if vector:
+            if weights.size == grid.size:
+                return xp.broadcast_to(weights.reshape(1, grid.size), (2, grid.size))
+        return weights
     if not area_weighted:
         return None
     weights = grid_sqrt_area_weights(grid)
@@ -271,7 +276,9 @@ class SphericalTransform:
             remapped to ``grid``.
         sqrt_weights : array-like, optional
             Square-root residual weights. Their squares weight the
-            least-squares objective.
+            least-squares objective. One weight per grid point applies to
+            both tangential components; shape ``(2, grid.size)`` supplies
+            component-specific weights.
         reg_lambda : float, optional
             Dimensionless relative regularization strength. Kompe balances
             the data and regularization operator scales before solving.

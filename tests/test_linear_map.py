@@ -580,6 +580,28 @@ def test_dense_linear_map_accepts_numpy_inputs_with_jax_backend():
 
 
 @pytest.mark.requires_jax
+def test_linear_map_matmul_preserves_numpy_operand_backend():
+    """``A @ x`` and ``A.matvec(x)`` should have identical backend ownership."""
+    previous_backend = jax_enabled()
+    matrix = np.array([[1.0, 2.0], [3.0, 5.0], [7.0, 11.0]])
+    vector = np.array([0.25, -2.0])
+    block = np.column_stack((vector, vector + 1.0))
+
+    try:
+        set_backend("jax")
+        linear_map = as_linear_map(matrix)
+        vector_result = linear_map @ vector
+        block_result = linear_map @ block
+    finally:
+        set_backend(previous_backend)
+
+    assert isinstance(vector_result, np.ndarray)
+    assert isinstance(block_result, np.ndarray)
+    np.testing.assert_allclose(vector_result, matrix @ vector)
+    np.testing.assert_allclose(block_result, matrix @ block)
+
+
+@pytest.mark.requires_jax
 def test_pointwise_linear_map_accepts_numpy_inputs_with_jax_backend():
     """Pointwise maps stay NumPy-facing until called with JAX inputs."""
     previous_backend = jax_enabled()

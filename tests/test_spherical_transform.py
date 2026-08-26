@@ -5,7 +5,7 @@ import pytest
 
 from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
 from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
-from kompe.math import jax_enabled, set_backend, to_numpy
+from kompe.math import get_backend, jax_enabled, set_backend, to_numpy
 from kompe.math.least_squares_solver import dense_full_rank_least_squares_map
 
 
@@ -166,7 +166,10 @@ def test_direct_analysis_cache_fingerprints_explicit_weights():
 
     assert len(transform._input_transforms) == 1
     assert next(iter(transform._input_transforms.values())) is cached_transform
-    assert not cached_transform.sqrt_weights.flags.writeable
+    if isinstance(cached_transform.sqrt_weights, np.ndarray):
+        assert not cached_transform.sqrt_weights.flags.writeable
+    else:
+        assert "jax" in type(cached_transform.sqrt_weights).__module__
     np.testing.assert_array_equal(cached_transform.sqrt_weights, baseline_weights)
 
     transform.analyze_scalar_samples(
@@ -849,6 +852,24 @@ def test_helmholtz_factorization_does_not_hide_invalid_weights():
         _ = transform._optimized_helmholtz_analysis_operator
 
 
+def test_helmholtz_point_weights_apply_to_both_components():
+    """One explicit weight per point has the same meaning for theta and phi."""
+    basis = SHBasis(3, 2, mean_free=True)
+    grid = _regular_grid()
+    point_weights = np.linspace(0.5, 1.5, grid.size)
+    component_weights = np.tile(point_weights, (2, 1))
+    values = np.vstack([np.sin(np.deg2rad(grid.theta)), np.cos(np.deg2rad(grid.phi))])
+
+    point_transform = SphericalTransform(basis, grid, sqrt_weights=point_weights)
+    component_transform = SphericalTransform(basis, grid, sqrt_weights=component_weights)
+
+    np.testing.assert_allclose(point_transform.helmholtz_sqrt_weights, component_weights)
+    np.testing.assert_allclose(
+        point_transform.analyze_helmholtz(values),
+        component_transform.analyze_helmholtz(values),
+    )
+
+
 @pytest.mark.parametrize("area_weighted", [False, True])
 def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_weighted):
     """Native CS analysis stays sparse and fixes both gauges."""
@@ -911,6 +932,36 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
 
 
 # Backend preservation
+
+
+@pytest.mark.requires_jax
+def test_cs_grid_remap_geometry_is_built_on_numpy(monkeypatch):
+    """SciPy triangulation should use NumPy cube-coordinate geometry."""
+    import kompe.cubed_sphere.global_remapping as remapping_module
+
+    _GlobalCSRemapper.clear_shared_cache()
+    remapping_basis = GlobalCSBasis(8)
+    source_basis = GlobalCSBasis(10)
+    original_delaunay = remapping_module.Delaunay
+    observed_backends = []
+
+    def checked_delaunay(*args, **kwargs):
+        observed_backends.append(get_backend())
+        return original_delaunay(*args, **kwargs)
+
+    previous_backend = jax_enabled()
+    try:
+        set_backend("jax")
+        monkeypatch.setattr(remapping_module, "Delaunay", checked_delaunay)
+        remapping_basis.scalar_grid_remap_operator(
+            source_basis.native_grid, remapping_basis.native_grid
+        )
+        assert get_backend() == "jax"
+    finally:
+        set_backend(previous_backend)
+
+    assert observed_backends
+    assert set(observed_backends) == {"numpy"}
 
 
 @pytest.mark.requires_jax

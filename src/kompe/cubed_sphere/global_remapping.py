@@ -11,7 +11,7 @@ from scipy.interpolate import griddata
 from scipy.spatial import Delaunay
 
 from kompe.math import as_linear_map, identity_linear_map
-from kompe.math.backend import to_numpy
+from kompe.math.backend import backend_context, to_numpy
 
 
 class _GlobalCSRemapper:
@@ -76,7 +76,11 @@ class _GlobalCSRemapper:
             cache.move_to_end(key)
             return cache[key]
 
-        matrix = build()
+        # Delaunay triangulation and sparse assembly are SciPy CPU work.  The
+        # cube-coordinate round trip must use the same NumPy arithmetic as the
+        # triangulation, especially for points on panel boundaries.
+        with backend_context("numpy"):
+            matrix = build()
         cache[key] = matrix
         if len(cache) > self._shared_remap_matrix_cache_size:
             cache.popitem(last=False)
@@ -303,18 +307,20 @@ class _GlobalCSRemapper:
     ):
         """Interpolate canonical spherical vectors through CS panels."""
         basis = self.basis
-        theta_target, phi_target = np.broadcast_arrays(theta_target, phi_target)
+        theta_target, phi_target = np.broadcast_arrays(
+            to_numpy(theta_target), to_numpy(phi_target)
+        )
         target_shape = theta_target.shape
         xi, eta, block = basis.mesh.projection.geographic_to_cube(phi_target, 90 - theta_target)
         xi, eta, block = xi.reshape(-1), eta.reshape(-1), block.reshape(-1)
 
-        theta, phi = np.broadcast_arrays(theta, phi)
+        theta, phi = np.broadcast_arrays(to_numpy(theta), to_numpy(phi))
         source_shape = theta.shape
         theta, phi = theta.reshape(-1), phi.reshape(-1)
 
-        u_theta = np.asarray(u_theta)
-        u_phi = np.asarray(u_phi)
-        u_radial = np.asarray(u_radial)
+        u_theta = np.asarray(to_numpy(u_theta))
+        u_phi = np.asarray(to_numpy(u_phi))
+        u_radial = np.asarray(to_numpy(u_radial))
         if u_theta.shape[: len(source_shape)] == source_shape:
             value_shape = u_theta.shape[len(source_shape) :]
             u_theta_values = u_theta.reshape((theta.size,) + value_shape)
@@ -377,16 +383,18 @@ class _GlobalCSRemapper:
     def interpolate_scalar(self, scalar, theta, phi, theta_target, phi_target, **kwargs):
         """Interpolate scalar values through CS panels."""
         basis = self.basis
-        theta_target, phi_target = np.broadcast_arrays(theta_target, phi_target)
+        theta_target, phi_target = np.broadcast_arrays(
+            to_numpy(theta_target), to_numpy(phi_target)
+        )
         target_shape = theta_target.shape
         xi, eta, block = basis.mesh.projection.geographic_to_cube(phi_target, 90 - theta_target)
         xi, eta, block = xi.reshape(-1), eta.reshape(-1), block.reshape(-1)
 
-        theta, phi = np.broadcast_arrays(theta, phi)
+        theta, phi = np.broadcast_arrays(to_numpy(theta), to_numpy(phi))
         source_shape = theta.shape
         theta, phi = theta.reshape(-1), phi.reshape(-1)
 
-        scalar = np.asarray(scalar)
+        scalar = np.asarray(to_numpy(scalar))
         if scalar.shape[: len(source_shape)] == source_shape:
             value_shape = scalar.shape[len(source_shape) :]
             scalar_values = scalar.reshape((theta.size,) + value_shape)

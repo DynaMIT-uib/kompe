@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
-from kompe.math.backend import get_array_module, to_numpy
+from kompe.math.backend import backend_context, get_array_module, to_numpy
 from kompe.spherical import ecef_to_enu, enu_to_ecef, rotate_spherical_by_matrix
 
 _DATA_PATH = Path(__file__).resolve().parents[1] / "data"
@@ -71,13 +71,14 @@ class RegionalCSProjection:
         )
 
         # On the north face, increasing xi follows the local Cartesian y axis.
-        self.local_y_axis = to_numpy(
-            enu_to_ecef(
-                orientation_enu,
-                np.array(self.lat0),
-                np.array(self.lon0),
-            )
-        ).flatten()
+        with backend_context("numpy"):
+            self.local_y_axis = to_numpy(
+                enu_to_ecef(
+                    orientation_enu,
+                    np.array(self.lat0),
+                    np.array(self.lon0),
+                )
+            ).flatten()
 
         # Complete the right-handed local Cartesian frame.
         self.local_x_axis = np.cross(self.local_y_axis, self.local_z_axis)

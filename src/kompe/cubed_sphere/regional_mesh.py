@@ -7,7 +7,7 @@ import numpy as np
 
 from kompe.cubed_sphere.regional_projection import RegionalCSProjection
 from kompe.grid import SphericalGrid
-from kompe.math import content_fingerprint
+from kompe.math import backend_context, content_fingerprint
 from kompe.mesh import StructuredSurfaceMesh
 
 
@@ -208,25 +208,28 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         # xi, eta coordinates of cell corners:
         self.xi_mesh, self.eta_mesh = np.meshgrid(xi_edge, eta_edge, indexing="xy")
 
-        # lon, lat coordinates of cell corners:
-        self.lon_mesh, self.lat_mesh = self.projection.cube_to_geographic(
-            self.xi_mesh, self.eta_mesh
-        )
+        # Mesh coordinates and cell areas are immutable host geometry. Keep
+        # their construction independent of the active field-array backend.
+        with backend_context("numpy"):
+            self.lon_mesh, self.lat_mesh = self.projection.cube_to_geographic(
+                self.xi_mesh, self.eta_mesh
+            )
 
-        # xi, eta coordinates of grid points (cell centers):
-        self.xi = self.xi_mesh[0:-1, 0:-1] + self.dxi / 2
-        self.eta = self.eta_mesh[0:-1, 0:-1] + self.deta / 2
+            # xi, eta coordinates of grid points (cell centers):
+            self.xi = self.xi_mesh[0:-1, 0:-1] + self.dxi / 2
+            self.eta = self.eta_mesh[0:-1, 0:-1] + self.deta / 2
 
-        # geocentric lon, lat [deg] of grid points:
-        self.lon, self.lat = self.projection.cube_to_geographic(self.xi, self.eta)
+            # geocentric lon, lat [deg] of grid points:
+            self.lon, self.lat = self.projection.cube_to_geographic(self.xi, self.eta)
+            cell_areas = self.projection.differential_elements(
+                self.xi, self.eta, self.dxi, self.deta, radius=self.radius
+            )[2]
 
         # set size and shape
         self._shape = tuple(int(length) for length in self.lat.shape)
 
         # calculate cell area
-        self._cell_areas = self.projection.differential_elements(
-            self.xi, self.eta, self.dxi, self.deta, radius=self.radius
-        )[2]
+        self._cell_areas = cell_areas
 
         self._signature = (
             "REGIONAL_CS_MESH",

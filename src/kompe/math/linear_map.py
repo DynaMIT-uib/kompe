@@ -13,7 +13,6 @@ from scipy.sparse.linalg import LinearOperator as ScipyLinearOperator
 
 from kompe.math.backend import (
     JAX_AVAILABLE,
-    asarray,
     block_until_ready,
     get_array_module,
     to_numpy,
@@ -223,7 +222,7 @@ class LinearMap:
             other, "matvec"
         )
         if not scipy.sparse.issparse(other) and not looks_like_operator:
-            arr = asarray(other)
+            arr = _dense_array_candidate(other)
             if arr.ndim == 1:
                 return self.matvec(arr)
             if arr.ndim == 2:

@@ -11,7 +11,7 @@ from kompe.cubed_sphere.cs_differencing import global_cs_derivative_matrices
 from kompe.cubed_sphere.global_mesh import GlobalCSMesh
 from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
 from kompe.math import as_linear_map, identity_linear_map
-from kompe.math.backend import get_array_module, to_numpy
+from kompe.math.backend import backend_context, get_array_module, to_numpy
 from kompe.math.least_squares_solver import sparse_constrained_least_squares_map
 
 
@@ -297,11 +297,12 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     def _get_derivative_bundle(self):
         """Build native-grid angular derivative operators."""
         if self._derivative_bundle is None:
-            dxi, deta = global_cs_derivative_matrices(
-                self.mesh.projection,
-                self.cells_per_face,
-            )
-            dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi = self._coordinate_derivatives()
+            with backend_context("numpy"):
+                dxi, deta = global_cs_derivative_matrices(
+                    self.mesh.projection,
+                    self.cells_per_face,
+                )
+                dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi = self._coordinate_derivatives()
 
             dtheta = sp.diags(dxi_dtheta) @ dxi + sp.diags(deta_dtheta) @ deta
             dphi_unscaled = sp.diags(dxi_dphi) @ dxi + sp.diags(deta_dphi) @ deta
@@ -476,9 +477,10 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         interpolated_vector : array
             Tuple of interpolated ``(theta, phi, radial)`` components.
         """
-        return self._remapper.interpolate_vector(
-            u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
-        )
+        with backend_context("numpy"):
+            return self._remapper.interpolate_vector(
+                u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
+            )
 
     def interpolate_scalar(self, scalar, theta, phi, theta_target, phi_target, **kwargs):
         """Interpolate scalar values.
@@ -512,9 +514,10 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         interpolated_scalar : array
             Interpolated scalar values.
         """
-        return self._remapper.interpolate_scalar(
-            scalar, theta, phi, theta_target, phi_target, **kwargs
-        )
+        with backend_context("numpy"):
+            return self._remapper.interpolate_scalar(
+                scalar, theta, phi, theta_target, phi_target, **kwargs
+            )
 
 
 __all__ = ["GlobalCSBasis"]

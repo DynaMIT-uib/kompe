@@ -8,7 +8,7 @@ from scipy import sparse as scipy_sparse
 from kompe.cubed_sphere import cs_coordinates, cs_vectors, finite_differences
 from kompe.cubed_sphere.regional_mesh import RegionalCSMesh
 from kompe.cubed_sphere.regional_projection import _NORTH_FACE
-from kompe.math import as_linear_map, get_array_module
+from kompe.math import as_linear_map, backend_context, get_array_module
 
 
 def _interpolation_axis(position, first_center, spacing, count):
@@ -243,19 +243,19 @@ class RegionalCSOperators:
 
         # Rows 0 and 1 are the dual basis vectors grad(xi) and grad(eta)
         # in local Cartesian coordinates.
-        dual_basis_local = cs_vectors._cartesian_to_cube_matrix(
-            xi,
-            eta,
-            r=grid.radius,
-            block=_NORTH_FACE,
-        )[:, :2, :].transpose(0, 2, 1)
+        with backend_context("numpy"):
+            dual_basis_local = cs_vectors._cartesian_to_cube_matrix(
+                xi,
+                eta,
+                r=grid.radius,
+                block=_NORTH_FACE,
+            )[:, :2, :].transpose(0, 2, 1)
+            metric = cs_coordinates.surface_metric_tensor(xi, eta, r=grid.radius)
         dual_basis = np.einsum(
             "ij,njk->nik",
             grid.projection.local_to_geographic_matrix,
             dual_basis_local,
         )
-        metric = cs_coordinates.surface_metric_tensor(xi, eta, r=grid.radius)
-
         lon = np.deg2rad(grid.lon.reshape(-1))
         lat = np.deg2rad(grid.lat.reshape(-1))
         east = np.column_stack((-np.sin(lon), np.cos(lon), np.zeros_like(lon)))
