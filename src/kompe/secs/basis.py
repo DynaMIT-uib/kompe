@@ -87,7 +87,7 @@ class SECSBasis(ScalarBasis):
         return (
             "SECS",
             self.current_type,
-            self.poles.exact_coordinate_signature,
+            self.poles.signature,
             self.radius,
             self.normalization,
         )

@@ -371,7 +371,7 @@ class SphericalTransform:
             "version": _LEAST_SQUARES_CACHE_VERSION,
             "field_type": str(field_type),
             "basis": self.basis.signature,
-            "grid_coordinates": self.grid.exact_coordinate_signature,
+            "grid_coordinates": self.grid.signature,
             "sqrt_weights": array_fingerprint(weights),
             "regularization_lambda": self.reg_lambda,
             "area_weighted": self.area_weighted,

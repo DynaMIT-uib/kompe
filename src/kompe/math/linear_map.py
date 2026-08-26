@@ -63,10 +63,7 @@ class LinearMap:
     _dense_tensor: Any = field(default=None, repr=False, compare=False)
     output_shape: tuple[int, ...] | None = None
     input_shape: tuple[int, ...] | None = None
-    _dense_cache: dict[str, Any] = field(
-        default_factory=dict, init=False, repr=False, compare=False
-    )
-    _array_cache: dict[str, Any] = field(
+    _dense_cache: dict[Any, Any] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
 
@@ -90,26 +87,13 @@ class LinearMap:
         """Return the array module implied by operands and this map."""
         return get_array_module(*operands, *self._backend_operands)
 
-    @staticmethod
-    def _dense_cache_key(xp: Any) -> str:
-        """Return a stable cache key for one array module."""
-        return getattr(xp, "__name__", repr(xp))
-
     def _cached_dense(self, xp: Any) -> Any | None:
         """Return cached dense materialization for ``xp`` if present."""
-        return self._dense_cache.get(self._dense_cache_key(xp))
+        return self._dense_cache.get(xp)
 
     def _store_dense(self, xp: Any, dense: Any) -> None:
         """Store dense materialization for ``xp``."""
-        self._dense_cache[self._dense_cache_key(xp)] = dense
-
-    def _cached_array(self, xp: Any) -> Any | None:
-        """Return cached shaped materialization for ``xp``."""
-        return self._array_cache.get(self._dense_cache_key(xp))
-
-    def _store_array(self, xp: Any, array: Any) -> None:
-        """Store shaped materialization for ``xp``."""
-        self._array_cache[self._dense_cache_key(xp)] = array
+        self._dense_cache[xp] = dense
 
     def matvec(self, x: Any) -> Any:
         """Apply this map to one flattened vector."""
@@ -171,12 +155,6 @@ class LinearMap:
         if cached is not None:
             return cached
 
-        cached_array = self._cached_array(xp)
-        if cached_array is not None:
-            dense = xp.reshape(cached_array, self.shape)
-            self._store_dense(xp, dense)
-            return dense
-
         if self._dense_array_func is not None:
             dense = self._dense_array_func(xp)
             self._store_dense(xp, dense)
@@ -194,27 +172,17 @@ class LinearMap:
         self._store_dense(xp, dense)
         return dense
 
-    def _explicit_array(self, xp: Any = None) -> Any:
-        """Materialize this map as a shaped dense array on ``xp``."""
-        xp = self.array_module() if xp is None else xp
-        cached = self._cached_array(xp)
-        if cached is not None:
-            return cached
-        dense = self._dense_array(xp)
-        array = xp.reshape(dense, self.output_shape + self.input_shape)
-        self._store_array(xp, array)
-        return array
-
     def to_matrix(self, *, backend: MatrixBackend | None = None) -> Any:
         """Materialize this map as an explicit flat 2-D matrix."""
         xp = _array_module_for_matrix_backend(backend)
-        self._explicit_array(xp)
         return block_until_ready(self._dense_array(xp))
 
     @property
     def array(self) -> Any:
         """Lazily materialized shaped operator array."""
-        return block_until_ready(self._explicit_array())
+        xp = self.array_module()
+        dense = self._dense_array(xp)
+        return block_until_ready(xp.reshape(dense, self.output_shape + self.input_shape))
 
     def diagonal(self, *, backend: MatrixBackend | None = None) -> Any:
         """Return diagonal scale values for a diagonal map."""
@@ -238,7 +206,7 @@ class LinearMap:
     def normal_matrix_diag(self) -> np.ndarray:
         """Compute ``diag(A* A)`` for this map."""
         if self._normal_matrix_diag is not None:
-            return np.asarray(self._normal_matrix_diag())
+            return np.asarray(self._normal_matrix_diag()).real
         if self._diagonal_array_func is not None:
             return np.abs(np.asarray(self.diagonal(backend="numpy"))) ** 2
         if self._cached_dense(np) is not None or self._dense_array_func is not None:
@@ -596,7 +564,8 @@ def _normal_matrix_diag_from_matmat(
     """Compute ``diag(A* A)`` from bounded identity blocks."""
     n_cols = shape[1]
     work_dtype = np.result_type(dtype, np.float64)
-    diag = np.zeros(n_cols, dtype=work_dtype)
+    diag_dtype = np.empty((), dtype=work_dtype).real.dtype
+    diag = np.zeros(n_cols, dtype=diag_dtype)
     block_size = min(32, max(1, n_cols))
     block = np.zeros((n_cols, block_size), dtype=work_dtype)
     for start in range(0, n_cols, block_size):
@@ -1175,35 +1144,38 @@ def _linear_map_from_scipy_sparse(
     shape = tuple(int(dim) for dim in sparse.shape)
     out_shape, in_shape = _map_shapes(shape, input_shape, output_shape)
     dtype = sparse.dtype
-    dense_cache: dict[str, Any] = {}
-    adjoint_dense_cache: dict[str, Any] = {}
+    dense_cache: dict[Any, Any] = {}
 
-    def cached_dense(matrix: scipy.sparse.spmatrix, xp: Any, cache: dict[str, Any]) -> Any:
-        key = getattr(xp, "__name__", repr(xp))
-        if key not in cache:
-            cache[key] = xp.asarray(matrix.toarray())
-        return cache[key]
+    def cached_dense(xp: Any) -> Any:
+        if xp not in dense_cache:
+            dense_cache[xp] = xp.asarray(sparse.toarray())
+        return dense_cache[xp]
 
-    def apply(matrix, cache, values, input_size):
+    def apply(matrix, values, input_size, *, adjoint_dense=False):
         xp = _runtime_array_module(values)
         values = xp.asarray(values)
         values = values.reshape(input_size) if values.ndim == 1 else values.reshape(input_size, -1)
-        return matrix @ values if xp is np else cached_dense(matrix, xp, cache) @ values
+        if xp is np:
+            return matrix @ values
+        dense = cached_dense(xp)
+        if adjoint_dense:
+            dense = xp.swapaxes(xp.conjugate(dense), -2, -1)
+        return dense @ values
 
-    def matvec(vec: Any) -> np.ndarray:
-        return apply(sparse, dense_cache, vec, shape[1])
+    def matvec(vec: Any) -> Any:
+        return apply(sparse, vec, shape[1])
 
-    def rmatvec(vec: Any) -> np.ndarray:
-        return apply(adjoint, adjoint_dense_cache, vec, shape[0])
+    def rmatvec(vec: Any) -> Any:
+        return apply(adjoint, vec, shape[0], adjoint_dense=True)
 
-    def matmat(block: Any) -> np.ndarray:
-        return apply(sparse, dense_cache, block, shape[1])
+    def matmat(block: Any) -> Any:
+        return apply(sparse, block, shape[1])
 
-    def rmatmat(block: Any) -> np.ndarray:
-        return apply(adjoint, adjoint_dense_cache, block, shape[0])
+    def rmatmat(block: Any) -> Any:
+        return apply(adjoint, block, shape[0], adjoint_dense=True)
 
     def dense_array(xp: Any) -> Any:
-        return xp.asarray(sparse.toarray())
+        return cached_dense(xp)
 
     def normal_matrix_diag() -> np.ndarray:
         return np.asarray(sparse.multiply(sparse.conjugate()).sum(axis=0)).reshape(-1).real
@@ -1346,8 +1318,7 @@ def as_linear_map(
             return op
         relabeled = replace(op, output_shape=out_shape, input_shape=in_shape)
         # The flat matrix is unchanged by shaped metadata. Share any dense
-        # materialization already paid for, while leaving the shaped-array
-        # cache private because its reshape depends on the new labels.
+        # materialization already paid for.
         object.__setattr__(relabeled, "_dense_cache", op._dense_cache)
         return relabeled
 

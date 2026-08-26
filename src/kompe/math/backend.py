@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import types
 from contextlib import contextmanager
-from functools import wraps
 from importlib.util import find_spec
 from threading import RLock
 from typing import Any
@@ -157,11 +156,7 @@ def to_jax(array: Any) -> Any:
 
 def block_until_ready(array: Any) -> Any:
     """Synchronize a JAX array before handing work to NumPy/SciPy."""
-    if isinstance(array, tuple):
-        for item in array:
-            block_until_ready(item)
-        return array
-    if isinstance(array, list):
+    if isinstance(array, (tuple, list)):
         for item in array:
             block_until_ready(item)
         return array
@@ -191,7 +186,6 @@ def to_numpy(array: Any) -> Any:
     """Convert ``array`` to a NumPy ``ndarray``."""
     if _is_jax_array(array):
         block_until_ready(array)
-        return _np.asarray(array)
     return _np.asarray(array)
 
 
@@ -201,19 +195,11 @@ def asarray(array: Any, dtype: Any = None) -> Any:
     return module.asarray(array, dtype=dtype) if dtype is not None else module.asarray(array)
 
 
-def _identity_decorator(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        return func(*args, **kwargs)
-
-    return wrapper
-
-
 def jit(func=None, *jit_args, **jit_kwargs):
     """Wrap ``jax.jit`` and no-op when JAX is disabled."""
     if not JAX_AVAILABLE:
         if func is None:
-            return _identity_decorator
+            return lambda fn: fn
         return func
 
     def decorator(fn):

@@ -53,9 +53,9 @@ class LeastSquaresProblem:
         )
         self.solution_size = math.prod(self.solution_shape)
         self._system_operator_cache: dict[bool, LinearMap] = {}
-        self._dense_system_matrix_cache: dict[str, Any] = {}
-        self._dense_normal_equation_cache: dict[str, tuple[Any, Any, Any]] = {}
-        self._dense_normal_pinv_cache: dict[tuple[str, float], Any] = {}
+        self._dense_system_matrix_cache: dict[Any, Any] = {}
+        self._dense_normal_equation_cache: dict[Any, tuple[Any, Any, Any]] = {}
+        self._dense_normal_pinv_cache: dict[tuple[Any, float], Any] = {}
         self.operator_cache = operator_cache
         self.cache_identity = cache_identity
         self.data_normal_matrix_builder = data_normal_matrix_builder
@@ -150,32 +150,31 @@ class LeastSquaresProblem:
     @cached_property
     def dense_system_matrix(self) -> np.ndarray:
         """Assemble the dense regularized system as NumPy."""
-        return np.asarray(self._dense_system_matrix("numpy"))
+        return np.asarray(self._dense_system_matrix(np))
 
     def assemble_dense_system_matrix(self) -> Any:
         """Assemble the dense system on the active backend."""
         xp = get_array_module()
         if xp is np:
             return self.dense_system_matrix
-        return self._dense_system_matrix(_backend_cache_key(xp))
+        return self._dense_system_matrix(xp)
 
     def dense_normal_equations(self) -> tuple[Any, Any, Any, Any]:
         """Return dense system, adjoint, and normal matrix."""
         system_matrix = self.assemble_dense_system_matrix()
         xp = get_array_module(system_matrix)
-        key = _backend_cache_key(xp)
-        if key not in self._dense_normal_equation_cache:
+        if xp not in self._dense_normal_equation_cache:
             system_adjoint = system_matrix.T.conj()
             normal_matrix = system_adjoint @ system_matrix
-            self._dense_normal_equation_cache[key] = (system_matrix, system_adjoint, normal_matrix)
+            self._dense_normal_equation_cache[xp] = (system_matrix, system_adjoint, normal_matrix)
         else:
-            system_matrix, system_adjoint, normal_matrix = self._dense_normal_equation_cache[key]
+            system_matrix, system_adjoint, normal_matrix = self._dense_normal_equation_cache[xp]
         return xp, system_matrix, system_adjoint, normal_matrix
 
     def dense_normal_pinv(self, tolerance: float) -> Any:
         """Return cached pseudo-inverse of the dense normal matrix."""
         xp = get_array_module()
-        key = (_backend_cache_key(xp), float(tolerance))
+        key = (xp, float(tolerance))
         if key not in self._dense_normal_pinv_cache:
 
             def compute():
@@ -205,7 +204,7 @@ class LeastSquaresProblem:
                         "algorithm": "least_squares_normal_pinv",
                         "version": _NORMAL_PINV_CACHE_VERSION,
                         "problem": self.cache_identity,
-                        "backend": key[0],
+                        "backend": xp.__name__,
                         "tolerance": float(tolerance),
                     },
                     build,
@@ -254,14 +253,12 @@ class LeastSquaresProblem:
             self._data_normal_matrix_cache = matrix
         return self._data_normal_matrix_cache
 
-    def _dense_system_matrix(self, backend_key: str) -> Any:
-        """Return cached dense system matrix for one backend key."""
-        if backend_key not in self._dense_system_matrix_cache:
-            backend = "numpy" if backend_key == "numpy" else None
-            self._dense_system_matrix_cache[backend_key] = self.system_operator().to_matrix(
-                backend=backend
-            )
-        return self._dense_system_matrix_cache[backend_key]
+    def _dense_system_matrix(self, xp: Any) -> Any:
+        """Return the cached dense system matrix for one backend."""
+        if xp not in self._dense_system_matrix_cache:
+            backend = "numpy" if xp is np else None
+            self._dense_system_matrix_cache[xp] = self.system_operator().to_matrix(backend=backend)
+        return self._dense_system_matrix_cache[xp]
 
     @cached_property
     def svd(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -415,8 +412,3 @@ class LeastSquaresProblem:
             return b.reshape(1, 1), ()
 
         raise ValueError(f"Shape {b.shape} incompatible with data_shape {data_shape}.")
-
-
-def _backend_cache_key(xp: Any) -> str:
-    """Return a stable cache key for one array backend."""
-    return getattr(xp, "__name__", repr(xp))

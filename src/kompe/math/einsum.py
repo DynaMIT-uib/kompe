@@ -319,9 +319,10 @@ class _EinsumMap:
     def normal_matrix_diag(self) -> np.ndarray:
         """Compute ``diag(A* A)`` without building the dense matrix."""
         try:
-            return self._normal_matrix_diag_einsum()
+            self._normal_diag_string()
         except ValueError:
             return self._normal_matrix_diag_probe()
+        return self._normal_matrix_diag_einsum()
 
     def _normal_matrix_diag_probe(self) -> np.ndarray:
         """Compute ``diag(A* A)`` by applying identity blocks."""

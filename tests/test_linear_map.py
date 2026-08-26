@@ -756,18 +756,22 @@ def test_sparse_linear_map_preserves_explicit_jax_inputs_when_numpy_active():
     import jax.numpy as jnp
 
     previous_backend = jax_enabled()
-    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
-    x = np.array([0.25, -2.0])
+    matrix = np.array([[2.0 + 1.0j, 0.0], [0.0, 3.0 - 2.0j], [1.0, -1.0j]], dtype=np.complex64)
+    x = np.array([0.25 - 0.5j, -2.0 + 0.75j], dtype=np.complex64)
+    y = np.array([1.0j, 0.5, -1.0 + 2.0j], dtype=np.complex64)
 
     try:
         set_backend("numpy")
         linear_map = as_linear_map(csr_matrix(matrix))
         result = linear_map.matvec(jnp.asarray(x))
+        adjoint_result = linear_map.rmatvec(jnp.asarray(y))
     finally:
         set_backend(previous_backend)
 
     assert "jax" in type(result).__module__
+    assert "jax" in type(adjoint_result).__module__
     np.testing.assert_allclose(np.asarray(result), matrix @ x)
+    np.testing.assert_allclose(np.asarray(adjoint_result), matrix.T.conj() @ y)
 
 
 def test_composed_linear_map_normal_diagonal_uses_matmat_path():
@@ -1353,6 +1357,32 @@ def test_einsum_linear_map_complex_adjoint_matches_dense():
     np.testing.assert_allclose(linear_map.rmatvec(y), dense.conj().T @ y)
     np.testing.assert_allclose(linear_map.rmatmat(y_block), dense.conj().T @ y_block)
     np.testing.assert_allclose(linear_map.normal_matrix_diag(), np.sum(np.abs(dense) ** 2, axis=0))
+
+
+def test_einsum_complex_normal_diagonal_probe_is_real():
+    """The general probe retains complex work values but returns a real norm."""
+    diagonal = np.array([1.0 + 2.0j, -3.0 + 0.5j])
+    linear_map = einsum_linear_map(
+        component_tensors=[diagonal],
+        einsum_string_dense="i->ii",
+        einsum_string_matvec="i,i->i",
+        einsum_string_rmatvec="i,i->i",
+        output_shape=(2,),
+        input_shape=(2,),
+    )
+
+    result = linear_map.normal_matrix_diag()
+
+    assert not np.issubdtype(result.dtype, np.complexfloating)
+    np.testing.assert_allclose(result, np.abs(diagonal) ** 2)
+
+
+def test_complex_identity_normal_diagonal_is_real():
+    """The normal diagonal is real even when the map itself is complex."""
+    result = identity_linear_map(3, dtype=np.complex128).normal_matrix_diag()
+
+    assert not np.issubdtype(result.dtype, np.complexfloating)
+    np.testing.assert_array_equal(result, np.ones(3))
 
 
 # Least-squares integration

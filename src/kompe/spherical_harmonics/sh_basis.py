@@ -198,23 +198,21 @@ class SHBasis(SurfaceDifferentialBasis):
     @staticmethod
     def _grid_cache_key(grid):
         """Return a stable cache key for one grid/array-backend pair."""
-        signature = getattr(grid, "exact_coordinate_signature", None)
-        if signature is None:
-            signature = getattr(grid, "signature", None)
+        signature = getattr(grid, "signature", None)
         if signature is None:
             return None
         return (signature, bool(jax_enabled()))
 
     def _evaluation_cache_identity(self, grid, derivative):
         """Return exact identity for one persisted SH evaluation."""
-        coordinates = getattr(grid, "exact_coordinate_signature", None)
-        if coordinates is None:
+        grid_signature = getattr(grid, "signature", None)
+        if grid_signature is None:
             return None
         return {
             "algorithm": "sh_scalar_evaluation",
             "algorithm_version": _EVALUATION_CACHE_VERSION,
             "basis": self.signature,
-            "grid_coordinates": coordinates,
+            "grid_coordinates": grid_signature,
             "derivative": "value" if derivative is None else derivative,
         }
 

@@ -126,15 +126,15 @@ def test_basis_metadata_arrays_are_immutable_values():
 # Spherical sample-grid values
 
 
-def test_grid_signature_matches_equivalent_coordinates():
-    """SphericalGrid equality uses robust coordinate signatures."""
+def test_grid_equality_tolerates_roundoff_without_weakening_cache_identity():
+    """Grid equality tolerates roundoff while cache signatures remain exact."""
     lat = np.array([60.0, 61.0, 62.0])
     lon = np.array([10.0, 11.0, 12.0])
     first = SphericalGrid(lat=lat, lon=lon)
     second = SphericalGrid(theta=90.0 - lat + 1e-10, phi=lon - 1e-10)
     different = SphericalGrid(lat=lat, lon=lon + np.array([0.0, 0.0, 1e-3]))
 
-    assert first.signature == second.signature
+    assert first.signature != second.signature
     assert first.same_as(second)
     assert first == second
     assert not first.same_as(different)
@@ -176,15 +176,10 @@ def test_grid_rejects_invalid_area_weights():
         SphericalGrid(lat=[60.0], lon=[0.0], area_weights=[-1.0])
 
 
-def test_csbasis_native_grid_comparison_uses_grid_signature(monkeypatch):
-    """Native CS SphericalGrid matching delegates to SphericalGrid.same_as."""
+def test_csbasis_native_grid_comparison_tolerates_coordinate_roundoff():
+    """Native CS grid matching tolerates insignificant coordinate roundoff."""
     cs_basis = GlobalCSBasis(4)
     grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
-
-    def fail_allclose(*args, **kwargs):
-        raise AssertionError("SphericalGrid-native comparison should use coordinate hashes")
-
-    monkeypatch.setattr("kompe.cubed_sphere.global_basis.np.allclose", fail_allclose)
 
     assert cs_basis._is_native_grid(grid)
     grid_like = type(

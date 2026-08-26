@@ -4,7 +4,9 @@ from functools import cached_property
 
 import numpy as np
 
-from kompe.math import array_fingerprint, content_fingerprint
+from kompe.math import array_fingerprint
+
+_COORDINATE_EQUALITY_ATOL_DEGREES = 1e-9
 
 
 class SphericalGrid:
@@ -103,19 +105,10 @@ class SphericalGrid:
 
     @cached_property
     def signature(self):
-        """Return a stable signature for this grid."""
-        coordinates = content_fingerprint(
-            {
-                "theta": np.asarray(self.theta, dtype="<f4"),
-                "phi": np.asarray(self.phi, dtype="<f4"),
-            }
-        )
-        return (type(self).__module__, type(self).__qualname__, coordinates)
-
-    @cached_property
-    def exact_coordinate_signature(self):
-        """Return exact coordinate identity for persisted operators."""
+        """Return an exact, stable cache signature for this grid."""
         return (
+            type(self).__module__,
+            type(self).__qualname__,
             array_fingerprint(self.theta, dtype="<f8"),
             array_fingerprint(self.phi, dtype="<f8"),
         )
@@ -128,15 +121,31 @@ class SphericalGrid:
         return (self.signature, array_fingerprint(self.area_weights, dtype="<f8"))
 
     def same_as(self, other):
-        """Return whether another grid has the same coordinates."""
+        """Return whether another grid differs only by coordinate roundoff."""
         if self is other:
             return True
         if not isinstance(other, SphericalGrid):
             return False
-        return self.signature == other.signature
+        if self.signature == other.signature:
+            return True
+        return (
+            self.size == other.size
+            and np.allclose(
+                self.theta,
+                other.theta,
+                rtol=0.0,
+                atol=_COORDINATE_EQUALITY_ATOL_DEGREES,
+            )
+            and np.allclose(
+                self.phi,
+                other.phi,
+                rtol=0.0,
+                atol=_COORDINATE_EQUALITY_ATOL_DEGREES,
+            )
+        )
 
     def __eq__(self, other):
-        """Compare grids by their coordinate signatures."""
+        """Compare grids while tolerating insignificant coordinate roundoff."""
         if not isinstance(other, SphericalGrid):
             return NotImplemented
         return self.same_as(other)
