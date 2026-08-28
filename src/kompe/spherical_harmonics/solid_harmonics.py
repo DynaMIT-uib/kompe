@@ -61,25 +61,26 @@ class SolidHarmonicOperators:
         return get_array_module().asarray((start / end) ** (self.basis.n + 2))
 
     @property
-    def poloidal_to_regular_potential_factor(self):
+    def poloidal_to_regular_potential_factors(self):
         """Map poloidal to regular potential coefficients."""
         return get_array_module().asarray(-(self.basis.n + 1))
 
     @property
-    def poloidal_to_irregular_potential_factor(self):
+    def poloidal_to_irregular_potential_factors(self):
         """Map poloidal to irregular potential coefficients."""
         return get_array_module().asarray(self.basis.n)
 
     @property
-    def poloidal_to_boundary_potential_jump_factor(self):
-        """Map poloidal coefficients to normalized potential jump."""
+    def poloidal_to_normalized_potential_jump_factors(self):
+        """Map poloidal coefficients to potential jump divided by radius."""
         return (
-            self.poloidal_to_irregular_potential_factor - self.poloidal_to_regular_potential_factor
+            self.poloidal_to_irregular_potential_factors
+            - self.poloidal_to_regular_potential_factors
         )
 
-    def poloidal_to_boundary_potential_jump_factors(self, radius):
-        """Map poloidal coefficients to the boundary potential jump."""
-        return radius * self.poloidal_to_boundary_potential_jump_factor
+    def poloidal_to_potential_jump_factors(self, radius):
+        """Map poloidal coefficients to the physical potential jump at ``radius``."""
+        return radius * self.poloidal_to_normalized_potential_jump_factors
 
     def regular_reference_shift_operator(self, start, end):
         """Return the regular reference-radius shift operator."""
@@ -91,12 +92,12 @@ class SolidHarmonicOperators:
 
     def poloidal_to_regular_potential_operator(self):
         """Return the poloidal-to-regular-potential operator."""
-        return as_linear_map(self.poloidal_to_regular_potential_factor)
+        return as_linear_map(self.poloidal_to_regular_potential_factors)
 
     def poloidal_to_irregular_potential_operator(self):
         """Return the poloidal-to-irregular-potential operator."""
-        return as_linear_map(self.poloidal_to_irregular_potential_factor)
+        return as_linear_map(self.poloidal_to_irregular_potential_factors)
 
-    def poloidal_to_boundary_potential_jump_operator(self, radius):
-        """Return the poloidal-to-boundary-potential-jump operator."""
-        return as_linear_map(self.poloidal_to_boundary_potential_jump_factors(radius))
+    def poloidal_to_potential_jump_operator(self, radius):
+        """Return the poloidal-to-physical-potential-jump operator at ``radius``."""
+        return as_linear_map(self.poloidal_to_potential_jump_factors(radius))

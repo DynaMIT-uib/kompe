@@ -18,7 +18,7 @@ from kompe import (
 )
 from kompe.cubed_sphere import REGIONAL_CS_MESH_SCHEMA, REGIONAL_CS_MESH_SCHEMA_VERSION
 from kompe.cubed_sphere.regional_plotting import RegionalCSPlotter
-from kompe.math import backend_context, jit, to_jax, to_numpy
+from kompe.math import backend_context, to_numpy
 
 
 def _longitude_error(actual, expected):
@@ -195,6 +195,9 @@ def test_regional_vector_components_roundtrip_at_face_centre_and_away():
 @pytest.mark.requires_jax
 def test_regional_projection_algebra_stays_on_jax_backend():
     """Regional coordinate, vector, and metric operations preserve JAX arrays."""
+    import jax
+    import jax.numpy as jnp
+
     projection = RegionalCSProjection((18.0, 67.0), 37.0)
     mesh = RegionalCSMesh(
         projection,
@@ -205,10 +208,10 @@ def test_regional_projection_algebra_stays_on_jax_backend():
     )
 
     with backend_context("jax"):
-        xi = to_jax(np.array([0.0, 0.07, -0.11, 0.23]))
-        eta = to_jax(np.array([0.0, -0.08, 0.16, 0.12]))
-        east = to_jax(np.array([1.0, 1.2, -0.7, 0.3]))
-        north = to_jax(np.array([0.0, -0.4, 0.9, 1.4]))
+        xi = jnp.asarray(np.array([0.0, 0.07, -0.11, 0.23]))
+        eta = jnp.asarray(np.array([0.0, -0.08, 0.16, 0.12]))
+        east = jnp.asarray(np.array([1.0, 1.2, -0.7, 0.3]))
+        north = jnp.asarray(np.array([0.0, -0.4, 0.9, 1.4]))
         lon, lat = projection.cube_to_geographic(xi, eta)
         actual_xi, actual_eta = projection.geographic_to_cube(lon, lat)
         rotation = projection.local_to_geographic_enu_rotation(lon, lat)
@@ -217,16 +220,16 @@ def test_regional_projection_algebra_stays_on_jax_backend():
             cube_xi, cube_eta, xi, eta
         )
         elements = projection.differential_elements(xi, eta, 0.03, 0.04)
-        values = to_jax(2 * mesh.xi - 3 * mesh.eta)
+        values = jnp.asarray(2 * mesh.xi - 3 * mesh.eta)
         interpolated = mesh.operators.interpolate_scalar(
             values,
-            to_jax(mesh.lon),
-            to_jax(mesh.lat),
+            jnp.asarray(mesh.lon),
+            jnp.asarray(mesh.lat),
         )
-        compiled_interpolation = jit(mesh.operators.interpolate_scalar)(
+        compiled_interpolation = jax.jit(mesh.operators.interpolate_scalar)(
             values,
-            to_jax(mesh.lon),
-            to_jax(mesh.lat),
+            jnp.asarray(mesh.lon),
+            jnp.asarray(mesh.lat),
         )
 
     arrays = (

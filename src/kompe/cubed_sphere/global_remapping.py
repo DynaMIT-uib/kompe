@@ -78,7 +78,7 @@ class _GlobalCSRemapper:
 
         # Delaunay triangulation and sparse assembly are SciPy CPU work.  The
         # cube-coordinate round trip must use the same NumPy arithmetic as the
-        # triangulation, especially for points on panel boundaries.
+        # triangulation, especially for points on face boundaries.
         with backend_context("numpy"):
             matrix = build()
         cache[key] = matrix
@@ -113,26 +113,26 @@ class _GlobalCSRemapper:
         weights = np.column_stack([first_weights, 1.0 - np.sum(first_weights, axis=1)])
         return triangulation.simplices[simplex], weights
 
-    def block_interpolation_weights(self, theta, phi, theta_target, phi_target):
-        """Return per-block interpolation weights."""
+    def _face_interpolation_stencils(self, theta, phi, theta_target, phi_target):
+        """Return interpolation vertices and weights for each target face."""
         basis = self.basis
-        xi_target, eta_target, block_target = basis.mesh.projection.geographic_to_cube(
+        xi_target, eta_target, target_face = basis.mesh.projection.geographic_to_cube(
             phi_target, 90 - theta_target
         )
         xi_target = xi_target.reshape(-1)
         eta_target = eta_target.reshape(-1)
-        block_target = block_target.reshape(-1)
+        target_face = target_face.reshape(-1)
 
         th, ph = np.deg2rad(theta), np.deg2rad(phi)
         r = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)))
-        blocks = []
+        stencils = []
 
-        for block_index in range(6):
-            target_index = np.flatnonzero(block_target == block_index)
+        for face_index in range(6):
+            target_index = np.flatnonzero(target_face == face_index)
             if target_index.size == 0:
                 continue
 
-            _, th0, ph0 = basis.mesh.projection.cube_to_spherical(0, 0, block_index, degrees=False)
+            _, th0, ph0 = basis.mesh.projection.cube_to_spherical(0, 0, face_index, degrees=False)
             r0 = np.array(
                 [np.sin(th0) * np.cos(ph0), np.sin(th0) * np.sin(ph0), np.cos(th0)]
             ).reshape((-1, 1))
@@ -140,25 +140,25 @@ class _GlobalCSRemapper:
             source_index = np.flatnonzero(source_mask)
 
             xi_source, eta_source, _ = basis.mesh.projection.geographic_to_cube(
-                phi, 90 - theta, face=block_index
+                phi, 90 - theta, face=face_index
             )
             source_points = np.column_stack([xi_source[source_mask], eta_source[source_mask]])
             target_points = np.column_stack([xi_target[target_index], eta_target[target_index]])
             vertices, weights = self.linear_interpolation_weights(source_points, target_points)
-            blocks.append((block_index, target_index, source_index[vertices], weights))
+            stencils.append((face_index, target_index, source_index[vertices], weights))
 
-        return blocks
+        return stencils
 
     def build_scalar_grid_remap_matrix(self, source_grid, target_grid):
         """Build a sparse scalar grid remap."""
         theta, phi = self.grid_theta_phi(source_grid)
         theta_target, phi_target = self.grid_theta_phi(target_grid)
-        blocks = self.block_interpolation_weights(theta, phi, theta_target, phi_target)
+        stencils = self._face_interpolation_stencils(theta, phi, theta_target, phi_target)
 
         rows = []
         cols = []
         data = []
-        for _, target_index, source_vertices, weights in blocks:
+        for _, target_index, source_vertices, weights in stencils:
             rows.append(np.repeat(target_index, 3))
             cols.append(source_vertices.reshape(-1))
             data.append(weights.reshape(-1))
@@ -177,20 +177,20 @@ class _GlobalCSRemapper:
         basis = self.basis
         theta, phi = self.grid_theta_phi(source_grid)
         theta_target, phi_target = self.grid_theta_phi(target_grid)
-        blocks = self.block_interpolation_weights(theta, phi, theta_target, phi_target)
+        stencils = self._face_interpolation_stencils(theta, phi, theta_target, phi_target)
 
-        xi_source, eta_source, block_source = basis.mesh.projection.geographic_to_cube(
+        xi_source, eta_source, source_face = basis.mesh.projection.geographic_to_cube(
             phi, 90 - theta
         )
         source_transform = basis.mesh.projection.enu_to_cube_vector_matrix(
-            xi_source, eta_source, radius=1, face=block_source
+            xi_source, eta_source, radius=1, face=source_face
         )
 
-        xi_target, eta_target, block_target = basis.mesh.projection.geographic_to_cube(
+        xi_target, eta_target, target_face = basis.mesh.projection.geographic_to_cube(
             phi_target, 90 - theta_target
         )
         target_transform = basis.mesh.projection.cube_to_enu_vector_matrix(
-            xi_target, eta_target, radius=1, face=block_target
+            xi_target, eta_target, radius=1, face=target_face
         )
 
         n_source = theta.size
@@ -200,12 +200,12 @@ class _GlobalCSRemapper:
         cols = []
         data = []
 
-        for block_index, target_index, source_vertices, weights in blocks:
+        for face_index, target_index, source_vertices, weights in stencils:
             qij = basis.mesh.projection.face_to_face_vector_matrix(
-                xi_source, eta_source, block_source, block_index
+                xi_source, eta_source, source_face, face_index
             )
-            source_to_block = np.einsum("nij,njk->nik", qij, source_transform)
-            source_coeff = source_to_block[source_vertices]
+            source_to_face = np.einsum("nij,njk->nik", qij, source_transform)
+            source_coeff = source_to_face[source_vertices]
             source_coeff = np.stack([-source_coeff[..., 1], source_coeff[..., 0]], axis=-1)
             target_coeff = target_transform[target_index]
             target_coeff = np.stack([-target_coeff[:, 1, :], target_coeff[:, 0, :]], axis=1)
@@ -273,7 +273,7 @@ class _GlobalCSRemapper:
             )
         return self.operator_cache[key]
 
-    def _panel_interpolation_points(self, theta, phi, xi_target, eta_target, face_target):
+    def _face_interpolation_points(self, theta, phi, xi_target, eta_target, face_target):
         """Yield source and target points for interpolation on each cube face."""
         th, ph = np.deg2rad(theta), np.deg2rad(phi)
         position = np.vstack((np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)))
@@ -305,14 +305,20 @@ class _GlobalCSRemapper:
     def interpolate_vector(
         self, u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
     ):
-        """Interpolate canonical spherical vectors through CS panels."""
+        """Interpolate canonical spherical vectors through cube faces."""
         basis = self.basis
         theta_target, phi_target = np.broadcast_arrays(
             to_numpy(theta_target), to_numpy(phi_target)
         )
         target_shape = theta_target.shape
-        xi, eta, block = basis.mesh.projection.geographic_to_cube(phi_target, 90 - theta_target)
-        xi, eta, block = xi.reshape(-1), eta.reshape(-1), block.reshape(-1)
+        xi, eta, target_face = basis.mesh.projection.geographic_to_cube(
+            phi_target, 90 - theta_target
+        )
+        xi, eta, target_face = (
+            xi.reshape(-1),
+            eta.reshape(-1),
+            target_face.reshape(-1),
+        )
 
         theta, phi = np.broadcast_arrays(to_numpy(theta), to_numpy(phi))
         source_shape = theta.shape
@@ -341,36 +347,38 @@ class _GlobalCSRemapper:
             theta = theta_b.reshape(-1)
             phi = phi_b.reshape(-1)
 
-        u_xi, u_eta, u_block = basis.mesh.projection.geographic_to_cube(phi, 90 - theta)
-        geographic_to_panel = basis.mesh.projection.enu_to_cube_vector_matrix(
-            u_xi, u_eta, radius=1, face=u_block
+        source_xi, source_eta, source_face = basis.mesh.projection.geographic_to_cube(
+            phi, 90 - theta
+        )
+        geographic_to_face = basis.mesh.projection.enu_to_cube_vector_matrix(
+            source_xi, source_eta, radius=1, face=source_face
         )
         enu_values = np.stack([u_phi_values, -u_theta_values, u_radial_values], axis=1)
-        panel_values = np.einsum("nij,nj...->ni...", geographic_to_panel, enu_values)
+        face_values = np.einsum("nij,nj...->ni...", geographic_to_face, enu_values)
 
-        interpolated_panel = np.empty((block.size, 3) + value_shape, dtype=np.float64)
+        interpolated_face = np.empty((target_face.size, 3) + value_shape, dtype=np.float64)
         for (
-            block_index,
+            face_index,
             source_mask,
             target_mask,
             source_points,
             target_points,
-        ) in self._panel_interpolation_points(theta, phi, xi, eta, block):
-            panel_rotation = basis.mesh.projection.face_to_face_vector_matrix(
-                u_xi, u_eta, u_block, block_index
+        ) in self._face_interpolation_points(theta, phi, xi, eta, target_face):
+            face_rotation = basis.mesh.projection.face_to_face_vector_matrix(
+                source_xi, source_eta, source_face, face_index
             )
-            values_on_panel = np.einsum("nij,nj...->ni...", panel_rotation, panel_values)
-            interpolated_panel[target_mask] = griddata(
+            values_on_face = np.einsum("nij,nj...->ni...", face_rotation, face_values)
+            interpolated_face[target_mask] = griddata(
                 source_points,
-                values_on_panel[source_mask],
+                values_on_face[source_mask],
                 target_points,
                 **kwargs,
             )
 
-        panel_to_geographic = basis.mesh.projection.cube_to_enu_vector_matrix(
-            xi, eta, radius=1, face=block
+        face_to_geographic = basis.mesh.projection.cube_to_enu_vector_matrix(
+            xi, eta, radius=1, face=target_face
         )
-        interpolated_enu = np.einsum("nij,nj...->ni...", panel_to_geographic, interpolated_panel)
+        interpolated_enu = np.einsum("nij,nj...->ni...", face_to_geographic, interpolated_face)
         return tuple(
             component.reshape(target_shape + value_shape)
             for component in (
@@ -381,14 +389,20 @@ class _GlobalCSRemapper:
         )
 
     def interpolate_scalar(self, scalar, theta, phi, theta_target, phi_target, **kwargs):
-        """Interpolate scalar values through CS panels."""
+        """Interpolate scalar values through cube faces."""
         basis = self.basis
         theta_target, phi_target = np.broadcast_arrays(
             to_numpy(theta_target), to_numpy(phi_target)
         )
         target_shape = theta_target.shape
-        xi, eta, block = basis.mesh.projection.geographic_to_cube(phi_target, 90 - theta_target)
-        xi, eta, block = xi.reshape(-1), eta.reshape(-1), block.reshape(-1)
+        xi, eta, target_face = basis.mesh.projection.geographic_to_cube(
+            phi_target, 90 - theta_target
+        )
+        xi, eta, target_face = (
+            xi.reshape(-1),
+            eta.reshape(-1),
+            target_face.reshape(-1),
+        )
 
         theta, phi = np.broadcast_arrays(to_numpy(theta), to_numpy(phi))
         source_shape = theta.shape
@@ -407,7 +421,7 @@ class _GlobalCSRemapper:
             theta = theta_broadcast.reshape(-1)
             phi = phi_broadcast.reshape(-1)
 
-        interpolated = np.empty((block.size,) + value_shape, dtype=np.float64)
+        interpolated = np.empty((target_face.size,) + value_shape, dtype=np.float64)
 
         for (
             _,
@@ -415,7 +429,7 @@ class _GlobalCSRemapper:
             target_mask,
             source_points,
             target_points,
-        ) in self._panel_interpolation_points(theta, phi, xi, eta, block):
+        ) in self._face_interpolation_points(theta, phi, xi, eta, target_face):
             interpolated[target_mask] = griddata(
                 source_points,
                 scalar_values[source_mask],

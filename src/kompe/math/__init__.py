@@ -2,19 +2,14 @@
 
 from kompe.math.backend import (
     JAX_AVAILABLE,
-    asarray,
     backend_context,
     block_until_ready,
     get_array_module,
     get_backend,
     jax_enabled,
-    jit,
     set_backend,
     synchronize_linalg_result,
-    to_jax,
     to_numpy,
-    use_jax,
-    vmap,
 )
 from kompe.math.einsum import einsum_linear_map, einsum_linear_map_from_matvec
 from kompe.math.fingerprints import array_fingerprint, content_fingerprint
@@ -50,7 +45,6 @@ __all__ = [
     "MatrixBackend",
     "array_fingerprint",
     "as_linear_map",
-    "asarray",
     "backend_context",
     "block_until_ready",
     "cholesky_least_squares_map",
@@ -66,17 +60,13 @@ __all__ = [
     "identity_linear_map",
     "is_identity_linear_map",
     "jax_enabled",
-    "jit",
     "pointwise_matrix_linear_map",
     "set_backend",
     "sparse_constrained_least_squares_map",
     "synchronize_linalg_result",
     "take_linear_map",
     "tensor_pinv",
-    "to_jax",
     "to_numpy",
-    "use_jax",
-    "vmap",
     "vstack_linear_maps",
     "weighted_tensor_pinv",
 ]

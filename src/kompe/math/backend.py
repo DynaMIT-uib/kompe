@@ -3,8 +3,7 @@
 This module centralizes the optional JAX acceleration policy used by
 linear maps, tensor operations, least-squares solvers, and simulation
 code. The active backend is controlled through ``KOMPE_USE_JAX`` and
-can also be changed programmatically with ``set_backend`` or
-``use_jax``.
+can also be changed programmatically with ``set_backend``.
 """
 
 from __future__ import annotations
@@ -21,15 +20,12 @@ import numpy as _np
 JAX_AVAILABLE = find_spec("jax") is not None
 _jax_namespace: types.ModuleType | None = None
 _jax_array_type: tuple[type, ...] = ()
-_jax_device_put = None
-_jax_jit = None
-_jax_vmap = None
 _jax_import_lock = RLock()
 
 
 def _load_jax() -> types.ModuleType:
     """Import JAX on first use without changing process-wide configuration."""
-    global _jax_array_type, _jax_device_put, _jax_jit, _jax_namespace, _jax_vmap
+    global _jax_array_type, _jax_namespace
 
     if not JAX_AVAILABLE:
         raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
@@ -40,16 +36,12 @@ def _load_jax() -> types.ModuleType:
         if _jax_namespace is not None:
             return _jax_namespace
         try:
-            import jax
             import jax.numpy as jnp
             from jax import Array as JaxArray
         except ImportError as exc:  # pragma: no cover - broken optional install
             raise RuntimeError("JAX is installed but could not be imported.") from exc
 
         _jax_namespace = jnp
-        _jax_device_put = jax.device_put
-        _jax_jit = jax.jit
-        _jax_vmap = jax.vmap
         _jax_array_type = (JaxArray,)
         return _jax_namespace
 
@@ -72,21 +64,19 @@ def _env_flag(value: str | None) -> bool:
 _USE_JAX = JAX_AVAILABLE and _env_flag(os.environ.get("KOMPE_USE_JAX"))
 
 
-def use_jax(flag: bool | None = None) -> bool:
-    """Query or set whether JAX should be used."""
+def _set_jax_enabled(flag: bool) -> None:
+    """Set the backend flag after validating JAX availability."""
     global _USE_JAX
-    if flag is not None:
-        if flag and not JAX_AVAILABLE:
-            raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
-        if flag:
-            _load_jax()
-        _USE_JAX = bool(flag)
-    return bool(_USE_JAX and JAX_AVAILABLE)
+    if flag and not JAX_AVAILABLE:
+        raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
+    if flag:
+        _load_jax()
+    _USE_JAX = bool(flag)
 
 
 def jax_enabled() -> bool:
     """Return whether JAX is the active array backend."""
-    return use_jax()
+    return bool(_USE_JAX and JAX_AVAILABLE)
 
 
 def get_backend() -> str:
@@ -99,7 +89,7 @@ def set_backend(backend: str | bool | None) -> str:
     if isinstance(backend, bool):
         target = backend
     elif backend is None:
-        target = use_jax()
+        target = jax_enabled()
     elif isinstance(backend, str):
         normalized = backend.strip().lower()
         if normalized in {"jax"}:
@@ -107,13 +97,13 @@ def set_backend(backend: str | bool | None) -> str:
         elif normalized == "numpy":
             target = False
         elif normalized == "auto":
-            target = use_jax()
+            target = jax_enabled()
         else:
             raise ValueError(f"Unknown backend '{backend}'. Expected 'numpy', 'jax', or 'auto'.")
     else:
         raise TypeError("backend must be a string, boolean, or None.")
 
-    use_jax(target)
+    _set_jax_enabled(target)
     os.environ["KOMPE_USE_JAX"] = "1" if target else "0"
     return "jax" if target else "numpy"
 
@@ -121,7 +111,7 @@ def set_backend(backend: str | bool | None) -> str:
 @contextmanager
 def backend_context(backend: str | bool | None):
     """Temporarily set the active array backend inside a context."""
-    previous_backend = use_jax()
+    previous_backend = get_backend()
     previous_env = os.environ.get("KOMPE_USE_JAX")
     active_backend = set_backend(backend)
     try:
@@ -143,15 +133,7 @@ def get_array_module(*arrays: Any) -> types.ModuleType:
         for array in arrays:
             if _is_jax_array(array):
                 return _load_jax()
-    return _load_jax() if use_jax() else _np
-
-
-def to_jax(array: Any) -> Any:
-    """Convert ``array`` to a JAX device array when JAX is enabled."""
-    if not use_jax():
-        return array
-    _load_jax()
-    return _jax_device_put(array)
+    return _load_jax() if jax_enabled() else _np
 
 
 def block_until_ready(array: Any) -> Any:
@@ -189,55 +171,14 @@ def to_numpy(array: Any) -> Any:
     return _np.asarray(array)
 
 
-def asarray(array: Any, dtype: Any = None) -> Any:
-    """Backend-aware ``asarray`` helper."""
-    module = get_array_module(array)
-    return module.asarray(array, dtype=dtype) if dtype is not None else module.asarray(array)
-
-
-def jit(func=None, *jit_args, **jit_kwargs):
-    """Wrap ``jax.jit`` and no-op when JAX is disabled."""
-    if not JAX_AVAILABLE:
-        if func is None:
-            return lambda fn: fn
-        return func
-
-    def decorator(fn):
-        if use_jax():
-            _load_jax()
-            return _jax_jit(fn, *jit_args, **jit_kwargs)
-        return fn
-
-    if func is None:
-        return decorator
-    return decorator(func)
-
-
-def vmap(func=None, *vmap_args, **vmap_kwargs):
-    """Wrap ``jax.vmap`` and require the JAX backend."""
-    if not (JAX_AVAILABLE and use_jax()):
-        raise RuntimeError("JAX vmap requested but the JAX backend is not enabled.")
-    _load_jax()
-
-    if func is None:
-        return lambda fn: _jax_vmap(fn, *vmap_args, **vmap_kwargs)
-
-    return _jax_vmap(func, *vmap_args, **vmap_kwargs)
-
-
 __all__ = [
     "JAX_AVAILABLE",
-    "asarray",
     "backend_context",
     "block_until_ready",
     "get_array_module",
     "get_backend",
     "jax_enabled",
-    "jit",
     "set_backend",
     "synchronize_linalg_result",
-    "to_jax",
     "to_numpy",
-    "use_jax",
-    "vmap",
 ]

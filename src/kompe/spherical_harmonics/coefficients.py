@@ -5,7 +5,7 @@ import math
 import numpy as np
 
 
-class SHIndices:
+class SHCoefficientIndices:
     """The paired arrays used by cosine or sine SH coefficients."""
 
     def __init__(self, index_pairs):

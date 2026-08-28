@@ -62,42 +62,14 @@ def resolve_sqrt_weights(grid, sqrt_weights=None, area_weighted=False, vector=Fa
     if sqrt_weights is not None:
         xp = get_array_module(sqrt_weights)
         weights = xp.asarray(sqrt_weights)
-        if vector:
-            if weights.size == grid.size:
-                return xp.broadcast_to(weights.reshape(1, grid.size), (2, grid.size))
+        if vector and weights.size == grid.size:
+            return xp.broadcast_to(weights.reshape(1, grid.size), (2, grid.size))
         return weights
     if not area_weighted:
         return None
     weights = grid_sqrt_area_weights(grid)
     xp = get_array_module(weights)
     return xp.tile(weights, (2, 1)) if vector else weights
-
-
-def _scalar_surface_smoothness_weights(degree):
-    """Return scalar surface-gradient-energy square-root weights.
-
-    The real Schmidt basis used here has angular norm
-    ``q_n = 1 / (2 n + 1)``.  The squared surface-gradient norm of a
-    degree-``n`` scalar coefficient is therefore
-    ``q_n n (n + 1)``.
-    """
-    degree = np.asarray(degree, dtype=float)
-    angular_norm = 1.0 / (2.0 * degree + 1.0)
-    laplacian_eigenvalue = degree * (degree + 1.0)
-    return np.sqrt(angular_norm * laplacian_eigenvalue)
-
-
-def _helmholtz_surface_smoothness_weights(degree):
-    """Return equal curl-free/divergence-free field-smoothness weights.
-
-    For ``F = -grad(phi) + rhat x grad(psi)``, penalizing the surface
-    divergence and curl of ``F`` gives the same degree weight for both
-    Helmholtz potentials: ``sqrt(q_n) n (n + 1)``.
-    """
-    degree = np.asarray(degree, dtype=float)
-    angular_norm = 1.0 / (2.0 * degree + 1.0)
-    laplacian_eigenvalue = degree * (degree + 1.0)
-    return np.sqrt(angular_norm) * laplacian_eigenvalue
 
 
 def _owned_explicit_weights(values):
@@ -225,10 +197,11 @@ class SphericalTransform:
     This class owns both synthesis (coefficients to grid values) and
     analysis (grid values to coefficients) for scalar and tangential
     Helmholtz fields. It also handles batched analysis of samples from
-    external input grids when a grid-remap basis is supplied.
+    external grids, either directly or through the analysis basis's grid
+    remapping operators.
     """
 
-    _input_transform_cache_size = 16
+    _analysis_transform_cache_size = 16
     _cached_attribute_names = (
         "scalar_synthesis_matrix",
         "scalar_synthesis_operator",
@@ -255,7 +228,6 @@ class SphericalTransform:
         basis,
         grid,
         *,
-        remapping_basis=None,
         sqrt_weights=None,
         reg_lambda=None,
         pinv_rtol=1e-15,
@@ -271,9 +243,6 @@ class SphericalTransform:
         grid : SphericalGrid
             Sample positions in the same spherical coordinate frame as the
             basis.
-        remapping_basis : SurfaceDifferentialBasis, optional
-            Representation used only when external sample grids must first be
-            remapped to ``grid``.
         sqrt_weights : array-like, optional
             Square-root residual weights. Their squares weight the
             least-squares objective. One weight per grid point applies to
@@ -299,7 +268,6 @@ class SphericalTransform:
         basis.validate_metadata()
         self.basis = basis
         self.grid = grid
-        self.remapping_basis = remapping_basis
         self.explicit_sqrt_weights = sqrt_weights is not None
         self.area_weighted = bool(area_weighted)
         self.sqrt_weights = resolve_sqrt_weights(
@@ -312,7 +280,8 @@ class SphericalTransform:
         self.pinv_rtol = pinv_rtol
         self.use_persistent_evaluation_cache = bool(use_persistent_evaluation_cache)
 
-        self._input_transforms = OrderedDict()
+        self._analysis_transforms = OrderedDict()
+        self._basis_transforms = {}
 
     def __repr__(self):
         """Summarize the bound basis, grid, and analysis policy."""
@@ -321,11 +290,32 @@ class SphericalTransform:
             f"area_weighted={self.area_weighted}, reg_lambda={self.reg_lambda!r})"
         )
 
+    def with_basis(self, basis):
+        """Return this transform bound to a coefficient basis on the same grid."""
+        if not isinstance(basis, SurfaceDifferentialBasis):
+            raise TypeError("basis must implement SurfaceDifferentialBasis.")
+        basis.validate_metadata()
+        if self.basis.coefficients_are_compatible_with(basis):
+            return self
+        cache_key = basis.signature
+        if cache_key not in self._basis_transforms:
+            self._basis_transforms[cache_key] = SphericalTransform(
+                basis,
+                self.grid,
+                sqrt_weights=self.sqrt_weights if self.explicit_sqrt_weights else None,
+                reg_lambda=self.reg_lambda,
+                pinv_rtol=self.pinv_rtol,
+                area_weighted=self.area_weighted,
+                use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
+            )
+        return self._basis_transforms[cache_key]
+
     def clear_cache(self):
-        """Discard matrices, operators, factorizations, and input transforms."""
+        """Discard matrices, operators, factorizations, and analysis transforms."""
         for name in self._cached_attribute_names:
             self.__dict__.pop(name, None)
-        self._input_transforms.clear()
+        self._analysis_transforms.clear()
+        self._basis_transforms.clear()
 
     def cache_info(self):
         """Return local transform-cache occupancy and configuration."""
@@ -334,8 +324,9 @@ class SphericalTransform:
             "materialized_values": materialized,
             "scalar_factorization": "scalar_least_squares_problem" in self.__dict__,
             "helmholtz_factorization": "helmholtz_least_squares_problem" in self.__dict__,
-            "input_transforms": len(self._input_transforms),
-            "input_transform_max_size": self._input_transform_cache_size,
+            "analysis_transforms": len(self._analysis_transforms),
+            "analysis_transform_max_size": self._analysis_transform_cache_size,
+            "basis_transforms": len(self._basis_transforms),
         }
 
     def _evaluate_basis_on_grid(self, derivative=None):
@@ -570,10 +561,8 @@ class SphericalTransform:
         """Surface-gradient smoothness operator for scalar fields."""
         if self.reg_lambda is None:
             return None
-        if not hasattr(self.basis, "n"):
-            raise NotImplementedError("Degree-weighted scalar regularization requires basis.n.")
         return diagonal_linear_map(
-            _scalar_surface_smoothness_weights(self.basis.n),
+            self.basis.scalar_smoothness_weights(),
             input_shape=(self.basis.index_length,),
             output_shape=(self.basis.index_length,),
         )
@@ -583,10 +572,8 @@ class SphericalTransform:
         """Return equal-component Helmholtz-field smoothness."""
         if self.reg_lambda is None:
             return None
-        if not hasattr(self.basis, "n"):
-            raise NotImplementedError("Degree-weighted Helmholtz regularization requires basis.n.")
         weights = np.broadcast_to(
-            _helmholtz_surface_smoothness_weights(self.basis.n),
+            self.basis.helmholtz_smoothness_weights(),
             (2, self.basis.index_length),
         )
         return diagonal_linear_map(
@@ -604,7 +591,7 @@ class SphericalTransform:
             data_shapes=self.grid.size,
             sqrt_weights=self.sqrt_weights,
             regularization_strengths=self.reg_lambda,
-            regularization_matrices=self.scalar_regularization_operator,
+            regularization_operators=self.scalar_regularization_operator,
             operator_cache=self._operator_cache(),
             cache_identity=self._least_squares_cache_identity("scalar"),
             data_normal_matrix_builder=self._data_normal_matrix_builder("scalar"),
@@ -619,7 +606,7 @@ class SphericalTransform:
             data_shapes=(2, self.grid.size),
             sqrt_weights=self.helmholtz_sqrt_weights,
             regularization_strengths=self.reg_lambda,
-            regularization_matrices=self.helmholtz_regularization_operator,
+            regularization_operators=self.helmholtz_regularization_operator,
             operator_cache=self._operator_cache(),
             cache_identity=self._least_squares_cache_identity("helmholtz"),
             data_normal_matrix_builder=self._data_normal_matrix_builder("helmholtz"),
@@ -643,7 +630,11 @@ class SphericalTransform:
 
     def analyze_scalar(self, grid_values, solver_type=None):
         """Analyze scalar grid values into basis coefficients."""
-        if self._scalar_synthesis_is_identity():
+        if (
+            self._scalar_synthesis_is_identity()
+            and self.reg_lambda is None
+            and not self.explicit_sqrt_weights
+        ):
             return grid_values
         return self._solve_least_squares(
             self.scalar_least_squares_problem, grid_values, solver_type
@@ -704,12 +695,18 @@ class SphericalTransform:
         values,
         *,
         input_grid,
-        analysis_basis,
+        analysis_basis=None,
         sqrt_weights=None,
         reg_lambda=None,
         pinv_rtol=1e-15,
     ):
-        """Analyze scalar samples and return one coefficient row per batch item."""
+        """Analyze scalar samples into this transform's coefficient space.
+
+        ``analysis_basis`` selects the direct-analysis or grid-remapping route
+        used for the input samples. Returned coefficients always belong to
+        ``self.basis``; a direct-analysis basis must therefore use compatible
+        coefficient storage.
+        """
         return self._analyze_samples(
             values,
             input_grid=input_grid,
@@ -725,12 +722,18 @@ class SphericalTransform:
         values,
         *,
         input_grid,
-        analysis_basis,
+        analysis_basis=None,
         sqrt_weights=None,
         reg_lambda=None,
         pinv_rtol=1e-15,
     ):
-        """Analyze tangential samples and return one coefficient row per batch item."""
+        """Analyze tangential samples into this transform's coefficient space.
+
+        ``analysis_basis`` selects the direct-analysis or grid-remapping route
+        used for the input samples. Returned coefficients always belong to
+        ``self.basis``; a direct-analysis basis must therefore use compatible
+        coefficient storage.
+        """
         return self._analyze_samples(
             values,
             input_grid=input_grid,
@@ -754,14 +757,16 @@ class SphericalTransform:
     ):
         """Analyze one scalar or Helmholtz field batch."""
         if helmholtz:
-            value_batch = self.as_tangential_sample_rows(values, input_grid)
+            sample_rows = self.as_tangential_sample_rows(values, input_grid)
         else:
-            value_batch = self.as_scalar_sample_rows(values, input_grid)
-        direct_analysis = isinstance(analysis_basis, SurfaceDifferentialBasis) and not callable(
-            getattr(analysis_basis, "scalar_grid_remap_operator", None)
-        )
+            sample_rows = self.as_scalar_sample_rows(values, input_grid)
+        analysis_basis = self.basis if analysis_basis is None else analysis_basis
+        if not isinstance(analysis_basis, SurfaceDifferentialBasis):
+            raise TypeError("analysis_basis must implement SurfaceDifferentialBasis.")
+        analysis_basis.validate_metadata()
+        uses_grid_remapping = bool(analysis_basis.sample_analysis_uses_grid_remapping)
 
-        if direct_analysis:
+        if not uses_grid_remapping:
             if (
                 self.basis is not analysis_basis
                 and not self.basis.coefficients_are_compatible_with(analysis_basis)
@@ -769,20 +774,49 @@ class SphericalTransform:
                 raise ValueError(
                     "Direct analysis basis is not coefficient-compatible with the transform basis."
                 )
-            analysis_transform = self._get_input_transform(
+            analysis_transform = self._sample_analysis_transform(
                 analysis_basis,
                 input_grid,
                 sqrt_weights=sqrt_weights,
                 reg_lambda=reg_lambda,
                 pinv_rtol=pinv_rtol,
             )
-            grid_values = value_batch
+            grid_values = sample_rows
         else:
-            analysis_transform = self
+            if sqrt_weights is not None and not input_grid.same_as(self.grid):
+                raise ValueError(
+                    "sqrt_weights describe the input samples and cannot be propagated through "
+                    "grid remapping; configure target-grid weights on SphericalTransform instead."
+                )
+            effective_reg_lambda = self.reg_lambda if reg_lambda is None else reg_lambda
+            if (
+                sqrt_weights is None
+                and effective_reg_lambda == self.reg_lambda
+                and pinv_rtol == self.pinv_rtol
+            ):
+                analysis_transform = self
+            else:
+                target_weights = (
+                    self.sqrt_weights
+                    if sqrt_weights is None and self.explicit_sqrt_weights
+                    else sqrt_weights
+                )
+                analysis_transform = self._sample_analysis_transform(
+                    self.basis,
+                    self.grid,
+                    sqrt_weights=target_weights,
+                    reg_lambda=effective_reg_lambda,
+                    pinv_rtol=pinv_rtol,
+                )
             grid_values = (
-                value_batch
+                sample_rows
                 if input_grid.same_as(self.grid)
-                else self._remap_batch_to_grid(value_batch, input_grid, helmholtz=helmholtz)
+                else self._remap_sample_rows(
+                    sample_rows,
+                    input_grid,
+                    analysis_basis=analysis_basis,
+                    helmholtz=helmholtz,
+                )
             )
 
         if helmholtz:
@@ -790,7 +824,7 @@ class SphericalTransform:
         else:
             coeffs = analysis_transform.analyze_scalar(grid_values)
         return analysis_transform._analysis_coefficients_to_rows(
-            coeffs, batch_size=value_batch.shape[0], helmholtz=helmholtz
+            coeffs, batch_size=sample_rows.shape[0], helmholtz=helmholtz
         )
 
     def _analysis_coefficients_to_rows(self, coeffs, *, batch_size, helmholtz):
@@ -885,10 +919,10 @@ class SphericalTransform:
             f"(N, 2), or (B, N, 2); got {array.shape} for grid size {n_points}."
         )
 
-    def _get_input_transform(
+    def _sample_analysis_transform(
         self, analysis_basis, input_grid, *, sqrt_weights=None, reg_lambda=None, pinv_rtol=1e-15
     ):
-        """Return transform for direct input-grid analysis."""
+        """Return a cached transform that analyzes samples on ``input_grid``."""
         reg_lambda = _normalize_regularization_lambda(reg_lambda)
         if sqrt_weights is not None:
             weight_signature = array_fingerprint(sqrt_weights)
@@ -900,6 +934,7 @@ class SphericalTransform:
                     reg_lambda=reg_lambda,
                     pinv_rtol=pinv_rtol,
                     area_weighted=self.area_weighted,
+                    use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
                 )
             grid_signature = input_grid.signature
         else:
@@ -916,9 +951,9 @@ class SphericalTransform:
             pinv_rtol,
             self.area_weighted,
         )
-        if cache_key in self._input_transforms:
-            self._input_transforms.move_to_end(cache_key)
-            return self._input_transforms[cache_key]
+        if cache_key in self._analysis_transforms:
+            self._analysis_transforms.move_to_end(cache_key)
+            return self._analysis_transforms[cache_key]
 
         transform = SphericalTransform(
             analysis_basis,
@@ -927,20 +962,21 @@ class SphericalTransform:
             reg_lambda=reg_lambda,
             pinv_rtol=pinv_rtol,
             area_weighted=self.area_weighted,
+            use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
         )
-        self._input_transforms[cache_key] = transform
-        if len(self._input_transforms) > self._input_transform_cache_size:
-            self._input_transforms.popitem(last=False)
+        self._analysis_transforms[cache_key] = transform
+        if len(self._analysis_transforms) > self._analysis_transform_cache_size:
+            self._analysis_transforms.popitem(last=False)
         return transform
 
-    def _grid_remap_operator(self, method_name, input_grid, *, input_shape, output_shape):
+    def _grid_remap_operator(
+        self, analysis_basis, method_name, input_grid, *, input_shape, output_shape
+    ):
         """Return the required grid-remap operator."""
-        if self.remapping_basis is None:
-            raise ValueError("remapping_basis is required for grid remapping.")
-        remap_operator = getattr(self.remapping_basis, method_name, None)
+        remap_operator = getattr(analysis_basis, method_name, None)
         if not callable(remap_operator):
             raise TypeError(
-                f"SphericalGrid-to-grid sample analysis requires remapping_basis to provide "
+                f"SphericalGrid-to-grid sample analysis requires analysis_basis to provide "
                 f"{method_name}()."
             )
         operator = remap_operator(input_grid, self.grid)
@@ -948,16 +984,17 @@ class SphericalTransform:
             return as_linear_map(operator, input_shape=input_shape, output_shape=output_shape)
         except (TypeError, ValueError) as exc:
             raise TypeError(
-                f"{type(self.remapping_basis).__name__}.{method_name}() "
+                f"{type(analysis_basis).__name__}.{method_name}() "
                 "must return an operator convertible to LinearMap."
             ) from exc
 
-    def _remap_batch_to_grid(self, value_batch, input_grid, *, helmholtz):
+    def _remap_sample_rows(self, sample_rows, input_grid, *, analysis_basis, helmholtz):
         """Apply grid remap operators to field slices."""
-        xp = get_array_module(value_batch)
-        values = xp.asarray(value_batch)
+        xp = get_array_module(sample_rows)
+        values = xp.asarray(sample_rows)
         if not helmholtz:
             operator = self._grid_remap_operator(
+                analysis_basis,
                 "scalar_grid_remap_operator",
                 input_grid,
                 input_shape=(input_grid.size,),
@@ -967,6 +1004,7 @@ class SphericalTransform:
             return xp.asarray(interpolated).reshape(self.grid.size, -1).T
 
         operator = self._grid_remap_operator(
+            analysis_basis,
             "tangential_grid_remap_operator",
             input_grid,
             input_shape=(2, input_grid.size),

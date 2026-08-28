@@ -471,9 +471,9 @@ def test_materialized_linear_map_reuses_cached_matrix():
     linear_map = LinearMap(
         shape=matrix.shape,
         dtype=matrix.dtype,
-        _matvec=fail_matvec,
-        _rmatvec=fail_rmatvec,
-        _dense_array_func=dense_array,
+        matvec=fail_matvec,
+        rmatvec=fail_rmatvec,
+        dense_array=dense_array,
         output_shape=(2,),
         input_shape=(2,),
     )
@@ -508,10 +508,10 @@ def test_wide_matrix_free_map_materializes_through_its_adjoint():
     linear_map = LinearMap(
         shape=matrix.shape,
         dtype=matrix.dtype,
-        _matvec=lambda values: matrix @ np.asarray(values),
-        _rmatvec=lambda values: matrix.T @ np.asarray(values),
-        _matmat=fail_matmat,
-        _rmatmat=lambda values: matrix.T @ np.asarray(values),
+        matvec=lambda values: matrix @ np.asarray(values),
+        rmatvec=lambda values: matrix.T @ np.asarray(values),
+        matmat=fail_matmat,
+        rmatmat=lambda values: matrix.T @ np.asarray(values),
     )
 
     np.testing.assert_allclose(linear_map.to_matrix(backend="numpy"), matrix)
@@ -529,11 +529,11 @@ def test_wide_composition_materializes_through_composed_adjoint():
         return LinearMap(
             shape=matrix.shape,
             dtype=matrix.dtype,
-            _matvec=lambda values: matrix @ np.asarray(values),
-            _rmatvec=lambda values: matrix.T @ np.asarray(values),
-            _matmat=lambda values: matrix @ np.asarray(values),
-            _rmatmat=lambda values: matrix.T @ np.asarray(values),
-            _dense_array_func=fail_dense,
+            matvec=lambda values: matrix @ np.asarray(values),
+            rmatvec=lambda values: matrix.T @ np.asarray(values),
+            matmat=lambda values: matrix @ np.asarray(values),
+            rmatmat=lambda values: matrix.T @ np.asarray(values),
+            dense_array=fail_dense,
         )
 
     composed = matrix_free(left_matrix) @ matrix_free(right_matrix)
@@ -684,10 +684,10 @@ def test_linear_map_dense_uses_active_backend():
     matrix_free = LinearMap(
         shape=base.shape,
         dtype=base.dtype,
-        _matvec=base.matvec,
-        _rmatvec=base.rmatvec,
-        _matmat=base.matmat,
-        _rmatmat=base.rmatmat,
+        matvec=base.matvec,
+        rmatvec=base.rmatvec,
+        matmat=base.matmat,
+        rmatmat=base.rmatmat,
     )
 
     try:
@@ -720,9 +720,9 @@ def test_linear_map_backend_operands_drives_matrix_free_batches():
     linear_map = LinearMap(
         shape=matrix.shape,
         dtype=matrix.dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _backend_operands=(backend_operands,),
+        matvec=matvec,
+        rmatvec=rmatvec,
+        backend_operands=(backend_operands,),
     )
 
     try:
@@ -839,11 +839,11 @@ def test_composed_linear_map_normal_diagonal_uses_matmat_path():
     matrix_free = LinearMap(
         shape=base.shape,
         dtype=base.dtype,
-        _matvec=base.matvec,
-        _rmatvec=base.rmatvec,
-        _matmat=base.matmat,
-        _rmatmat=base.rmatmat,
-        _dense_array_func=fail_dense_array,
+        matvec=base.matvec,
+        rmatvec=base.rmatvec,
+        matmat=base.matmat,
+        rmatmat=base.rmatmat,
+        dense_array=fail_dense_array,
     )
     composed = diagonal_linear_map(weights) @ matrix_free
     expected = np.sum((weights[:, None] * matrix) ** 2, axis=0)

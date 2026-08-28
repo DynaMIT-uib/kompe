@@ -11,7 +11,7 @@ import numpy as np
 import scipy.sparse
 from scipy.sparse.linalg import LinearOperator
 
-from kompe.math.backend import asarray, get_array_module, synchronize_linalg_result, to_numpy
+from kompe.math.backend import get_array_module, synchronize_linalg_result, to_numpy
 from kompe.math.linear_map import LinearMap, as_linear_map, vstack_linear_maps
 
 OperatorInput: TypeAlias = np.ndarray | scipy.sparse.spmatrix | LinearOperator | LinearMap
@@ -43,7 +43,7 @@ class LeastSquaresProblem:
         data_shapes: Any | list[Any],
         sqrt_weights: Any | list[Any] | None = None,
         regularization_strengths: NumericInputList | None = None,
-        regularization_matrices: OperatorInputList | None = None,
+        regularization_operators: OperatorInputList | None = None,
         operator_cache: Any | None = None,
         cache_identity: Any | None = None,
         data_normal_matrix_builder: Callable[[], Any] | None = None,
@@ -60,7 +60,7 @@ class LeastSquaresProblem:
         self._data_normal_matrix_cache = None
 
         self._process_data_terms(A, data_shapes, sqrt_weights)
-        self._process_regularization_terms(regularization_matrices, regularization_strengths)
+        self._process_regularization_terms(regularization_operators, regularization_strengths)
 
     def _process_data_terms(self, A_in, data_shapes_in, sqrt_weights_in):
         A_list = self._prepare_input_list(A_in, "A")
@@ -78,14 +78,16 @@ class LeastSquaresProblem:
             for i, w in enumerate(sqrt_weights_list)
         ]
 
-    def _process_regularization_terms(self, regularization_matrices, regularization_strengths):
-        reg_L_list = self._prepare_input_list(
-            regularization_matrices, "regularization_matrices", is_optional=True
+    def _process_regularization_terms(self, regularization_operators, regularization_strengths):
+        operators = self._prepare_input_list(
+            regularization_operators, "regularization_operators", is_optional=True
         )
-        self.num_reg_terms = len(reg_L_list)
-        self.regularization_matrices = [
-            as_linear_map(L, input_shape=self.solution_shape) if L is not None else None
-            for L in reg_L_list
+        self.num_reg_terms = len(operators)
+        self.regularization_operators = [
+            as_linear_map(operator, input_shape=self.solution_shape)
+            if operator is not None
+            else None
+            for operator in operators
         ]
         self.regularization_strengths = self._validate_regularization_strengths(
             self._prepare_input_list(
@@ -113,10 +115,10 @@ class LeastSquaresProblem:
     def regularization_row_scales(self) -> list[float]:
         """Return row scales for the balanced regularization operators."""
         if not any(
-            matrix is not None and self.regularization_strengths[index] > 0.0
-            for index, matrix in enumerate(self.regularization_matrices)
+            operator is not None and self.regularization_strengths[index] > 0.0
+            for index, operator in enumerate(self.regularization_operators)
         ):
-            return [0.0] * len(self.regularization_matrices)
+            return [0.0] * len(self.regularization_operators)
         if self.data_normal_matrix_builder is None:
             diag_A_T_A = self.data_operator.normal_matrix_diag()
         else:
@@ -124,7 +126,7 @@ class LeastSquaresProblem:
         active_diag_A = diag_A_T_A[diag_A_T_A > 0]
         data_term_scale = np.median(active_diag_A) if active_diag_A.size > 0 else 1.0
         regularization_row_scales = []
-        for i, L_item in enumerate(self.regularization_matrices):
+        for i, L_item in enumerate(self.regularization_operators):
             strength = self.regularization_strengths[i]
             if strength == 0 or L_item is None:
                 regularization_row_scales.append(0.0)
@@ -133,7 +135,7 @@ class LeastSquaresProblem:
             active_diag_L = diag_L_T_L[diag_L_T_L > 0]
             if active_diag_L.size == 0:
                 raise ValueError(
-                    f"regularization_matrices[{i}] is zero but has positive strength."
+                    f"regularization_operators[{i}] is zero but has positive strength."
                 )
             reg_term_scale = np.median(active_diag_L)
             scale_factor = math.sqrt(data_term_scale / reg_term_scale)
@@ -149,21 +151,13 @@ class LeastSquaresProblem:
         ]
         return vstack_linear_maps(row_maps, input_shape=self.solution_shape)
 
-    @property
-    def dense_system_matrix(self) -> np.ndarray:
-        """Assemble the dense regularized system as NumPy."""
-        return np.asarray(self.system_operator().to_matrix(backend="numpy"))
-
-    def assemble_dense_system_matrix(self) -> Any:
-        """Assemble the dense system on the active backend."""
-        xp = get_array_module()
-        if xp is np:
-            return self.dense_system_matrix
-        return self.system_operator().to_matrix()
+    def system_matrix(self, *, backend=None) -> Any:
+        """Materialize the regularized system on the requested backend."""
+        return self.system_operator.to_matrix(backend=backend)
 
     def dense_normal_equations(self) -> tuple[Any, Any, Any, Any]:
         """Return dense system, adjoint, and normal matrix."""
-        system_matrix = self.assemble_dense_system_matrix()
+        system_matrix = self.system_matrix()
         xp = get_array_module(system_matrix)
         if xp not in self._dense_normal_equation_cache:
             system_adjoint = system_matrix.T.conj()
@@ -189,7 +183,7 @@ class LeastSquaresProblem:
                 # normal matrix used to construct it. Keep a materialized
                 # data map because the following adjoint products reuse it.
                 self._dense_normal_equation_cache.clear()
-                regularized_system = self.system_operator()
+                regularized_system = self.system_operator
                 if regularized_system is not self.data_operator:
                     regularized_system.clear_dense_cache()
                 self._data_normal_matrix_cache = None
@@ -260,7 +254,7 @@ class LeastSquaresProblem:
     @cached_property
     def svd(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute the SVD of the dense system matrix."""
-        return np.linalg.svd(self.dense_system_matrix, full_matrices=False)
+        return np.linalg.svd(self.system_matrix(backend="numpy"), full_matrices=False)
 
     def assemble_rhs_block(
         self, b: Any | list[Any], *, include_regularization: bool = True
@@ -282,9 +276,8 @@ class LeastSquaresProblem:
         active_regularization_terms = (
             self._active_regularization_terms() if include_regularization else ()
         )
-        backend_operands = self.system_operator(
-            include_regularization=include_regularization
-        ).backend_operands
+        system_operator = self.system_operator if include_regularization else self.data_operator
+        backend_operands = system_operator.backend_operands
         xp = get_array_module(*(p[0] for p in valid_b), *backend_operands)
 
         blocks = []
@@ -304,12 +297,8 @@ class LeastSquaresProblem:
         d_block = xp.vstack(blocks) if blocks else xp.zeros((0, num_rhs), dtype=dtype)
         return d_block, rhs_shape, num_rhs
 
-    def system_operator(self, include_regularization: bool = True) -> LinearMap:
-        """Get the ``LinearMap`` system operator."""
-        return self._regularized_system_operator if include_regularization else self.data_operator
-
     @cached_property
-    def _regularized_system_operator(self) -> LinearMap:
+    def system_operator(self) -> LinearMap:
         """Stack active regularization below the canonical data operator."""
         regularization_terms = self._active_regularization_terms()
         if not regularization_terms:
@@ -319,11 +308,11 @@ class LeastSquaresProblem:
         return vstack_linear_maps(row_maps, input_shape=self.solution_shape)
 
     def _active_regularization_terms(self) -> tuple[tuple[float, LinearMap], ...]:
-        lambdas = self.regularization_row_scales
+        row_scales = self.regularization_row_scales
         return tuple(
-            (lambdas[i], L_item)
-            for i, L_item in enumerate(self.regularization_matrices)
-            if i < len(lambdas) and L_item is not None and lambdas[i] > 0.0
+            (row_scales[i], L_item)
+            for i, L_item in enumerate(self.regularization_operators)
+            if i < len(row_scales) and L_item is not None and row_scales[i] > 0.0
         )
 
     @staticmethod
@@ -382,7 +371,8 @@ class LeastSquaresProblem:
     ) -> tuple[Any | None, tuple[int, ...] | None]:
         if b_val is None:
             return None, None
-        b = asarray(b_val)
+        xp = get_array_module(b_val)
+        b = xp.asarray(b_val)
         flat_data_size = math.prod(data_shape)
         num_data_dims = len(data_shape)
 

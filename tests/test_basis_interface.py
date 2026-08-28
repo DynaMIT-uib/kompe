@@ -18,7 +18,6 @@ from kompe.math import (
     is_identity_linear_map,
     jax_enabled,
     set_backend,
-    to_jax,
     to_numpy,
 )
 from kompe.math.pseudoinverse import weighted_tensor_pinv
@@ -286,22 +285,22 @@ def test_solid_harmonics_match_reference_radius_shift_formulas():
         (2.0 / 3.0) ** (sh_basis.n + 2),
     )
     np.testing.assert_allclose(
-        solid_harmonics.poloidal_to_regular_potential_factor, -(sh_basis.n + 1)
+        solid_harmonics.poloidal_to_regular_potential_factors, -(sh_basis.n + 1)
     )
-    np.testing.assert_allclose(solid_harmonics.poloidal_to_irregular_potential_factor, sh_basis.n)
+    np.testing.assert_allclose(solid_harmonics.poloidal_to_irregular_potential_factors, sh_basis.n)
     np.testing.assert_allclose(
-        solid_harmonics.poloidal_to_boundary_potential_jump_factor, 2 * sh_basis.n + 1
+        solid_harmonics.poloidal_to_normalized_potential_jump_factors, 2 * sh_basis.n + 1
     )
     np.testing.assert_allclose(
-        solid_harmonics.poloidal_to_boundary_potential_jump_factors(7.0),
+        solid_harmonics.poloidal_to_potential_jump_factors(7.0),
         7.0 * (2 * sh_basis.n + 1),
     )
     np.testing.assert_allclose(
-        -sh_basis.n * solid_harmonics.poloidal_to_regular_potential_factor,
+        -sh_basis.n * solid_harmonics.poloidal_to_regular_potential_factors,
         sh_basis.n * (sh_basis.n + 1),
     )
     np.testing.assert_allclose(
-        (sh_basis.n + 1) * solid_harmonics.poloidal_to_irregular_potential_factor,
+        (sh_basis.n + 1) * solid_harmonics.poloidal_to_irregular_potential_factors,
         sh_basis.n * (sh_basis.n + 1),
     )
 
@@ -330,9 +329,9 @@ def test_csbasis_native_grid_is_cell_centered_with_cell_areas():
     """Native CS coefficients live at cell centers with cell areas."""
     cs_basis = GlobalCSBasis(16)
     block, i, j = cs_basis.mesh.grid_line_indices()
-    expected_xi = cs_basis.mesh.coordinate(i[:, :-1, :-1] + 0.5).reshape(-1)
-    expected_eta = cs_basis.mesh.coordinate(j[:, :-1, :-1] + 0.5).reshape(-1)
-    step = np.diff(cs_basis.mesh.coordinate(np.array([0, 1])))[0]
+    expected_xi = cs_basis.mesh.face_coordinate(i[:, :-1, :-1] + 0.5).reshape(-1)
+    expected_eta = cs_basis.mesh.face_coordinate(j[:, :-1, :-1] + 0.5).reshape(-1)
+    step = np.diff(cs_basis.mesh.face_coordinate(np.array([0, 1])))[0]
     midpoint_area = step**2 * np.sqrt(
         np.linalg.det(cs_basis.mesh.projection.metric_tensor(expected_xi, expected_eta))
     )
@@ -398,8 +397,8 @@ def test_csbasis_non_native_scalar_evaluation_uses_interpolation():
     """CS scalar evaluation matches built-in interpolation."""
     cs_basis = GlobalCSBasis(8)
     _, theta, phi = cs_basis.mesh.projection.cube_to_spherical(
-        cs_basis.mesh.coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
-        cs_basis.mesh.coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
+        cs_basis.mesh.face_coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
+        cs_basis.mesh.face_coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
         np.zeros(4),
         degrees=True,
     )
@@ -421,8 +420,8 @@ def test_csbasis_non_native_helmholtz_uses_vector_interpolation():
     cs_basis = GlobalCSBasis(8)
     native = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
     _, theta, phi = cs_basis.mesh.projection.cube_to_spherical(
-        cs_basis.mesh.coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
-        cs_basis.mesh.coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
+        cs_basis.mesh.face_coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
+        cs_basis.mesh.face_coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
         np.zeros(4),
         degrees=True,
     )
@@ -454,8 +453,8 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
     """CS vector interpolation supports multiple fields at once."""
     cs_basis = GlobalCSBasis(8)
     _, theta, phi = cs_basis.mesh.projection.cube_to_spherical(
-        cs_basis.mesh.coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
-        cs_basis.mesh.coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
+        cs_basis.mesh.face_coordinate(np.array([1.2, 2.3, 3.4, 4.5])),
+        cs_basis.mesh.face_coordinate(np.array([1.1, 2.2, 3.1, 4.2])),
         np.zeros(4),
         degrees=True,
     )
@@ -497,16 +496,16 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
 # Analysis weights and regularization boundaries
 
 
-def test_grid_basis_regularization_requires_degree_metadata():
-    """Degree-weighted regularization declares basis support."""
+def test_grid_basis_regularization_requires_a_natural_smoothness_norm():
+    """Regularization declares basis-specific smoothness support."""
     cs_basis = GlobalCSBasis(8)
     evaluator = SphericalTransform(
         cs_basis, SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi), reg_lambda=1.0
     )
 
-    with pytest.raises(NotImplementedError, match="requires basis.n"):
+    with pytest.raises(NotImplementedError, match="surface smoothness weights"):
         _ = evaluator.scalar_regularization_operator
-    with pytest.raises(NotImplementedError, match="requires basis.n"):
+    with pytest.raises(NotImplementedError, match="surface smoothness weights"):
         _ = evaluator.helmholtz_regularization_operator
 
 
@@ -700,10 +699,10 @@ def test_csbasis_cache_controls_do_not_change_numerical_results():
 @pytest.mark.requires_jax
 def test_csbasis_sparse_geometry_is_built_on_numpy(monkeypatch):
     """SciPy derivative geometry should not depend on active JAX arithmetic."""
-    from kompe.cubed_sphere import cs_differencing
+    from kompe.cubed_sphere import global_differencing
 
     basis = GlobalCSBasis(4)
-    original_face_coordinate = cs_differencing.cs_coordinates.face_coordinate
+    original_face_coordinate = global_differencing.cs_coordinates.face_coordinate
     observed_backends = []
 
     def checked_face_coordinate(*args, **kwargs):
@@ -714,7 +713,7 @@ def test_csbasis_sparse_geometry_is_built_on_numpy(monkeypatch):
     try:
         set_backend("jax")
         monkeypatch.setattr(
-            cs_differencing.cs_coordinates, "face_coordinate", checked_face_coordinate
+            global_differencing.cs_coordinates, "face_coordinate", checked_face_coordinate
         )
         basis.surface_laplacian_operator()
         assert get_backend() == "jax"
@@ -728,11 +727,13 @@ def test_csbasis_sparse_geometry_is_built_on_numpy(monkeypatch):
 @pytest.mark.requires_jax
 def test_csbasis_mean_free_projection_preserves_jax_arrays():
     """CS gauge projection preserves backend arrays."""
+    import jax.numpy as jnp
+
     previous_backend = jax_enabled()
     try:
         set_backend("jax")
         cs_basis = GlobalCSBasis(4)
-        values = to_jax(np.arange(cs_basis.index_length, dtype=float))
+        values = jnp.asarray(np.arange(cs_basis.index_length, dtype=float))
 
         projected = cs_basis.project_scalar_mean_free(values)
 
@@ -748,6 +749,8 @@ def test_csbasis_mean_free_projection_preserves_jax_arrays():
 @pytest.mark.requires_jax
 def test_csbasis_surface_operators_preserve_jax_inputs():
     """CS surface operators accept backend arrays."""
+    import jax.numpy as jnp
+
     previous_backend = jax_enabled()
     try:
         set_backend("jax")
@@ -755,9 +758,9 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
         grid = type(
             "GridLike",
             (),
-            {"theta": to_jax(cs_basis.mesh.theta), "phi": to_jax(cs_basis.mesh.phi)},
+            {"theta": jnp.asarray(cs_basis.mesh.theta), "phi": jnp.asarray(cs_basis.mesh.phi)},
         )()
-        values = to_jax(np.arange(cs_basis.index_length, dtype=float))
+        values = jnp.asarray(np.arange(cs_basis.index_length, dtype=float))
 
         G = cs_basis.scalar_evaluation_matrix(grid)
         laplacian_values = cs_basis.surface_laplacian_operator().matvec(values)
@@ -780,6 +783,8 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
 @pytest.mark.requires_jax
 def test_csbasis_surface_operator_cache_is_backend_neutral():
     """One structured CS remap serves NumPy and JAX inputs."""
+    import jax.numpy as jnp
+
     previous_backend = jax_enabled()
     try:
         set_backend("numpy")
@@ -791,7 +796,7 @@ def test_csbasis_surface_operator_cache_is_backend_neutral():
 
         set_backend("jax")
         cached_operator = basis.scalar_evaluation_operator(grid)
-        jax_result = cached_operator.matvec(to_jax(values))
+        jax_result = cached_operator.matvec(jnp.asarray(values))
 
         assert cached_operator is operator
         assert isinstance(numpy_result, np.ndarray)
@@ -804,6 +809,8 @@ def test_csbasis_surface_operator_cache_is_backend_neutral():
 @pytest.mark.requires_jax
 def test_shbasis_surface_operators_preserve_jax_inputs():
     """SH surface operators accept backend arrays."""
+    import jax.numpy as jnp
+
     previous_backend = jax_enabled()
     try:
         set_backend("jax")
@@ -811,9 +818,12 @@ def test_shbasis_surface_operators_preserve_jax_inputs():
         grid = type(
             "GridLike",
             (),
-            {"theta": to_jax(np.array([30.0, 80.0])), "phi": to_jax(np.array([0.0, 45.0]))},
+            {
+                "theta": jnp.asarray(np.array([30.0, 80.0])),
+                "phi": jnp.asarray(np.array([0.0, 45.0])),
+            },
         )()
-        values = to_jax(np.arange(sh_basis.index_length, dtype=float))
+        values = jnp.asarray(np.arange(sh_basis.index_length, dtype=float))
 
         G = sh_basis.scalar_evaluation_matrix(grid)
         grid_values = sh_basis.scalar_evaluation_operator(grid).matvec(values)
@@ -885,8 +895,8 @@ def test_shbasis_mean_free_view_slices_parent_operators():
         direct_solid_harmonics.irregular_reference_shift_factors(2.0, 3.0),
     )
     np.testing.assert_allclose(
-        view_solid_harmonics.poloidal_to_boundary_potential_jump_factor,
-        direct_solid_harmonics.poloidal_to_boundary_potential_jump_factor,
+        view_solid_harmonics.poloidal_to_normalized_potential_jump_factors,
+        direct_solid_harmonics.poloidal_to_normalized_potential_jump_factors,
     )
 
 

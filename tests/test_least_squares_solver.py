@@ -40,7 +40,7 @@ def test_unregularized_problem_skips_normal_diagonal_scaling():
         A=np.eye(2),
         solution_shape=2,
         data_shapes=2,
-        regularization_matrices=np.eye(2),
+        regularization_operators=np.eye(2),
         regularization_strengths=0.0,
     )
     assert zero_weight_problem.regularization_row_scales == [0.0]
@@ -59,14 +59,14 @@ def test_positive_regularization_is_never_silently_discarded(
         A=np.eye(2),
         solution_shape=2,
         data_shapes=2,
-        regularization_matrices=regularization_matrix,
+        regularization_operators=regularization_matrix,
         regularization_strengths=regularization_weight,
     )
 
     [(scaled_weight, active_matrix)] = problem._active_regularization_terms()
     assert scaled_weight > 0.0
-    assert active_matrix is problem.regularization_matrices[0]
-    assert problem.system_operator().shape == (4, 2)
+    assert active_matrix is problem.regularization_operators[0]
+    assert problem.system_operator.shape == (4, 2)
 
 
 def test_positive_strength_on_zero_regularization_operator_is_explicit():
@@ -75,12 +75,12 @@ def test_positive_strength_on_zero_regularization_operator_is_explicit():
         A=np.eye(2),
         solution_shape=2,
         data_shapes=2,
-        regularization_matrices=np.zeros((2, 2)),
+        regularization_operators=np.zeros((2, 2)),
         regularization_strengths=1.0,
     )
 
     with pytest.raises(ValueError, match="is zero but has positive strength"):
-        problem.system_operator()
+        _ = problem.system_operator
 
 
 # Explicit least-squares maps
@@ -297,7 +297,7 @@ def test_normal_pinv_response_solver_reuses_factorization(monkeypatch):
     def fail_dense_assembly():
         raise AssertionError("response solver should reuse cached dense factors")
 
-    monkeypatch.setattr(problem, "assemble_dense_system_matrix", fail_dense_assembly)
+    monkeypatch.setattr(problem, "system_matrix", fail_dense_assembly)
 
     A_H = A.T.conj()
     normal_pinv = np.linalg.pinv(A_H @ A, rtol=solver.tolerance, hermitian=True)
@@ -309,7 +309,7 @@ def test_unregularized_system_reuses_data_operator():
     """Without regularization there is one canonical system map."""
     problem = LeastSquaresProblem(A=np.eye(3), solution_shape=3, data_shapes=3)
 
-    assert problem.system_operator() is problem.data_operator
+    assert problem.system_operator is problem.data_operator
 
 
 def test_normal_pinv_discards_only_derived_regularized_matrix():
@@ -318,10 +318,10 @@ def test_normal_pinv_discards_only_derived_regularized_matrix():
         A=np.eye(3),
         solution_shape=3,
         data_shapes=3,
-        regularization_matrices=np.eye(3),
+        regularization_operators=np.eye(3),
         regularization_strengths=0.1,
     )
-    regularized_system = problem.system_operator()
+    regularized_system = problem.system_operator
 
     problem.dense_normal_pinv(1e-13)
 
@@ -364,11 +364,11 @@ def test_normal_pinv_response_solver_uses_explicit_data_adjoint():
     operator = LinearMap(
         shape=matrix.shape,
         dtype=matrix.dtype,
-        _matvec=lambda values: matrix @ values,
-        _rmatvec=lambda values: matrix.T @ values,
-        _matmat=lambda values: matrix @ values,
-        _rmatmat=rmatmat,
-        _dense_array_func=lambda xp: xp.asarray(matrix),
+        matvec=lambda values: matrix @ values,
+        rmatvec=lambda values: matrix.T @ values,
+        matmat=lambda values: matrix @ values,
+        rmatmat=rmatmat,
+        dense_array=lambda xp: xp.asarray(matrix),
     )
     problem = LeastSquaresProblem(A=operator, solution_shape=2, data_shapes=3)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
@@ -425,7 +425,7 @@ def test_dense_solvers_preserve_jax_output_when_backend_enabled(solver_name):
     try:
         set_backend("jax")
         rhs_block, _, _ = problem.assemble_rhs_block(rhs)
-        system_matrix = problem.assemble_dense_system_matrix()
+        system_matrix = problem.system_matrix()
         assert "jax" in type(rhs_block).__module__
         assert "jax" in type(system_matrix).__module__
         solver = LeastSquaresSolver(solver=solver_name, tolerance=1e-13)
@@ -474,7 +474,7 @@ def test_svd_solver_preserves_jax_output_when_backend_enabled():
     try:
         set_backend("jax")
         rhs_block, _, _ = problem.assemble_rhs_block(rhs)
-        system_matrix = problem.assemble_dense_system_matrix()
+        system_matrix = problem.system_matrix()
         assert "jax" in type(rhs_block).__module__
         assert "jax" in type(system_matrix).__module__
         solver = LeastSquaresSolver(solver="svd", tolerance=1e-13)
@@ -499,7 +499,7 @@ def test_least_squares_problem_follows_jax_operator_context_when_numpy_active():
         set_backend("numpy")
         problem = LeastSquaresProblem(A=jnp.asarray(A), solution_shape=2, data_shapes=3)
         rhs_block, _, _ = problem.assemble_rhs_block(rhs)
-        system_block = problem.system_operator().matmat(np.eye(2))
+        system_block = problem.system_operator.matmat(np.eye(2))
     finally:
         set_backend(previous_backend)
 
@@ -558,7 +558,7 @@ def test_iterative_solvers_do_not_materialize_dense_system(monkeypatch, solver_n
     def fail_dense_assembly():
         raise AssertionError("iterative solvers should not assemble dense systems")
 
-    monkeypatch.setattr(problem, "assemble_dense_system_matrix", fail_dense_assembly)
+    monkeypatch.setattr(problem, "system_matrix", fail_dense_assembly)
 
     solution = solver.solve(problem, rhs, maxiter=200)
 
@@ -581,7 +581,7 @@ def test_iterative_jacobi_preconditioner_does_not_materialize_dense_system(
             "jacobi-preconditioned iterative solvers should not assemble dense systems"
         )
 
-    monkeypatch.setattr(problem, "assemble_dense_system_matrix", fail_dense_assembly)
+    monkeypatch.setattr(problem, "system_matrix", fail_dense_assembly)
 
     preconditioner = solver.build_preconditioner(problem)
     solution = solver.solve(problem, rhs, preconditioner=preconditioner, maxiter=200)
@@ -720,7 +720,7 @@ def test_regularization_strengths_must_be_finite_non_negative_scalars(weight):
             A=np.eye(2),
             solution_shape=2,
             data_shapes=2,
-            regularization_matrices=np.eye(2),
+            regularization_operators=np.eye(2),
             regularization_strengths=weight,
         )
 
@@ -732,7 +732,7 @@ def test_regularization_does_not_mutate_a_custom_data_normal_matrix():
         A=np.eye(2),
         solution_shape=2,
         data_shapes=2,
-        regularization_matrices=np.eye(2),
+        regularization_operators=np.eye(2),
         regularization_strengths=1.0,
         data_normal_matrix_builder=lambda: data_normal,
     )

@@ -3,24 +3,26 @@
 from __future__ import annotations
 
 from kompe.cubed_sphere import cs_coordinates
-from kompe.cubed_sphere.arrayutils import invert_3x3_matrices
+from kompe.cubed_sphere.geometry_linalg import inverse_3x3
 from kompe.math.backend import get_array_module
 
 
-def _cartesian_to_cube_matrix(xi, eta, r=1, block=0):
+def _cartesian_to_cube_matrix(xi, eta, radius=1, face=0):
     """Return Cartesian-to-CS contravariant transform matrices."""
-    return invert_3x3_matrices(_cube_to_cartesian_matrix(xi, eta, r=r, block=block))
+    return inverse_3x3(_cube_to_cartesian_matrix(xi, eta, radius=radius, face=face))
 
 
-def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
+def _cube_to_cartesian_matrix(xi, eta, radius=1, face=0):
     """Return CS-to-Cartesian contravariant transform matrices.
 
     The columns are the coordinate basis vectors
     ``(d x/dxi, d x/deta, d x/dr)`` in ECEF components.
     """
-    xp = get_array_module(xi, eta, r, block)
-    xi, eta, r, block = (value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, r, block))
-    block = block.astype(int)
+    xp = get_array_module(xi, eta, radius, face)
+    xi, eta, radius, face = (
+        value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, radius, face)
+    )
+    face = face.astype(int)
 
     X = xp.tan(xi)
     Y = xp.tan(eta)
@@ -42,10 +44,10 @@ def _cube_to_cartesian_matrix(xi, eta, r=1, block=0):
     )
 
     local_jacobian = xp.stack(
-        (r[:, None] * dunit_dxi, r[:, None] * dunit_deta, unit_position),
+        (radius[:, None] * dunit_dxi, radius[:, None] * dunit_deta, unit_position),
         axis=2,
     )
-    face_rotation = xp.asarray(cs_coordinates._FACE_TO_CARTESIAN)[block]
+    face_rotation = xp.asarray(cs_coordinates._FACE_TO_CARTESIAN)[face]
     return xp.einsum("nij,njk->nik", face_rotation, local_jacobian)
 
 
@@ -75,16 +77,18 @@ def _enu_to_cartesian_matrix(up):
     return xp.stack((east, north, up), axis=2)
 
 
-def _face_to_face_matrix(xi, eta, block_i, block_j):
-    """Return component transforms between CS blocks."""
-    xp = get_array_module(xi, eta, block_i, block_j)
-    xi_i, eta_i, block_i, block_j = (
-        value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, block_i, block_j)
+def _face_to_face_matrix(xi, eta, source_face, target_face):
+    """Return component transforms between cubed-sphere faces."""
+    xp = get_array_module(xi, eta, source_face, target_face)
+    source_xi, source_eta, source_face, target_face = (
+        value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, source_face, target_face)
     )
 
-    source_to_cartesian = _cube_to_cartesian_matrix(xi_i, eta_i, block=block_i)
-    _, theta, phi = cs_coordinates.cube_to_spherical(xi_i, eta_i, block_i, deg=True)
-    xi_j, eta_j, _ = cs_coordinates.geographic_to_cube(phi, 90 - theta, block=block_j)
-    cartesian_to_target = _cartesian_to_cube_matrix(xi_j, eta_j, block=block_j)
+    source_to_cartesian = _cube_to_cartesian_matrix(source_xi, source_eta, face=source_face)
+    _, theta, phi = cs_coordinates.cube_to_spherical(
+        source_xi, source_eta, source_face, degrees=True
+    )
+    target_xi, target_eta, _ = cs_coordinates.geographic_to_cube(phi, 90 - theta, face=target_face)
+    cartesian_to_target = _cartesian_to_cube_matrix(target_xi, target_eta, face=target_face)
 
     return xp.einsum("nij,njk->nik", cartesian_to_target, source_to_cartesian)

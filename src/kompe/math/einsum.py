@@ -294,20 +294,21 @@ class _EinsumMap:
         """Return this einsum contraction as a ``LinearMap``."""
         flat_out = math.prod(self.output_shape)
         flat_in = math.prod(self.input_shape)
-        return LinearMap(
+        linear_map = LinearMap(
             shape=(flat_out, flat_in),
             dtype=self.dtype,
-            _matvec=self.matvec,
-            _rmatvec=self.rmatvec,
-            _matmat=self.matmat,
-            _rmatmat=self.rmatmat,
-            _dense_array_func=self.dense_array,
-            _normal_matrix_diag=self.normal_matrix_diag,
-            _backend_operands=self.component_tensors,
-            _einsum_map=self,
+            matvec=self.matvec,
+            rmatvec=self.rmatvec,
+            matmat=self.matmat,
+            rmatmat=self.rmatmat,
+            dense_array=self.dense_array,
+            normal_matrix_diag=self.normal_matrix_diag,
+            backend_operands=self.component_tensors,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
         )
+        object.__setattr__(linear_map, "_einsum_map", self)
+        return linear_map
 
     def dense_array(self, xp: Any = None) -> Any:
         """Return dense matrix on the requested backend."""

@@ -1,6 +1,10 @@
 """Plot regional cubed-sphere data on an existing Matplotlib axis."""
 
+from pathlib import Path
+
 import numpy as np
+
+_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 
 
 class RegionalCSPlotter:
@@ -540,8 +544,10 @@ class RegionalCSPlotter:
         if "color" not in kwargs:
             kwargs["color"] = "black"
 
-        for cl in self.mesh.projection.projected_coastlines(resolution=resolution):
-            xi, eta = cl
+        coastlines = np.load(_DATA_PATH / f"coastlines_{resolution}.npz")
+        for key in coastlines:
+            lat, lon = coastlines[key]
+            xi, eta = self.mesh.projection.geographic_to_cube(lon, lat)
             self.ax.plot(xi, eta, **kwargs)
 
 

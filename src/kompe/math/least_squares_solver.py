@@ -140,10 +140,10 @@ def dense_full_rank_least_squares_map(
     return LinearMap(
         shape=(solution_size, data_size),
         dtype=np.result_type(data.dtype, objective_weights.dtype),
-        _matvec=lambda values: solve_coefficients(values).reshape(-1),
-        _rmatvec=lambda values: solve_adjoint(values).reshape(-1),
-        _matmat=solve_coefficients,
-        _rmatmat=solve_adjoint,
+        matvec=lambda values: solve_coefficients(values).reshape(-1),
+        rmatvec=lambda values: solve_adjoint(values).reshape(-1),
+        matmat=solve_coefficients,
+        rmatmat=solve_adjoint,
         input_shape=input_shape,
         output_shape=output_shape,
     )
@@ -177,11 +177,11 @@ def cholesky_least_squares_map(
     return LinearMap(
         shape=(solution_size, data_size),
         dtype=np.result_type(data.dtype, factor.dtype, objective_weights.dtype),
-        _matvec=lambda values: solve_coefficients(values).reshape(-1),
-        _rmatvec=lambda values: solve_adjoint(values).reshape(-1),
-        _matmat=solve_coefficients,
-        _rmatmat=solve_adjoint,
-        _backend_operands=(*data.backend_operands, factor),
+        matvec=lambda values: solve_coefficients(values).reshape(-1),
+        rmatvec=lambda values: solve_adjoint(values).reshape(-1),
+        matmat=solve_coefficients,
+        rmatmat=solve_adjoint,
+        backend_operands=(*data.backend_operands, factor),
         input_shape=input_shape,
         output_shape=output_shape,
     )
@@ -291,10 +291,10 @@ def sparse_constrained_least_squares_map(
     return LinearMap(
         shape=(solution_size, data_size),
         dtype=np.result_type(data.dtype, objective_weights.dtype),
-        _matvec=lambda values: solve_coefficients(values).reshape(-1),
-        _rmatvec=lambda values: solve_adjoint(values).reshape(-1),
-        _matmat=solve_coefficients,
-        _rmatmat=solve_adjoint,
+        matvec=lambda values: solve_coefficients(values).reshape(-1),
+        rmatvec=lambda values: solve_adjoint(values).reshape(-1),
+        matmat=solve_coefficients,
+        rmatmat=solve_adjoint,
         input_shape=input_shape,
         output_shape=output_shape,
     )
@@ -445,7 +445,7 @@ class LeastSquaresSolver:
         if xp is not np:
             return self._solve_lsmr_jax(problem, rhs_block, num_rhs, preconditioner, **kwargs)
 
-        system_map = problem.system_operator()
+        system_map = problem.system_operator
         solve_map, recover_solution = self._preconditioned_system(system_map, preconditioner)
         lsmr_options = self._lsmr_options(system_map, kwargs)
         linear_operator = solve_map.as_linear_operator()
@@ -469,7 +469,7 @@ class LeastSquaresSolver:
         from kompe.math.jax_lsmr import lsmr as jax_lsmr
 
         xp = get_array_module(rhs_block)
-        system_map = problem.system_operator()
+        system_map = problem.system_operator
         solve_map, recover_solution = self._preconditioned_system(system_map, preconditioner)
         lsmr_options = self._lsmr_options(system_map, kwargs)
         columns = []
@@ -526,7 +526,7 @@ class LeastSquaresSolver:
         if xp is not np:
             return self._solve_cgls_jax(problem, rhs_block, num_rhs, preconditioner, **kwargs)
 
-        system_map = problem.system_operator()
+        system_map = problem.system_operator
         normal_op = LinearOperator(
             (system_map.shape[1], system_map.shape[1]),
             matvec=lambda x: np.asarray(system_map.rmatvec(system_map.matvec(x))),
@@ -566,7 +566,7 @@ class LeastSquaresSolver:
         """Solve normal equations with JAX CG."""
         from jax.scipy.sparse.linalg import cg as jax_cg
 
-        system_map = problem.system_operator()
+        system_map = problem.system_operator
         cg_rhs = system_map.rmatmat(rhs_block).reshape(problem.solution_size, num_rhs)
         max_iter = kwargs.pop("maxiter", ITERATION_SAFETY_FACTOR * problem.solution_size)
         tolerance = kwargs.pop("tol", kwargs.pop("rtol", self.tolerance))
@@ -603,7 +603,7 @@ class LeastSquaresSolver:
         self, problem: LeastSquaresProblem, *, square_root: bool
     ) -> LinearMap:
         """Build a diagonal preconditioner from ``diag(A* A)``."""
-        diag = problem.system_operator().normal_matrix_diag()
+        diag = problem.system_operator.normal_matrix_diag()
         inv_diag = np.divide(1.0, diag, out=np.ones_like(diag), where=diag != 0)
         values = np.sqrt(inv_diag) if square_root else inv_diag
         return diagonal_linear_map(
@@ -648,11 +648,11 @@ class LeastSquaresSolver:
         return LinearMap(
             shape=(size, size),
             dtype=dtype,
-            _matvec=matvec,
-            _rmatvec=rmatvec,
-            _matmat=matmat,
-            _rmatmat=rmatmat,
-            _backend_operands=(vt_arr, weights_arr),
+            matvec=matvec,
+            rmatvec=rmatvec,
+            matmat=matmat,
+            rmatmat=rmatmat,
+            backend_operands=(vt_arr, weights_arr),
             output_shape=solution_shape,
             input_shape=solution_shape,
         )
@@ -668,7 +668,7 @@ class LeastSquaresSolver:
             cutoff = tol * (s[0] if s.size > 0 else 0)
             s_pinv[s > cutoff] = 1.0 / s[s > cutoff]
         else:
-            system_matrix = block_until_ready(problem.assemble_dense_system_matrix())
+            system_matrix = block_until_ready(problem.system_matrix())
             _, s, vt = synchronize_linalg_result(xp.linalg.svd(system_matrix, full_matrices=False))
             cutoff = tol * (s[0] if s.size > 0 else 0)
             safe_s = xp.where(s > cutoff, s, 1.0)

@@ -246,10 +246,10 @@ class SECSBasis(ScalarBasis):
         return LinearMap(
             shape=(2 * grid.size, self.index_length),
             dtype=np.float64,
-            _matvec=matvec,
-            _rmatvec=rmatvec,
-            _matmat=matmat,
-            _rmatmat=rmatmat,
+            matvec=matvec,
+            rmatvec=rmatvec,
+            matmat=matmat,
+            rmatmat=rmatmat,
             input_shape=(self.index_length,),
             output_shape=(2, grid.size),
         )

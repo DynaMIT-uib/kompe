@@ -43,8 +43,14 @@ constructor used by serialization and derived meshes.
 points. `synthesize_scalar` and `synthesize_helmholtz` map coefficients to
 samples. `analyze_scalar` and `analyze_helmholtz` fit samples already on the
 bound grid. `analyze_scalar_samples` and `analyze_helmholtz_samples` accept
-external sample grids, optionally remapping through `remapping_basis`, and
-return batch-first coefficient rows.
+external sample grids and return batch-first coefficient rows. By default they
+analyze in the transform's basis; an explicit `analysis_basis` selects another
+sample-analysis route, but the returned coefficients always belong to the
+transform's basis. Spectral bases fit the input samples directly, while cell-centred
+cubed-sphere bases remap them to the bound grid before target-basis analysis.
+Source-grid `sqrt_weights` cannot be carried through a grid remap; configure
+target-grid weights on the transform instead. `with_basis` returns a transform
+for another coefficient basis while reusing the same grid and numerical policy.
 
 Matrix names state what they do and end in `_matrix`; structured equivalents
 end in `_operator`. For example, `scalar_synthesis_matrix` and
@@ -62,6 +68,9 @@ are explicit projections within one coefficient space.
 `as_linear_map` to wrap dense or sparse arrays and the named constructors for
 diagonal, identity, pointwise, stacked, or indexed maps. Least-squares helpers
 consume `LinearMap` without requiring dense materialization.
+Custom matrix-free maps use the ordinary constructor keywords `matvec`,
+`rmatvec`, and optional `matmat`, `rmatmat`, `dense_array`, or `diagonal`
+functions; implementation storage remains private.
 Materializing `.array` or `to_matrix()` caches the dense matrix; later
 applications reuse it instead of repeating the structured construction.
 Known diagonal and identity maps remain vector-backed even when a full matrix

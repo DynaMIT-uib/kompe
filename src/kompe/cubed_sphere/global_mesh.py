@@ -8,13 +8,13 @@ from functools import cached_property
 import numpy as np
 
 from kompe.basis import _owned_readonly_array
-from kompe.cubed_sphere.arrayutils import determinants_3x3
 from kompe.cubed_sphere.cs_coordinates import (
     cube_to_cartesian,
     cube_to_spherical,
     face_coordinate,
     metric_tensor,
 )
+from kompe.cubed_sphere.geometry_linalg import determinant_3x3
 from kompe.cubed_sphere.global_projection import GlobalCSProjection
 from kompe.grid import SphericalGrid
 from kompe.math.backend import backend_context
@@ -51,9 +51,9 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             xi = face_coordinate(i[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
             eta = face_coordinate(j[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
             face = k[:, :-1, :-1].reshape(-1)
-            _, theta, phi = cube_to_spherical(xi, eta, face, deg=True)
+            _, theta, phi = cube_to_spherical(xi, eta, face, degrees=True)
             cell_metric = metric_tensor(xi, eta)
-            sqrt_detg = np.sqrt(determinants_3x3(cell_metric))
+            sqrt_detg = np.sqrt(determinant_3x3(cell_metric))
             cell_areas = self._compute_cell_areas(cells_per_face)
 
         for name, value in (
@@ -114,7 +114,7 @@ class GlobalCSMesh(StructuredSurfaceMesh):
         """Cell areas on the unit sphere."""
         return self._cell_areas.reshape(self.shape)
 
-    def coordinate(self, index):
+    def face_coordinate(self, index):
         """Return xi/eta coordinate values for logical edge indices."""
         return face_coordinate(index, self.cells_per_face)
 
@@ -126,9 +126,14 @@ class GlobalCSMesh(StructuredSurfaceMesh):
         return face, xi, eta
 
     @staticmethod
-    def _gridpoints(N):
+    def _gridpoints(cells_per_face):
         """Return face and grid-line indices for a mesh resolution."""
-        return np.meshgrid(np.arange(6), np.arange(N + 1), np.arange(N + 1), indexing="ij")
+        return np.meshgrid(
+            np.arange(6),
+            np.arange(cells_per_face + 1),
+            np.arange(cells_per_face + 1),
+            indexing="ij",
+        )
 
     @staticmethod
     def spherical_triangle_area(a, b, c):
@@ -143,22 +148,22 @@ class GlobalCSMesh(StructuredSurfaceMesh):
         return np.abs(2.0 * np.arctan2(numerator, denominator))
 
     @classmethod
-    def _compute_cell_areas(cls, N):
+    def _compute_cell_areas(cls, cells_per_face):
         """Return exact spherical CS cell areas."""
-        k, i, j = cls._gridpoints(N)
-        block = k[:, :-1, :-1].reshape(-1)
+        k, i, j = cls._gridpoints(cells_per_face)
+        face = k[:, :-1, :-1].reshape(-1)
         i0, i1 = i[:, :-1, :-1].reshape(-1), i[:, 1:, :-1].reshape(-1)
         j0, j1 = j[:, :-1, :-1].reshape(-1), j[:, :-1, 1:].reshape(-1)
 
         corners = [
-            (face_coordinate(i0, N), face_coordinate(j0, N)),
-            (face_coordinate(i1, N), face_coordinate(j0, N)),
-            (face_coordinate(i1, N), face_coordinate(j1, N)),
-            (face_coordinate(i0, N), face_coordinate(j1, N)),
+            (face_coordinate(i0, cells_per_face), face_coordinate(j0, cells_per_face)),
+            (face_coordinate(i1, cells_per_face), face_coordinate(j0, cells_per_face)),
+            (face_coordinate(i1, cells_per_face), face_coordinate(j1, cells_per_face)),
+            (face_coordinate(i0, cells_per_face), face_coordinate(j1, cells_per_face)),
         ]
         vectors = []
         for xi, eta in corners:
-            x, y, z = cube_to_cartesian(xi, eta, np.ones_like(xi), block)
+            x, y, z = cube_to_cartesian(xi, eta, np.ones_like(xi), face)
             vector = np.stack([x, y, z], axis=1)
             vectors.append(vector / np.linalg.norm(vector, axis=1).reshape((-1, 1)))
 

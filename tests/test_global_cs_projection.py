@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from kompe import GlobalCSProjection
-from kompe.math import backend_context, jit, to_jax, to_numpy
+from kompe.math import backend_context, to_numpy
 from kompe.spherical import enu_to_ecef
 
 
@@ -165,12 +165,15 @@ def test_cube_vector_matrix_is_the_coordinate_jacobian():
 @pytest.mark.requires_jax
 def test_global_projection_algebra_stays_on_jax_backend():
     """Coordinate, metric, and vector algebra preserve device arrays."""
+    import jax
+    import jax.numpy as jnp
+
     projection = GlobalCSProjection()
 
     with backend_context("jax"):
-        xi, eta, radius, face = (to_jax(values) for values in _interior_face_points())
-        longitude = to_jax(np.array([10.0, 100.0, -170.0, -80.0, 25.0, 25.0]))
-        latitude = to_jax(np.array([10.0, 10.0, -10.0, -10.0, 70.0, -70.0]))
+        xi, eta, radius, face = (jnp.asarray(values) for values in _interior_face_points())
+        longitude = jnp.asarray(np.array([10.0, 100.0, -170.0, -80.0, 25.0, 25.0]))
+        latitude = jnp.asarray(np.array([10.0, 10.0, -10.0, -10.0, 70.0, -70.0]))
         cube_coordinates = projection.geographic_to_cube(longitude, latitude)
         cartesian = projection.cube_to_cartesian(xi, eta, radius=radius, face=face)
         spherical = projection.cube_to_spherical(xi, eta, radius=radius, face=face)
@@ -187,14 +190,14 @@ def test_global_projection_algebra_stays_on_jax_backend():
             projection.cube_to_enu_vector_matrix(xi, eta, radius=radius, face=face),
             projection.face_to_face_vector_matrix(xi, eta, face, (face + 1) % 6),
         )
-        compiled_cartesian = jit(
+        compiled_cartesian = jax.jit(
             lambda xi_values, eta_values, face_values: projection.cube_to_cartesian(
                 xi_values,
                 eta_values,
                 face=face_values,
             )
         )(xi, eta, face)
-        compiled_vector_matrix = jit(
+        compiled_vector_matrix = jax.jit(
             lambda xi_values, eta_values, radius_values, face_values: (
                 projection.enu_to_cube_vector_matrix(
                     xi_values,

@@ -1,39 +1,21 @@
-"""Array utilities.
+"""Fused linear algebra for batches of cubed-sphere geometry matrices.
 
-This module contains utility functions for performing array operations
-such as computing determinants and inverses of 3D matrices, as well as
-constraining array values within specified bounds.
+Metric tensors and coordinate Jacobians are 3-by-3 at every grid point.
+Their explicit determinant and inverse avoid the overhead of a general
+matrix factorization and fuse efficiently under JAX.
 """
 
 from kompe.math.backend import get_array_module
 
 
-def determinants_3x3(matrices):
-    """Calculate determinants of stacked 3-by-3 matrices.
-
-    Parameters
-    ----------
-    matrices : array
-        Array with shape ``(N, 3, 3)``, corresponding to ``N`` 3D
-        matrices.
-
-    Returns
-    -------
-    det : array
-        Array with determinants, shape ``(N)``.
-
-    Raises
-    ------
-    ValueError
-        If the input array is not 3D or if the last two axes are not
-        3 x 3.
-    """
+def determinant_3x3(matrices):
+    """Return the determinant of every 3-by-3 matrix in a batch."""
     xp = get_array_module(matrices)
     matrices = xp.asarray(matrices)
     if matrices.ndim != 3 or matrices.shape[1:] != (3, 3):
         raise ValueError("Input array must have shape (N, 3, 3).")
 
-    det = (
+    return (
         matrices[:, 0, 0] * matrices[:, 1, 1] * matrices[:, 2, 2]
         - matrices[:, 0, 0] * matrices[:, 1, 2] * matrices[:, 2, 1]
         - matrices[:, 0, 1] * matrices[:, 1, 0] * matrices[:, 2, 2]
@@ -42,34 +24,14 @@ def determinants_3x3(matrices):
         - matrices[:, 0, 2] * matrices[:, 1, 1] * matrices[:, 2, 0]
     )
 
-    return det
 
-
-def invert_3x3_matrices(matrices):
-    """Calculate inverses of stacked 3-by-3 matrices.
-
-    Parameters
-    ----------
-    matrices : array
-        Array with shape ``(N, 3, 3)``, corresponding to ``N`` 3D
-        invertible matrices.
-
-    Returns
-    -------
-    Minv : array
-        Array with inverse matrices, shape ``(N, 3, 3)``.
-
-    Raises
-    ------
-    ValueError
-        If the input array is not 3D or if the last two axes are not
-        3 x 3. The input matrices are assumed to be invertible.
-    """
+def inverse_3x3(matrices):
+    """Return the inverse of every invertible 3-by-3 matrix in a batch."""
     xp = get_array_module(matrices)
     matrices = xp.asarray(matrices)
     if matrices.ndim != 3 or matrices.shape[1:] != (3, 3):
         raise ValueError("Input array must have shape (N, 3, 3).")
-    det = determinants_3x3(matrices)
+    determinant = determinant_3x3(matrices)
 
     row_0 = xp.stack(
         (
@@ -96,4 +58,4 @@ def invert_3x3_matrices(matrices):
         axis=1,
     )
     adjugate = xp.stack((row_0, row_1, row_2), axis=1)
-    return adjugate / det[:, None, None]
+    return adjugate / determinant[:, None, None]

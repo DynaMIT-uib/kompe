@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
-from kompe.cubed_sphere.arrayutils import invert_3x3_matrices
+from kompe.cubed_sphere.geometry_linalg import inverse_3x3
 from kompe.math.backend import get_array_module
 
 
@@ -39,7 +39,7 @@ class GlobalCSProjection:
         return cs_coordinates.metric_tensor(
             xi,
             eta,
-            r=radius,
+            radius=radius,
             covariant=covariant,
         )
 
@@ -54,7 +54,7 @@ class GlobalCSProjection:
         return cs_coordinates.geographic_to_cube(
             longitude,
             latitude,
-            block=face,
+            face=face,
         )
 
     @staticmethod
@@ -63,8 +63,8 @@ class GlobalCSProjection:
         return cs_coordinates.cube_to_cartesian(
             xi,
             eta,
-            r=radius,
-            block=face,
+            radius=radius,
+            face=face,
         )
 
     @staticmethod
@@ -74,8 +74,8 @@ class GlobalCSProjection:
             xi,
             eta,
             face,
-            r=radius,
-            deg=degrees,
+            radius=radius,
+            degrees=degrees,
         )
 
     @staticmethod
@@ -84,8 +84,8 @@ class GlobalCSProjection:
         return cs_vectors._cartesian_to_cube_matrix(
             xi,
             eta,
-            r=radius,
-            block=face,
+            radius=radius,
+            face=face,
         )
 
     @staticmethod
@@ -94,8 +94,8 @@ class GlobalCSProjection:
         return cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
-            r=radius,
-            block=face,
+            radius=radius,
+            face=face,
         )
 
     @staticmethod
@@ -104,10 +104,10 @@ class GlobalCSProjection:
         cube_to_cartesian = cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
-            r=radius,
-            block=face,
+            radius=radius,
+            face=face,
         )
-        cartesian_to_cube = invert_3x3_matrices(cube_to_cartesian)
+        cartesian_to_cube = inverse_3x3(cube_to_cartesian)
         enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(cube_to_cartesian[:, :, 2])
         xp = get_array_module(cartesian_to_cube, enu_to_cartesian)
         return xp.einsum("nij,njk->nik", cartesian_to_cube, enu_to_cartesian)
@@ -118,8 +118,8 @@ class GlobalCSProjection:
         cube_to_cartesian = cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
-            r=radius,
-            block=face,
+            radius=radius,
+            face=face,
         )
         enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(cube_to_cartesian[:, :, 2])
         xp = get_array_module(enu_to_cartesian, cube_to_cartesian)

@@ -85,12 +85,12 @@ def _helmholtz_component_operator(size, component):
     return LinearMap(
         shape=(size, 2 * size),
         dtype=np.float64,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
         input_shape=(2, size),
         output_shape=(size,),
     )
@@ -178,6 +178,8 @@ class SurfaceDifferentialBasis(ScalarBasis):
     component of ``curl(F)`` is ``laplacian(psi)``.
     """
 
+    sample_analysis_uses_grid_remapping = False
+
     @abstractmethod
     def _surface_laplacian(self, r=1.0):
         """Return the scalar surface Laplacian operator."""
@@ -185,6 +187,18 @@ class SurfaceDifferentialBasis(ScalarBasis):
     def omits_constant_mode(self):
         """Return whether the coefficient space omits the constant mode."""
         return False
+
+    def scalar_smoothness_weights(self):
+        """Return coefficient weights for scalar surface smoothness."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define scalar surface smoothness weights."
+        )
+
+    def helmholtz_smoothness_weights(self):
+        """Return coefficient weights for tangential Helmholtz smoothness."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define Helmholtz surface smoothness weights."
+        )
 
     @property
     def scalar_mean_weights(self):
@@ -531,6 +545,16 @@ class BasisSubset(SurfaceDifferentialBasis):
     def omits_constant_mode(self):
         """Return whether scalar coefficients omit the mean term."""
         return self.mean_free
+
+    def scalar_smoothness_weights(self):
+        """Return the parent basis's scalar smoothness weights on this subset."""
+        parent_weights = self.parent_basis.scalar_smoothness_weights()
+        return np.asarray(parent_weights)[self._parent_coefficient_indices]
+
+    def helmholtz_smoothness_weights(self):
+        """Return the parent basis's Helmholtz smoothness weights on this subset."""
+        parent_weights = self.parent_basis.helmholtz_smoothness_weights()
+        return np.asarray(parent_weights)[self._parent_coefficient_indices]
 
     def with_mean_free(self, mean_free):
         """Return a compatible mean-free/full basis when available."""

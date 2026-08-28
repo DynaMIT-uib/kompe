@@ -247,10 +247,10 @@ class RegionalCSOperators:
             dual_basis_local = cs_vectors._cartesian_to_cube_matrix(
                 xi,
                 eta,
-                r=grid.radius,
-                block=_NORTH_FACE,
+                radius=grid.radius,
+                face=_NORTH_FACE,
             )[:, :2, :].transpose(0, 2, 1)
-            metric = cs_coordinates.surface_metric_tensor(xi, eta, r=grid.radius)
+            metric = cs_coordinates.surface_metric_tensor(xi, eta, radius=grid.radius)
         dual_basis = np.einsum(
             "ij,njk->nik",
             grid.projection.local_to_geographic_matrix,

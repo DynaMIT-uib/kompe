@@ -1,4 +1,4 @@
-"""Finite-difference operators for cubed-sphere grids."""
+"""Finite-difference operators for the global cubed-sphere mesh."""
 
 from __future__ import annotations
 

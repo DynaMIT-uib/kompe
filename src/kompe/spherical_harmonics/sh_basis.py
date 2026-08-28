@@ -9,8 +9,8 @@ from scipy.special import assoc_legendre_p_all
 from kompe.basis import BasisSubset, SurfaceDifferentialBasis, _owned_readonly_array
 from kompe.math import as_linear_map
 from kompe.math.backend import get_array_module, jax_enabled, to_numpy
-from kompe.spherical_harmonics.helpers import (
-    SHIndices,
+from kompe.spherical_harmonics.coefficients import (
+    SHCoefficientIndices,
     schmidt_quasi_normalization_factors,
 )
 
@@ -152,8 +152,10 @@ class SHBasis(SurfaceDifferentialBasis):
             (n, m) for n in range(self.max_degree + 1) for m in range(min(self.max_order, n) + 1)
         )
         self._index_map = {pair: index for index, pair in enumerate(self.index_pairs)}
-        self.cnm = SHIndices(pair for pair in self.index_pairs if pair[0] >= self.min_degree)
-        self.snm = SHIndices(
+        self.cnm = SHCoefficientIndices(
+            pair for pair in self.index_pairs if pair[0] >= self.min_degree
+        )
+        self.snm = SHCoefficientIndices(
             pair for pair in self.index_pairs if pair[0] >= self.min_degree and pair[1] >= 1
         )
 
@@ -176,13 +178,16 @@ class SHBasis(SurfaceDifferentialBasis):
     def _init_normalization(self, schmidt_quasi_normalized):
         """Build immutable coefficient normalization factors."""
         self.schmidt_quasi_normalized = schmidt_quasi_normalized
-        if self.schmidt_quasi_normalized:
-            s_matrix = schmidt_quasi_normalization_factors(self.max_degree, self.max_order)
-            self.schmidt_factors = _owned_readonly_array(
-                [s_matrix[n, m] for n, m in self.index_pairs]
-            )
-        else:
-            self.schmidt_factors = _owned_readonly_array(np.ones(len(self.index_pairs)))
+        s_matrix = schmidt_quasi_normalization_factors(self.max_degree, self.max_order)
+        self._schmidt_quasi_factors = _owned_readonly_array(
+            [s_matrix[n, m] for n, m in self.index_pairs]
+        )
+        factors = (
+            self._schmidt_quasi_factors
+            if self.schmidt_quasi_normalized
+            else np.ones(len(self.index_pairs))
+        )
+        self.schmidt_factors = _owned_readonly_array(factors)
 
     @property
     def coefficient_space_signature(self):
@@ -259,6 +264,27 @@ class SHBasis(SurfaceDifferentialBasis):
     def omits_constant_mode(self):
         """Return whether scalar coefficients omit the monopole."""
         return self.mean_free
+
+    def _surface_mode_norm(self):
+        """Return the L2 norm of each spherical-harmonic surface mode."""
+        coefficient_factors = np.hstack(
+            (
+                self._schmidt_quasi_factors[self.cnm_filter],
+                self._schmidt_quasi_factors[self.snm_filter],
+            )
+        )
+        angular_norm = 1.0 / (2.0 * self.n + 1.0)
+        if not self.schmidt_quasi_normalized:
+            angular_norm = angular_norm / coefficient_factors**2
+        return np.sqrt(angular_norm)
+
+    def scalar_smoothness_weights(self):
+        """Return gradient-norm weights for scalar coefficients."""
+        return self._surface_mode_norm() * np.sqrt(self.n * (self.n + 1.0))
+
+    def helmholtz_smoothness_weights(self):
+        """Return gradient-norm weights for Helmholtz field coefficients."""
+        return self._surface_mode_norm() * self.n * (self.n + 1.0)
 
     def with_mean_free(self, mean_free):
         """Return a cached SH scalar-space basis or view."""

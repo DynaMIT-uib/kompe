@@ -1,5 +1,18 @@
 # Consumer migration
 
+## Kompe operator names
+
+`LinearMap` construction now uses the public operation names `matvec`,
+`rmatvec`, `matmat`, and `rmatmat` instead of private field keywords.
+
+`SolidHarmonicOperators` distinguishes dimensionless conversion factors from
+the physical potential jump at a radius. Use
+`poloidal_to_regular_potential_factors`,
+`poloidal_to_irregular_potential_factors`, and
+`poloidal_to_normalized_potential_jump_factors` for coefficient-space factors;
+use `poloidal_to_potential_jump_factors(radius)` or
+`poloidal_to_potential_jump_operator(radius)` for the dimensioned jump.
+
 ## PynaMIT
 
 PynaMIT depends on `kompe` directly. Spherical and numerical code should be
@@ -87,7 +100,7 @@ ScalarBasis
 ├── SECSBasis                           Green-function/current synthesis
 └── SurfaceDifferentialBasis
     ├── SHBasis                         global spectral basis
-    └── GlobalCSBasis                   global six-face nodal basis
+    └── GlobalCSBasis                   global six-face cell-centred nodal basis
 
 StructuredSurfaceMesh
 ├── RegionalCSMesh                     bounded single-face mesh

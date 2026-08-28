@@ -1,14 +1,11 @@
 """Coordinate projection for a rotated regional cubed-sphere face."""
 
-from pathlib import Path
-
 import numpy as np
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
 from kompe.math.backend import backend_context, get_array_module, to_numpy
 from kompe.spherical import ecef_to_enu, enu_to_ecef, rotate_spherical_by_matrix
 
-_DATA_PATH = Path(__file__).resolve().parents[1] / "data"
 _NORTH_FACE = 4
 
 
@@ -146,7 +143,7 @@ class RegionalCSProjection:
         xi, eta, _ = cs_coordinates.geographic_to_cube(
             local_lon,
             local_lat,
-            block=_NORTH_FACE,
+            face=_NORTH_FACE,
         )
 
         on_local_hemisphere = local_lat >= 0
@@ -181,8 +178,8 @@ class RegionalCSProjection:
         _, theta, phi = cs_coordinates.cube_to_spherical(
             xi,
             eta,
-            block=_NORTH_FACE,
-            deg=True,
+            face=_NORTH_FACE,
+            degrees=True,
         )
         return self.local_to_geographic(phi, 90 - theta)
 
@@ -289,9 +286,9 @@ class RegionalCSProjection:
             N element array of xi coordinates
         eta : array-like
             N element array of eta coordinates
-        Axi : array-like
+        xi_component : array-like
             N element array of vector components in xi direction
-        Aeta : array-like
+        eta_component : array-like
             N element array of vector components in eta direction
 
         """
@@ -313,20 +310,20 @@ class RegionalCSProjection:
         cube_matrix = cs_vectors._cartesian_to_cube_matrix(
             xi,
             eta,
-            r=1.0,
-            block=_NORTH_FACE,
+            radius=1.0,
+            face=_NORTH_FACE,
         )
         cube = xp.einsum("nij,nj->ni", cube_matrix, local_ecef)
         return xi, eta, cube[:, 0], cube[:, 1]
 
-    def cube_vector_to_geographic(self, Axi, Aeta, xi, eta):
+    def cube_vector_to_geographic(self, xi_component, eta_component, xi, eta):
         """Convert cube-coordinate tangent components to geographic ENU.
 
         Parameters
         ----------
-        Axi : array-like
+        xi_component : array-like
             Array of N xi components
-        Aeta : array-like
+        eta_component : array-like
             Array of N eta components
         xi : array-like
             Array of N xi coords that represent vector positions
@@ -345,17 +342,18 @@ class RegionalCSProjection:
             N element array of vector components in north direction
 
         """
-        xp = get_array_module(Axi, Aeta, xi, eta)
-        Axi, Aeta, xi, eta = (
-            value.reshape(-1) for value in xp.broadcast_arrays(Axi, Aeta, xi, eta)
+        xp = get_array_module(xi_component, eta_component, xi, eta)
+        xi_component, eta_component, xi, eta = (
+            value.reshape(-1)
+            for value in xp.broadcast_arrays(xi_component, eta_component, xi, eta)
         )
         lon, lat = self.cube_to_geographic(xi, eta)
-        cube = xp.stack((Axi, Aeta, xp.zeros_like(Axi)), axis=1)
+        cube = xp.stack((xi_component, eta_component, xp.zeros_like(xi_component)), axis=1)
         cartesian_matrix = cs_vectors._cube_to_cartesian_matrix(
             xi,
             eta,
-            r=1.0,
-            block=_NORTH_FACE,
+            radius=1.0,
+            face=_NORTH_FACE,
         )
         local_ecef = xp.einsum("nij,nj->ni", cartesian_matrix, cube)
         geographic_ecef = xp.einsum(
@@ -365,13 +363,6 @@ class RegionalCSProjection:
         )
         geographic = ecef_to_enu(geographic_ecef, lat, lon)
         return lon, lat, geographic[:, 0], geographic[:, 1]
-
-    def projected_coastlines(self, resolution="50m"):
-        """Generate coastlines in projected coordinates."""
-        coastlines = np.load(_DATA_PATH / f"coastlines_{resolution}.npz")
-        for key in coastlines:
-            lat, lon = coastlines[key]
-            yield self.geographic_to_cube(lon, lat)
 
     def differential_elements(self, xi, eta, dxi, deta, radius=1.0):
         """Calculate magnitudes of line and surface elements.
@@ -412,7 +403,9 @@ class RegionalCSProjection:
         """
         xp = get_array_module(xi, eta, dxi, deta, radius)
         xi, eta, dxi, deta, radius = xp.broadcast_arrays(xi, eta, dxi, deta, radius)
-        metric = cs_coordinates.surface_metric_tensor(xi, eta, r=radius).reshape(xi.shape + (2, 2))
+        metric = cs_coordinates.surface_metric_tensor(xi, eta, radius=radius).reshape(
+            xi.shape + (2, 2)
+        )
 
         dlxi = xp.sqrt(metric[..., 0, 0]) * dxi
         dleta = xp.sqrt(metric[..., 1, 1]) * deta

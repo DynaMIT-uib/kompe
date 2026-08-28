@@ -7,6 +7,9 @@ public interfaces with an accompanying migration note.
 
 ## Unreleased
 
+- Give matrix-free `LinearMap` construction public operation keywords, and
+  distinguish normalized solid-harmonic potential-jump factors from the
+  dimensioned jump at a specified radius.
 - Make local tests import the checkout under test, cover Python 3.14, and keep
   scheduled downstream compatibility testing focused on PynaMIT.
 - Preserve the caller's broadcast shape on `SphericalGrid` while keeping

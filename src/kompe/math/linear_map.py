@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
@@ -42,9 +42,14 @@ def _array_module_for_matrix_backend(backend: MatrixBackend | None = None) -> An
     raise ValueError(f"Unknown matrix backend {backend!r}. Use None, 'numpy', or 'jax'.")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class LinearMap:
-    """Backend-agnostic linear map with flattened matrix operations."""
+    """Backend-agnostic linear map with flattened matrix operations.
+
+    Construct a matrix-free map from its forward and adjoint actions. Optional
+    block, dense, diagonal, and normal-matrix functions preserve useful
+    structure without changing the ordinary ``map @ values`` interface.
+    """
 
     shape: MatrixShape
     dtype: Any
@@ -65,11 +70,41 @@ class LinearMap:
         default_factory=dict, init=False, repr=False, compare=False
     )
 
-    def __post_init__(self) -> None:
-        """Validate shaped metadata and fill flat defaults."""
-        output_shape, input_shape = _map_shapes(self.shape, self.input_shape, self.output_shape)
+    def __init__(
+        self,
+        shape: MatrixShape,
+        dtype: Any,
+        matvec: VectorizedMapFunc,
+        rmatvec: VectorizedMapFunc,
+        matmat: VectorizedMapFunc | None = None,
+        rmatmat: VectorizedMapFunc | None = None,
+        *,
+        dense_array: Callable[[Any], Any] | None = None,
+        diagonal: Callable[[Any], Any] | None = None,
+        normal_matrix_diag: Callable[[], np.ndarray] | None = None,
+        backend_operands: tuple[Any, ...] = (),
+        output_shape: tuple[int, ...] | None = None,
+        input_shape: tuple[int, ...] | None = None,
+    ) -> None:
+        """Initialize a map from forward and adjoint vector operations."""
+        shape = tuple(int(dimension) for dimension in shape)
+        output_shape, input_shape = _map_shapes(shape, input_shape, output_shape)
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "dtype", dtype)
+        object.__setattr__(self, "_matvec", matvec)
+        object.__setattr__(self, "_rmatvec", rmatvec)
+        object.__setattr__(self, "_matmat", matmat)
+        object.__setattr__(self, "_rmatmat", rmatmat)
+        object.__setattr__(self, "_dense_array_func", dense_array)
+        object.__setattr__(self, "_diagonal_array_func", diagonal)
+        object.__setattr__(self, "_normal_matrix_diag", normal_matrix_diag)
+        object.__setattr__(self, "_backend_operands", tuple(backend_operands))
+        object.__setattr__(self, "_is_noop", False)
+        object.__setattr__(self, "_einsum_map", None)
+        object.__setattr__(self, "_dense_tensor", None)
         object.__setattr__(self, "output_shape", output_shape)
         object.__setattr__(self, "input_shape", input_shape)
+        object.__setattr__(self, "_dense_cache", {})
 
     @property
     def ndim(self) -> int:
@@ -283,14 +318,14 @@ class LinearMap:
         return LinearMap(
             shape=(self.shape[0], other_map.shape[1]),
             dtype=dtype,
-            _matvec=matvec,
-            _rmatvec=rmatvec,
-            _matmat=matmat,
-            _rmatmat=rmatmat,
-            _dense_array_func=dense_array,
-            _diagonal_array_func=diagonal_array,
-            _normal_matrix_diag=normal_matrix_diag,
-            _backend_operands=self._backend_operands + other_map._backend_operands,
+            matvec=matvec,
+            rmatvec=rmatvec,
+            matmat=matmat,
+            rmatmat=rmatmat,
+            dense_array=dense_array,
+            diagonal=diagonal_array,
+            normal_matrix_diag=normal_matrix_diag,
+            backend_operands=self._backend_operands + other_map._backend_operands,
             output_shape=self.output_shape,
             input_shape=other_map.input_shape,
         )
@@ -438,13 +473,13 @@ class LinearMap:
         return LinearMap(
             shape=self.shape,
             dtype=dtype,
-            _matvec=matvec,
-            _rmatvec=rmatvec,
-            _matmat=matmat,
-            _rmatmat=rmatmat,
-            _dense_array_func=dense_array,
-            _normal_matrix_diag=normal_matrix_diag,
-            _backend_operands=self._backend_operands + other_map._backend_operands,
+            matvec=matvec,
+            rmatvec=rmatvec,
+            matmat=matmat,
+            rmatmat=rmatmat,
+            dense_array=dense_array,
+            normal_matrix_diag=normal_matrix_diag,
+            backend_operands=self._backend_operands + other_map._backend_operands,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
         )
@@ -502,23 +537,22 @@ class LinearMap:
         def diagonal_array(xp: Any) -> Any:
             return self._diagonal_array(xp) * scalar
 
-        return LinearMap(
+        scaled_map = LinearMap(
             shape=self.shape,
             dtype=np.result_type(self.dtype, scalar),
-            _matvec=matvec,
-            _rmatvec=rmatvec,
-            _matmat=matmat,
-            _rmatmat=rmatmat,
-            _dense_array_func=dense_array,
-            _diagonal_array_func=(
-                diagonal_array if self._diagonal_array_func is not None else None
-            ),
-            _normal_matrix_diag=normal_matrix_diag,
-            _backend_operands=self._backend_operands,
-            _dense_tensor=scaled_dense_tensor,
+            matvec=matvec,
+            rmatvec=rmatvec,
+            matmat=matmat,
+            rmatmat=rmatmat,
+            dense_array=dense_array,
+            diagonal=(diagonal_array if self._diagonal_array_func is not None else None),
+            normal_matrix_diag=normal_matrix_diag,
+            backend_operands=self._backend_operands,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
         )
+        object.__setattr__(scaled_map, "_dense_tensor", scaled_dense_tensor)
+        return scaled_map
 
     def __rmul__(self, other: Any) -> LinearMap:
         """Scale this linear map."""
@@ -650,20 +684,21 @@ def _linear_map_from_dense(
     def dense_array(xp: Any) -> Any:
         return xp.asarray(mat_array)
 
-    return LinearMap(
+    linear_map = LinearMap(
         shape=shape,
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
-        _backend_operands=(mat_array,),
-        _dense_tensor=mat_array.reshape(out_shape + in_shape),
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
+        backend_operands=(mat_array,),
         output_shape=out_shape,
         input_shape=in_shape,
     )
+    object.__setattr__(linear_map, "_dense_tensor", mat_array.reshape(out_shape + in_shape))
+    return linear_map
 
 
 def diagonal_linear_map(
@@ -713,14 +748,14 @@ def diagonal_linear_map(
     return LinearMap(
         shape=(size, size),
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _diagonal_array_func=diagonal_array,
-        _normal_matrix_diag=normal_matrix_diag,
-        _backend_operands=(diag_array,),
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        diagonal=diagonal_array,
+        normal_matrix_diag=normal_matrix_diag,
+        backend_operands=(diag_array,),
         output_shape=out_shape,
         input_shape=in_shape,
     )
@@ -749,20 +784,21 @@ def identity_linear_map(shape: int | tuple[int, ...], *, dtype: Any = np.float64
     def normal_matrix_diag() -> np.ndarray:
         return np.ones(size, dtype=dtype)
 
-    return LinearMap(
+    identity = LinearMap(
         shape=(size, size),
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=matvec,
-        _matmat=matmat,
-        _rmatmat=matmat,
-        _dense_array_func=dense_array,
-        _diagonal_array_func=diagonal_array,
-        _normal_matrix_diag=normal_matrix_diag,
-        _is_noop=True,
+        matvec=matvec,
+        rmatvec=matvec,
+        matmat=matmat,
+        rmatmat=matmat,
+        dense_array=dense_array,
+        diagonal=diagonal_array,
+        normal_matrix_diag=normal_matrix_diag,
         output_shape=value_shape,
         input_shape=value_shape,
     )
+    object.__setattr__(identity, "_is_noop", True)
+    return identity
 
 
 def pointwise_matrix_linear_map(matrix: Any) -> LinearMap:
@@ -838,13 +874,13 @@ def pointwise_matrix_linear_map(matrix: Any) -> LinearMap:
     return LinearMap(
         shape=(output_size, input_size),
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
-        _backend_operands=(matrix_array,),
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
+        backend_operands=(matrix_array,),
         input_shape=input_shape,
         output_shape=output_shape,
     )
@@ -944,12 +980,12 @@ def take_linear_map(
     return LinearMap(
         shape=(output_size, input_size),
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
         input_shape=input_shape,
         output_shape=output_shape,
     )
@@ -1011,12 +1047,12 @@ def _zero_row_linear_map(input_shape: tuple[int, ...]) -> LinearMap:
     return LinearMap(
         shape=(0, input_size),
         dtype=np.float64,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
         output_shape=(0,),
         input_shape=input_shape,
     )
@@ -1091,13 +1127,13 @@ def vstack_linear_maps(
     return LinearMap(
         shape=(output_size, input_size),
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
-        _backend_operands=backend_operands,
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
+        backend_operands=backend_operands,
         output_shape=(output_size,),
         input_shape=common_input_shape,
     )
@@ -1127,10 +1163,10 @@ def _linear_map_from_linear_operator(
     return LinearMap(
         shape=shape,
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
         output_shape=out_shape,
         input_shape=in_shape,
     )
@@ -1201,12 +1237,12 @@ def _linear_map_from_scipy_sparse(
     return LinearMap(
         shape=shape,
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
         output_shape=out_shape,
         input_shape=in_shape,
     )
@@ -1262,13 +1298,13 @@ def _linear_map_from_jax_sparse(
     return LinearMap(
         shape=shape,
         dtype=dtype,
-        _matvec=matvec,
-        _rmatvec=rmatvec,
-        _matmat=matmat,
-        _rmatmat=rmatmat,
-        _dense_array_func=dense_array,
-        _normal_matrix_diag=normal_matrix_diag,
-        _backend_operands=backend_operands,
+        matvec=matvec,
+        rmatvec=rmatvec,
+        matmat=matmat,
+        rmatmat=rmatmat,
+        dense_array=dense_array,
+        normal_matrix_diag=normal_matrix_diag,
+        backend_operands=backend_operands,
         output_shape=out_shape,
         input_shape=in_shape,
     )
@@ -1338,7 +1374,23 @@ def as_linear_map(
         )
         if out_shape == op.output_shape and in_shape == op.input_shape:
             return op
-        relabeled = replace(op, output_shape=out_shape, input_shape=in_shape)
+        relabeled = LinearMap(
+            shape=op.shape,
+            dtype=op.dtype,
+            matvec=op._matvec,
+            rmatvec=op._rmatvec,
+            matmat=op._matmat,
+            rmatmat=op._rmatmat,
+            dense_array=op._dense_array_func,
+            diagonal=op._diagonal_array_func,
+            normal_matrix_diag=op._normal_matrix_diag,
+            backend_operands=op._backend_operands,
+            output_shape=out_shape,
+            input_shape=in_shape,
+        )
+        object.__setattr__(relabeled, "_is_noop", op._is_noop)
+        object.__setattr__(relabeled, "_einsum_map", op._einsum_map)
+        object.__setattr__(relabeled, "_dense_tensor", op._dense_tensor)
         # The flat matrix is unchanged by shaped metadata. Share any dense
         # materialization already paid for.
         object.__setattr__(relabeled, "_dense_cache", op._dense_cache)
