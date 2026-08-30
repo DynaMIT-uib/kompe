@@ -87,8 +87,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             If ``cells_per_face`` is not a positive even number.
         """
         self.kind = "CS"
-        self._laplacian_cache = {}
-        self._laplacian_sparse_cache = {}
+        self._laplacian_matrix_cache = {}
         self._remapper = _GlobalCSRemapper(self)
         self._surface_operator_cache = OrderedDict()
 
@@ -122,8 +121,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         geometry-only interpolation matrices.
         """
         self.__dict__.pop("_native_derivatives", None)
-        self._laplacian_cache.clear()
-        self._laplacian_sparse_cache.clear()
+        self._laplacian_matrix_cache.clear()
         self._surface_operator_cache.clear()
         self._remapper.clear_cache()
         if shared_remaps:
@@ -133,8 +131,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         """Return cache occupancy without exposing mutable cache objects."""
         return {
             "derivatives_built": "_native_derivatives" in self.__dict__,
-            "laplacian_matrices": len(self._laplacian_cache),
-            "sparse_laplacian_matrices": len(self._laplacian_sparse_cache),
+            "laplacian_matrices": len(self._laplacian_matrix_cache),
             "surface_operators": len(self._surface_operator_cache),
             "surface_max_size": self._surface_cache_size,
             "remap_operators": self._remapper.cache_info(),
@@ -176,7 +173,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     def scalar_evaluation_matrix(self, grid, derivative=None):
         """Materialize the canonical CS scalar evaluation operator."""
-        return self.scalar_evaluation_operator(grid, derivative=derivative).array
+        return self.scalar_evaluation_operator(grid, derivative=derivative).to_array()
 
     def scalar_evaluation_operator(self, grid, derivative=None):
         """Return the cached CS scalar evaluation operator."""
@@ -325,7 +322,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     def surface_gradient_matrix(self, grid):
         """Materialize the canonical CS surface-gradient operator."""
-        return self.surface_gradient_operator(grid).array
+        return self.surface_gradient_operator(grid).to_array()
 
     def surface_gradient_operator(self, grid):
         """Return the CS surface-gradient operator on ``grid``."""
@@ -344,7 +341,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     def rhat_cross_gradient_matrix(self, grid):
         """Materialize the canonical CS rhat-cross-gradient operator."""
-        return self.rhat_cross_gradient_operator(grid).array
+        return self.rhat_cross_gradient_operator(grid).to_array()
 
     def rhat_cross_gradient_operator(self, grid):
         """Return the CS rhat-cross-gradient operator on ``grid``."""
@@ -363,7 +360,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     def helmholtz_synthesis_matrix(self, grid):
         """Materialize the canonical CS Helmholtz synthesis operator."""
-        return self.helmholtz_synthesis_operator(grid).array
+        return self.helmholtz_synthesis_operator(grid).to_array()
 
     def helmholtz_synthesis_operator(self, grid):
         """Return the CS Helmholtz synthesis operator on ``grid``."""
@@ -409,7 +406,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     def _sparse_laplacian_matrix(self, r=1.0):
         """Return the cached sparse discrete scalar Laplacian."""
         key = float(r)
-        if key not in self._laplacian_sparse_cache:
+        if key not in self._laplacian_matrix_cache:
             derivatives = self._native_derivatives
             term_theta = (
                 derivatives["inv_sin_theta"]
@@ -422,15 +419,8 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
                 @ derivatives["phi_unscaled"]
                 @ derivatives["phi_unscaled"]
             )
-            self._laplacian_sparse_cache[key] = ((term_theta + term_phi) / (r**2)).tocsr()
-        return self._laplacian_sparse_cache[key]
-
-    def _surface_laplacian(self, r=1.0):
-        """Return the discrete scalar Laplacian matrix."""
-        key = float(r)
-        if key not in self._laplacian_cache:
-            self._laplacian_cache[key] = self._sparse_laplacian_matrix(r).toarray()
-        return get_array_module().asarray(self._laplacian_cache[key])
+            self._laplacian_matrix_cache[key] = ((term_theta + term_phi) / (r**2)).tocsr()
+        return self._laplacian_matrix_cache[key]
 
     def surface_laplacian_operator(self, r=1.0):
         """Return the native sparse scalar Laplacian operator."""

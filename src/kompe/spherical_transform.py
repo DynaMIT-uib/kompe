@@ -43,6 +43,16 @@ def _normalize_regularization_lambda(value):
     return None if value == 0.0 else value
 
 
+def _normalize_tolerance(value):
+    """Return a finite, non-negative solver tolerance."""
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError("tolerance must be a finite non-negative scalar.")
+    value = float(value)
+    if not np.isfinite(value) or value < 0.0:
+        raise ValueError("tolerance must be a finite non-negative scalar.")
+    return value
+
+
 def grid_sqrt_area_weights(grid):
     """Return default sqrt area weights for a spherical grid."""
     if hasattr(grid, "area_weights"):
@@ -230,7 +240,7 @@ class SphericalTransform:
         *,
         sqrt_weights=None,
         reg_lambda=None,
-        pinv_rtol=1e-15,
+        tolerance=1e-15,
         area_weighted=False,
         use_persistent_evaluation_cache=True,
     ):
@@ -251,8 +261,8 @@ class SphericalTransform:
         reg_lambda : float, optional
             Dimensionless relative regularization strength. Kompe balances
             the data and regularization operator scales before solving.
-        pinv_rtol : float, optional
-            Relative singular-value cutoff used by pseudo-inverse solvers.
+        tolerance : float, optional
+            Numerical tolerance for the least-squares solver.
         area_weighted : bool, optional
             Use ``grid.area_weights`` when present, otherwise spherical
             ``sin(theta)`` weights. Explicit ``sqrt_weights`` take precedence.
@@ -277,7 +287,7 @@ class SphericalTransform:
             grid, sqrt_weights=sqrt_weights, area_weighted=area_weighted, vector=True
         )
         self.reg_lambda = _normalize_regularization_lambda(reg_lambda)
-        self.pinv_rtol = pinv_rtol
+        self.tolerance = _normalize_tolerance(tolerance)
         self.use_persistent_evaluation_cache = bool(use_persistent_evaluation_cache)
 
         self._analysis_transforms = OrderedDict()
@@ -304,7 +314,7 @@ class SphericalTransform:
                 self.grid,
                 sqrt_weights=self.sqrt_weights if self.explicit_sqrt_weights else None,
                 reg_lambda=self.reg_lambda,
-                pinv_rtol=self.pinv_rtol,
+                tolerance=self.tolerance,
                 area_weighted=self.area_weighted,
                 use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
             )
@@ -482,6 +492,7 @@ class SphericalTransform:
             self.helmholtz_synthesis_matrix,
             sqrt_weights=self.helmholtz_sqrt_weights,
             n_leading_flattened=2,
+            rtol=self.tolerance,
         )
         return as_linear_map(
             analysis,
@@ -612,11 +623,12 @@ class SphericalTransform:
             data_normal_matrix_builder=self._data_normal_matrix_builder("helmholtz"),
         )
 
-    def _solve_least_squares(self, problem, grid_values, solver_type=None):
+    def _solve_least_squares(self, problem, grid_values, solver=None):
         """Solve one configured least-squares problem."""
-        solver_type = get_default_least_squares_solver() if solver_type is None else solver_type
-        solver = LeastSquaresSolver(solver=solver_type, tolerance=self.pinv_rtol)
-        return solver.solve(problem=problem, rhs=grid_values)
+        solver = get_default_least_squares_solver() if solver is None else solver
+        return LeastSquaresSolver(solver=solver, tolerance=self.tolerance).solve(
+            problem=problem, rhs=grid_values
+        )
 
     def synthesize_scalar(self, coeffs, derivative=None):
         """Synthesize scalar coefficients on the transform grid."""
@@ -628,7 +640,7 @@ class SphericalTransform:
         coeff_array = self._coefficient_array(coeffs, helmholtz=True)
         return self._coefficients_to_grid(coeff_array, helmholtz=True)
 
-    def analyze_scalar(self, grid_values, solver_type=None):
+    def analyze_scalar(self, grid_values, solver=None):
         """Analyze scalar grid values into basis coefficients."""
         if (
             self._scalar_synthesis_is_identity()
@@ -636,19 +648,15 @@ class SphericalTransform:
             and not self.explicit_sqrt_weights
         ):
             return grid_values
-        return self._solve_least_squares(
-            self.scalar_least_squares_problem, grid_values, solver_type
-        )
+        return self._solve_least_squares(self.scalar_least_squares_problem, grid_values, solver)
 
-    def analyze_helmholtz(self, grid_values, solver_type=None):
+    def analyze_helmholtz(self, grid_values, solver=None):
         """Analyze grid values into Helmholtz coefficients."""
-        if solver_type is None and self.reg_lambda is None:
+        if solver is None and self.reg_lambda is None:
             operator = self._optimized_helmholtz_analysis_operator
             if operator is not None:
                 return self._apply_helmholtz_analysis_operator(operator, grid_values)
-        return self._solve_least_squares(
-            self.helmholtz_least_squares_problem, grid_values, solver_type
-        )
+        return self._solve_least_squares(self.helmholtz_least_squares_problem, grid_values, solver)
 
     def _apply_helmholtz_analysis_operator(self, operator, grid_values):
         """Apply an analysis operator with standard RHS shapes."""
@@ -698,7 +706,7 @@ class SphericalTransform:
         analysis_basis=None,
         sqrt_weights=None,
         reg_lambda=None,
-        pinv_rtol=1e-15,
+        tolerance=1e-15,
     ):
         """Analyze scalar samples into this transform's coefficient space.
 
@@ -714,7 +722,7 @@ class SphericalTransform:
             helmholtz=False,
             sqrt_weights=sqrt_weights,
             reg_lambda=reg_lambda,
-            pinv_rtol=pinv_rtol,
+            tolerance=tolerance,
         )
 
     def analyze_helmholtz_samples(
@@ -725,7 +733,7 @@ class SphericalTransform:
         analysis_basis=None,
         sqrt_weights=None,
         reg_lambda=None,
-        pinv_rtol=1e-15,
+        tolerance=1e-15,
     ):
         """Analyze tangential samples into this transform's coefficient space.
 
@@ -741,7 +749,7 @@ class SphericalTransform:
             helmholtz=True,
             sqrt_weights=sqrt_weights,
             reg_lambda=reg_lambda,
-            pinv_rtol=pinv_rtol,
+            tolerance=tolerance,
         )
 
     def _analyze_samples(
@@ -753,7 +761,7 @@ class SphericalTransform:
         helmholtz,
         sqrt_weights,
         reg_lambda,
-        pinv_rtol,
+        tolerance,
     ):
         """Analyze one scalar or Helmholtz field batch."""
         if helmholtz:
@@ -779,7 +787,7 @@ class SphericalTransform:
                 input_grid,
                 sqrt_weights=sqrt_weights,
                 reg_lambda=reg_lambda,
-                pinv_rtol=pinv_rtol,
+                tolerance=tolerance,
             )
             grid_values = sample_rows
         else:
@@ -792,7 +800,7 @@ class SphericalTransform:
             if (
                 sqrt_weights is None
                 and effective_reg_lambda == self.reg_lambda
-                and pinv_rtol == self.pinv_rtol
+                and tolerance == self.tolerance
             ):
                 analysis_transform = self
             else:
@@ -806,7 +814,7 @@ class SphericalTransform:
                     self.grid,
                     sqrt_weights=target_weights,
                     reg_lambda=effective_reg_lambda,
-                    pinv_rtol=pinv_rtol,
+                    tolerance=tolerance,
                 )
             grid_values = (
                 sample_rows
@@ -920,7 +928,13 @@ class SphericalTransform:
         )
 
     def _sample_analysis_transform(
-        self, analysis_basis, input_grid, *, sqrt_weights=None, reg_lambda=None, pinv_rtol=1e-15
+        self,
+        analysis_basis,
+        input_grid,
+        *,
+        sqrt_weights=None,
+        reg_lambda=None,
+        tolerance=1e-15,
     ):
         """Return a cached transform that analyzes samples on ``input_grid``."""
         reg_lambda = _normalize_regularization_lambda(reg_lambda)
@@ -932,7 +946,7 @@ class SphericalTransform:
                     input_grid,
                     sqrt_weights=sqrt_weights,
                     reg_lambda=reg_lambda,
-                    pinv_rtol=pinv_rtol,
+                    tolerance=tolerance,
                     area_weighted=self.area_weighted,
                     use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
                 )
@@ -948,7 +962,7 @@ class SphericalTransform:
             grid_signature,
             weight_signature,
             reg_lambda,
-            pinv_rtol,
+            tolerance,
             self.area_weighted,
         )
         if cache_key in self._analysis_transforms:
@@ -960,7 +974,7 @@ class SphericalTransform:
             input_grid,
             sqrt_weights=(None if sqrt_weights is None else _owned_explicit_weights(sqrt_weights)),
             reg_lambda=reg_lambda,
-            pinv_rtol=pinv_rtol,
+            tolerance=tolerance,
             area_weighted=self.area_weighted,
             use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
         )

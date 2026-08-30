@@ -157,8 +157,8 @@ def test_relabeling_linear_map_preserves_dense_materialization():
     relabeled = as_linear_map(linear_map, input_shape=(2, 2), output_shape=(2, 2))
 
     assert relabeled.to_matrix(backend="numpy") is materialized
-    assert relabeled.array.shape == (2, 2, 2, 2)
-    np.testing.assert_allclose(relabeled.array.reshape(4, 4), matrix)
+    assert relabeled.to_array().shape == (2, 2, 2, 2)
+    np.testing.assert_allclose(relabeled.to_array().reshape(4, 4), matrix)
 
 
 def test_diagonal_linear_map_matches_dense_diagonal():
@@ -477,7 +477,7 @@ def test_materialized_linear_map_reuses_cached_matrix():
         output_shape=(2,),
         input_shape=(2,),
     )
-    np.testing.assert_allclose(linear_map.array, matrix)
+    np.testing.assert_allclose(linear_map.to_array(), matrix)
 
     x = np.array([7.0, 11.0])
     block = np.eye(2)
@@ -547,16 +547,31 @@ def test_linear_map_to_array_returns_shaped_dense_representation():
     linear_map = as_linear_map(tensor, output_shape=(2, 3), input_shape=(4,))
 
     dense_matrix = linear_map.to_matrix(backend="numpy")
-    shaped_array = linear_map.array
+    shaped_array = linear_map.to_array()
 
     assert dense_matrix.shape == (6, 4)
     assert shaped_array.shape == tensor.shape
     assert linear_map.to_matrix(backend="numpy") is dense_matrix
     np.testing.assert_allclose(shaped_array, tensor)
     np.testing.assert_allclose(linear_map.to_matrix(backend="numpy"), dense_matrix)
-    np.testing.assert_allclose(np.asarray(linear_map.array), shaped_array)
+    np.testing.assert_allclose(np.asarray(linear_map.to_array()), shaped_array)
     if get_array_module() is np:
-        assert np.shares_memory(linear_map.array, linear_map.to_matrix())
+        assert np.shares_memory(linear_map.to_array(), linear_map.to_matrix())
+
+
+def test_linear_map_adjoint_preserves_shapes_and_diagonal_structure():
+    """The explicit adjoint swaps shaped domains without densifying diagonals."""
+    matrix = np.array([[1.0 + 2.0j, 3.0], [4.0j, -2.0], [5.0, 6.0 - 1.0j]])
+    linear_map = as_linear_map(matrix, output_shape=(3,), input_shape=(2,))
+    adjoint = linear_map.adjoint()
+
+    assert adjoint.output_shape == (2,)
+    assert adjoint.input_shape == (3,)
+    np.testing.assert_allclose(adjoint.to_matrix(), matrix.T.conj())
+
+    diagonal = diagonal_linear_map(np.array([1.0 + 2.0j, -3.0j]))
+    assert diagonal.adjoint().is_diagonal
+    np.testing.assert_allclose(diagonal.adjoint().diagonal(), [1.0 - 2.0j, 3.0j])
 
 
 # Backend ownership

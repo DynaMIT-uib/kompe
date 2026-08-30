@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from kompe.math import backend_context
-from kompe.spherical import (
+from kompe.spherical_coordinates import (
     cartesian_to_spherical,
     ecef_to_enu,
     enu_to_ecef,

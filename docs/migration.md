@@ -4,6 +4,20 @@
 
 `LinearMap` construction now uses the public operation names `matvec`,
 `rmatvec`, `matmat`, and `rmatmat` instead of private field keywords.
+Dense shaped materialization is now explicit through `to_array()`; the former
+`.array` property is removed. `to_matrix()` continues to return the flat 2-D
+representation. Surface differential bases expose one canonical
+`surface_laplacian_operator()`; explicitly materialize it when a matrix is
+needed. Helmholtz component, divergence, and curl maps likewise use their
+`_operator` methods rather than parallel matrix wrappers.
+
+`SphericalTransform.analyze_scalar()` and `analyze_helmholtz()` accept the
+solver name as `solver=`. Transform and sample-analysis tolerances are set
+with `tolerance=`; the pseudoinverse-specific `pinv_rtol` name is removed
+because the same value also configures iterative solvers. Coordinate
+conversions and rotations live in
+`kompe.spherical_coordinates` rather than the ambiguous `kompe.spherical`
+module.
 
 `SolidHarmonicOperators` distinguishes dimensionless conversion factors from
 the physical potential jump at a radius. Use

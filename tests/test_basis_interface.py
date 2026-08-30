@@ -215,7 +215,7 @@ def test_surface_operator_builders_match_component_matrices():
     gradient = cs_basis.surface_gradient_matrix(grid)
     rotated = cs_basis.rhat_cross_gradient_matrix(grid)
     helmholtz = cs_basis.helmholtz_synthesis_matrix(grid)
-    laplacian = cs_basis._surface_laplacian()
+    laplacian = cs_basis.surface_laplacian_operator()
     laplacian_matrix = cs_basis.surface_laplacian_matrix()
 
     np.testing.assert_allclose(G, cs_basis.scalar_evaluation_matrix(grid))
@@ -223,8 +223,7 @@ def test_surface_operator_builders_match_component_matrices():
     np.testing.assert_allclose(rotated, np.array([-G_phi, G_theta]))
     np.testing.assert_allclose(helmholtz[:, :, 0, :], -gradient)
     np.testing.assert_allclose(helmholtz[:, :, 1, :], rotated)
-    np.testing.assert_allclose(laplacian_matrix, laplacian)
-    np.testing.assert_allclose(laplacian, cs_basis._surface_laplacian())
+    np.testing.assert_allclose(laplacian_matrix, laplacian.to_matrix())
 
     evaluator = SphericalTransform(cs_basis, grid)
     np.testing.assert_allclose(evaluator.theta_derivative_matrix, G_theta)
@@ -236,10 +235,12 @@ def test_helmholtz_divergence_and_radial_curl_are_laplacian_maps(basis_kind):
     """Helmholtz div/curl maps expose shared potential identities."""
     basis = GlobalCSBasis(8) if basis_kind == "CS" else SHBasis(3, 2)
     laplacian = to_numpy(basis.surface_laplacian_matrix())
-    curl_free_potential = to_numpy(basis.helmholtz_curl_free_potential_matrix())
-    divergence_free_potential = to_numpy(basis.helmholtz_divergence_free_potential_matrix())
-    divergence = to_numpy(basis.helmholtz_surface_divergence_matrix())
-    radial_curl = to_numpy(basis.helmholtz_radial_curl_matrix())
+    curl_free_potential = to_numpy(basis.helmholtz_curl_free_potential_operator().to_array())
+    divergence_free_potential = to_numpy(
+        basis.helmholtz_divergence_free_potential_operator().to_array()
+    )
+    divergence = to_numpy(basis.helmholtz_surface_divergence_operator().to_array())
+    radial_curl = to_numpy(basis.helmholtz_radial_curl_operator().to_array())
     identity = np.eye(basis.index_length)
     zeros = np.zeros_like(laplacian)
 
@@ -591,7 +592,7 @@ def test_csbasis_derivatives_match_first_spherical_harmonics():
 
     G_theta = cs_basis.scalar_evaluation_matrix(grid, derivative="theta")
     G_phi = cs_basis.scalar_evaluation_matrix(grid, derivative="phi")
-    laplacian = cs_basis._surface_laplacian()
+    laplacian = cs_basis.surface_laplacian_operator()
 
     for values, expected_theta, expected_phi, expected_laplacian in fields:
         np.testing.assert_allclose(G_theta @ values, expected_theta, atol=1e-2)
@@ -615,9 +616,9 @@ def test_csbasis_derivative_convergence_rates_are_reasonable():
         theta_error -= np.cos(theta) * np.cos(phi)
         phi_error = cs_basis.scalar_evaluation_matrix(grid, derivative="phi") @ values_l1
         phi_error -= -np.sin(phi)
-        laplacian_l1_error = cs_basis._surface_laplacian() @ values_l1
+        laplacian_l1_error = cs_basis.surface_laplacian_operator() @ values_l1
         laplacian_l1_error -= -2 * values_l1
-        laplacian_l2_error = cs_basis._surface_laplacian() @ values_l2
+        laplacian_l2_error = cs_basis.surface_laplacian_operator() @ values_l2
         laplacian_l2_error -= -6 * values_l2
 
         return np.array(
@@ -658,8 +659,8 @@ def test_csbasis_mean_free_projection_is_area_weighted_and_operator_preserving()
     assert not cs_basis.scalar_mean_weights.flags.writeable
     assert cs_basis.scalar_mean(projected) == pytest.approx(0.0, abs=1e-14)
     np.testing.assert_allclose(
-        cs_basis._surface_laplacian() @ projected,
-        cs_basis._surface_laplacian() @ values,
+        cs_basis.surface_laplacian_operator() @ projected,
+        cs_basis.surface_laplacian_operator() @ values,
         atol=1e-10,
     )
 
@@ -766,15 +767,13 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
         laplacian_values = cs_basis.surface_laplacian_operator().matvec(values)
 
         assert "jax" in type(G).__module__
-        assert "jax" in type(cs_basis._surface_laplacian()).__module__
         assert "jax" in type(laplacian_values).__module__
         backend_dtype = to_numpy(values).dtype
         assert np.issubdtype(backend_dtype, np.floating)
         assert to_numpy(G).dtype == backend_dtype
-        assert to_numpy(cs_basis._surface_laplacian()).dtype == backend_dtype
         assert to_numpy(laplacian_values).dtype == backend_dtype
         np.testing.assert_allclose(
-            to_numpy(laplacian_values), to_numpy(cs_basis._surface_laplacian()) @ to_numpy(values)
+            to_numpy(laplacian_values), cs_basis.surface_laplacian_matrix() @ to_numpy(values)
         )
     finally:
         set_backend(previous_backend)
@@ -834,7 +833,7 @@ def test_shbasis_surface_operators_preserve_jax_inputs():
         )
 
         assert "jax" in type(G).__module__
-        assert "jax" in type(sh_basis._surface_laplacian()).__module__
+        assert "jax" in type(sh_basis.surface_laplacian_operator().diagonal()).__module__
         assert "jax" in type(grid_values).__module__
         assert "jax" in type(shifted).__module__
     finally:
@@ -883,7 +882,10 @@ def test_shbasis_mean_free_view_slices_parent_operators():
     np.testing.assert_allclose(
         view.scalar_evaluation_matrix(grid), direct_mean_free.scalar_evaluation_matrix(grid)
     )
-    np.testing.assert_allclose(view._surface_laplacian(), direct_mean_free._surface_laplacian())
+    np.testing.assert_allclose(
+        view.surface_laplacian_matrix(), direct_mean_free.surface_laplacian_matrix()
+    )
+    assert view.surface_laplacian_operator().is_diagonal
     view_solid_harmonics = SolidHarmonicOperators(view)
     direct_solid_harmonics = SolidHarmonicOperators(direct_mean_free)
     np.testing.assert_allclose(
@@ -919,9 +921,8 @@ def test_basis_view_slices_cs_surface_operators():
         view.surface_gradient_matrix(grid),
         cs_basis.surface_gradient_matrix(grid)[:, :, indices],
     )
-    np.testing.assert_allclose(
-        view._surface_laplacian(), cs_basis._surface_laplacian()[np.ix_(indices, indices)]
-    )
+    expected = cs_basis.surface_laplacian_matrix()[np.ix_(indices, indices)]
+    np.testing.assert_allclose(view.surface_laplacian_matrix(), expected)
     with pytest.raises(TypeError, match="SH surface basis"):
         SolidHarmonicOperators(view)
 

@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+import kompe.spherical_transform as spherical_transform_module
 from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
 from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
 from kompe.math import get_backend, jax_enabled, set_backend, to_numpy
@@ -79,7 +80,7 @@ def test_explicit_empty_solver_name_is_not_treated_as_default():
     transform = SphericalTransform(basis, _regular_grid())
 
     with pytest.raises(ValueError, match="Solver must be one of"):
-        transform.analyze_scalar(np.zeros(transform.grid.size), solver_type="")
+        transform.analyze_scalar(np.zeros(transform.grid.size), solver="")
 
 
 def test_rotated_gradient_analysis_matches_dense_least_squares():
@@ -271,6 +272,19 @@ def test_transform_rejects_invalid_regularization(reg_lambda):
     """Invalid regularization fails at transform construction."""
     with pytest.raises(ValueError, match="finite non-negative scalar"):
         SphericalTransform(SHBasis(3, 2), _regular_grid(), reg_lambda=reg_lambda)
+
+
+@pytest.mark.parametrize("tolerance", [-1.0, np.inf, np.nan])
+def test_transform_rejects_invalid_tolerance(tolerance):
+    """Invalid solver tolerance fails at transform construction."""
+    with pytest.raises(ValueError, match="finite non-negative scalar"):
+        SphericalTransform(SHBasis(3, 2), _regular_grid(), tolerance=tolerance)
+
+
+def test_transform_rejects_boolean_tolerance():
+    """A Boolean is not a meaningful numerical tolerance."""
+    with pytest.raises(TypeError, match="finite non-negative scalar"):
+        SphericalTransform(SHBasis(3, 2), _regular_grid(), tolerance=True)
 
 
 def test_surface_smoothness_regularization_matches_parseval_weights():
@@ -575,12 +589,12 @@ def test_remapped_sample_analysis_applies_target_fit_options(monkeypatch):
         input_grid=input_grid,
         analysis_basis=remapping_basis,
         reg_lambda=1e-3,
-        pinv_rtol=1e-10,
+        tolerance=1e-10,
     )
 
     assert projected.shape == (1, basis.index_length)
     assert recorded["reg_lambda"] == 1e-3
-    assert recorded["pinv_rtol"] == 1e-10
+    assert recorded["tolerance"] == 1e-10
 
 
 def test_remapped_sample_analysis_rejects_source_grid_weights():
@@ -919,7 +933,7 @@ def test_mean_free_sh_helmholtz_analysis_uses_full_rank_factorization(area_weigh
 
     operator = transform.helmholtz_analysis_operator
     actual = transform.analyze_helmholtz(values)
-    expected = reference.analyze_helmholtz(values, solver_type="normal_pinv")
+    expected = reference.analyze_helmholtz(values, solver="normal_pinv")
 
     assert operator._cached_dense(np) is None
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
@@ -942,6 +956,26 @@ def test_full_mean_sh_helmholtz_analysis_retains_rank_deficient_fallback():
 
     assert transform._optimized_helmholtz_analysis_operator is None
     assert transform.helmholtz_analysis_operator.shape == (2 * basis.index_length, 2 * grid.size)
+
+
+def test_rank_deficient_helmholtz_analysis_uses_transform_tolerance(monkeypatch):
+    """The configured tolerance reaches the pseudoinverse fallback."""
+    recorded = {}
+    weighted_tensor_pinv = spherical_transform_module.weighted_tensor_pinv
+
+    def record_tolerance(*args, **kwargs):
+        recorded["rtol"] = kwargs["rtol"]
+        return weighted_tensor_pinv(*args, **kwargs)
+
+    monkeypatch.setattr(spherical_transform_module, "weighted_tensor_pinv", record_tolerance)
+    basis = SHBasis(3, 2, mean_free=False)
+    cs_basis = GlobalCSBasis(6)
+    grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
+    transform = SphericalTransform(basis, grid, tolerance=1e-8)
+
+    _ = transform.helmholtz_analysis_operator
+
+    assert recorded["rtol"] == 1e-8
 
 
 def test_optimized_helmholtz_analysis_rejects_ambiguous_value_layout():
@@ -997,7 +1031,7 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
     operator = transform.helmholtz_analysis_operator
     actual = operator.matvec(values).reshape(2, basis.index_length)
     api_actual = transform.analyze_helmholtz(values)
-    expected = reference_transform.analyze_helmholtz(values, solver_type="normal_pinv")
+    expected = reference_transform.analyze_helmholtz(values, solver="normal_pinv")
     expected = basis.project_helmholtz_mean_free(expected)
 
     assert operator._cached_dense(np) is None
@@ -1026,7 +1060,7 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
     batch_expected = np.stack(
         [
             basis.project_helmholtz_mean_free(
-                reference_transform.analyze_helmholtz(row, solver_type="normal_pinv")
+                reference_transform.analyze_helmholtz(row, solver="normal_pinv")
             )
             for row in value_batch
         ],

@@ -3,9 +3,8 @@
 from abc import ABC, abstractmethod
 
 import numpy as np
-import scipy.sparse as sp
 
-from kompe.math import LinearMap, as_linear_map
+from kompe.math import LinearMap, as_linear_map, diagonal_linear_map, take_linear_map
 from kompe.math.backend import get_array_module
 
 
@@ -20,21 +19,6 @@ def _backend_stack(values, axis=0):
     """Stack arrays on their active backend."""
     xp = get_array_module(*values)
     return xp.stack([xp.asarray(value) for value in values], axis=axis)
-
-
-def _coefficient_matrix(value, size, name):
-    """Return a square coefficient-space matrix."""
-    xp = get_array_module(value)
-    array = xp.asarray(value)
-    if array.ndim == 1:
-        if array.size != size:
-            raise ValueError(f"{name} has length {array.size}, expected {size}.")
-        return xp.diag(array)
-    if array.ndim == 2:
-        if array.shape != (size, size):
-            raise ValueError(f"{name} has shape {array.shape}, expected {(size, size)}.")
-        return array
-    raise ValueError(f"{name} must be a 1-D diagonal or 2-D square operator.")
 
 
 def _helmholtz_component_operator(size, component):
@@ -181,8 +165,8 @@ class SurfaceDifferentialBasis(ScalarBasis):
     sample_analysis_uses_grid_remapping = False
 
     @abstractmethod
-    def _surface_laplacian(self, r=1.0):
-        """Return the scalar surface Laplacian operator."""
+    def surface_laplacian_operator(self, r=1.0):
+        """Return the scalar surface-Laplacian operator."""
 
     def omits_constant_mode(self):
         """Return whether the coefficient space omits the constant mode."""
@@ -272,33 +256,17 @@ class SurfaceDifferentialBasis(ScalarBasis):
         )
         return -curl_free + divergence_free
 
-    def helmholtz_curl_free_potential_matrix(self):
-        """Return the Helmholtz-to-curl-free-potential matrix."""
-        xp = get_array_module()
-        identity = xp.eye(self.index_length)
-        return xp.stack([identity, xp.zeros_like(identity)], axis=1)
-
     def helmholtz_curl_free_potential_operator(self):
         """Return the Helmholtz-to-curl-free-potential operator."""
         return _helmholtz_component_operator(self.index_length, 0)
-
-    def helmholtz_divergence_free_potential_matrix(self):
-        """Return the Helmholtz-to-divergence-free-potential matrix."""
-        xp = get_array_module()
-        identity = xp.eye(self.index_length)
-        return xp.stack([xp.zeros_like(identity), identity], axis=1)
 
     def helmholtz_divergence_free_potential_operator(self):
         """Return the Helmholtz-to-div-free-potential operator."""
         return _helmholtz_component_operator(self.index_length, 1)
 
     def surface_laplacian_matrix(self, r=1.0):
-        """Return the scalar surface-Laplacian coefficient matrix."""
-        return _coefficient_matrix(self._surface_laplacian(r), self.index_length, "laplacian")
-
-    def surface_laplacian_operator(self, r=1.0):
-        """Return the surface scalar Laplacian operator."""
-        return as_linear_map(self._surface_laplacian(r))
+        """Materialize the scalar surface-Laplacian coefficient matrix."""
+        return self.surface_laplacian_operator(r).to_matrix()
 
     def mean_free_surface_poisson_operator(self, r=1.0):
         """Return the gauge-fixed inverse surface Laplacian.
@@ -309,48 +277,28 @@ class SurfaceDifferentialBasis(ScalarBasis):
         constant nullspace should override this method with their
         natural gauge constraint.
         """
-        laplacian = self._surface_laplacian(r)
-        xp = get_array_module(laplacian)
-        values = xp.asarray(laplacian)
-        if values.ndim != 1:
+        laplacian = self.surface_laplacian_operator(r)
+        if not laplacian.is_diagonal:
             raise NotImplementedError(
                 f"{type(self).__name__} must define a gauge-fixed surface Poisson operator."
             )
+        values = laplacian.diagonal()
+        xp = get_array_module(values)
         if bool(xp.any(values == 0)):
             raise ValueError(
                 "The surface Poisson operator requires a mean-free coefficient space."
             )
-        return as_linear_map(1.0 / values)
-
-    def helmholtz_surface_divergence_matrix(self, r=1.0):
-        """Return the Helmholtz-to-surface-divergence matrix.
-
-        Helmholtz coefficients are ordered as curl-free then
-        divergence-free potentials. With the synthesis convention
-        ``-grad(phi) + rhat x grad(psi)``, surface divergence is
-        ``-laplacian(phi)``.
-        """
-        laplacian = self.surface_laplacian_matrix(r)
-        xp = get_array_module(laplacian)
-        return xp.stack([-laplacian, xp.zeros_like(laplacian)], axis=1)
+        return diagonal_linear_map(
+            1.0 / values,
+            input_shape=(self.index_length,),
+            output_shape=(self.index_length,),
+        )
 
     def helmholtz_surface_divergence_operator(self, r=1.0):
         """Return the Helmholtz-to-surface-divergence operator."""
         return -self.surface_laplacian_operator(r) @ _helmholtz_component_operator(
             self.index_length, 0
         )
-
-    def helmholtz_radial_curl_matrix(self, r=1.0):
-        """Return the Helmholtz-coefficient to radial-curl matrix.
-
-        Helmholtz coefficients are ordered as curl-free then
-        divergence-free potentials. With the synthesis convention
-        ``-grad(phi) + rhat x grad(psi)``, radial curl is
-        ``laplacian(psi)``.
-        """
-        laplacian = self.surface_laplacian_matrix(r)
-        xp = get_array_module(laplacian)
-        return xp.stack([xp.zeros_like(laplacian), laplacian], axis=1)
 
     def helmholtz_radial_curl_operator(self, r=1.0):
         """Return the Helmholtz-coefficient to radial-curl operator."""
@@ -488,35 +436,6 @@ class BasisSubset(SurfaceDifferentialBasis):
             basis = basis.parent_basis
         return basis
 
-    def _slice_coefficient_operator(self, values, operator_name):
-        """Slice a parent coefficient-space operator to this subset."""
-        indices = self._parent_coefficient_indices
-        if sp.issparse(values):
-            expected_shape = (self.parent_basis.index_length, self.parent_basis.index_length)
-            if values.shape != expected_shape:
-                raise ValueError(
-                    f"{operator_name} has shape {values.shape}, expected {expected_shape}."
-                )
-            return values.tocsr()[indices, :][:, indices]
-
-        xp = get_array_module(values)
-        array = xp.asarray(values)
-        if array.ndim == 1:
-            if array.size != self.parent_basis.index_length:
-                raise ValueError(
-                    f"{operator_name} has length {array.size}, expected "
-                    f"{self.parent_basis.index_length}."
-                )
-            return array[indices]
-        if array.ndim == 2:
-            expected_shape = (self.parent_basis.index_length, self.parent_basis.index_length)
-            if array.shape != expected_shape:
-                raise ValueError(
-                    f"{operator_name} has shape {array.shape}, expected {expected_shape}."
-                )
-            return array[indices][:, indices]
-        raise ValueError(f"{operator_name} must be a 1-D or square 2-D coefficient operator.")
-
     def _slice_evaluation(self, result):
         """Slice parent evaluation columns into this subset."""
         indices = self._parent_coefficient_indices
@@ -536,11 +455,18 @@ class BasisSubset(SurfaceDifferentialBasis):
             self.parent_basis._uncached_scalar_evaluation_matrix(grid, derivative=derivative)
         )
 
-    def _surface_laplacian(self, r=1.0):
-        """Return the subset's scalar surface Laplacian operator."""
-        return self._slice_coefficient_operator(
-            self.parent_basis._surface_laplacian(r), "laplacian"
-        )
+    def surface_laplacian_operator(self, r=1.0):
+        """Return the parent surface Laplacian restricted to this subset."""
+        parent_operator = self.parent_basis.surface_laplacian_operator(r)
+        indices = self._parent_coefficient_indices
+        if parent_operator.is_diagonal:
+            return diagonal_linear_map(
+                parent_operator.diagonal()[indices],
+                input_shape=(self.index_length,),
+                output_shape=(self.index_length,),
+            )
+        selection = take_linear_map((self.parent_basis.index_length,), indices)
+        return selection @ parent_operator @ selection.adjoint()
 
     def omits_constant_mode(self):
         """Return whether scalar coefficients omit the mean term."""

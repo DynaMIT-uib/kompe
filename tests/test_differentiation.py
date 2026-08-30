@@ -87,7 +87,7 @@ def test_csbasis_differentiates_low_degree_spherical_harmonics():
 
     D_theta = cs_basis.scalar_evaluation_matrix(grid, derivative="theta")
     D_phi = cs_basis.scalar_evaluation_matrix(grid, derivative="phi")
-    laplacian = cs_basis._surface_laplacian()
+    laplacian = cs_basis.surface_laplacian_operator()
 
     constant = np.ones(cs_basis.index_length)
     np.testing.assert_allclose(D_theta @ constant, 0.0, atol=1e-12)
@@ -146,7 +146,7 @@ def test_csbasis_differentiation_errors_converge_for_smooth_harmonics():
 
         D_theta = cs_basis.scalar_evaluation_matrix(grid, derivative="theta")
         D_phi = cs_basis.scalar_evaluation_matrix(grid, derivative="phi")
-        laplacian = cs_basis._surface_laplacian()
+        laplacian = cs_basis.surface_laplacian_operator()
 
         gradient_errors = []
         laplacian_errors = []
@@ -184,7 +184,7 @@ def test_csbasis_laplacian_integrates_to_zero_and_satisfies_green_identity():
         cs_basis = GlobalCSBasis(N)
         grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
         weights = cs_basis.mesh.cell_areas.reshape(-1)
-        laplacian = cs_basis._surface_laplacian()
+        laplacian = cs_basis.surface_laplacian_operator()
         gradient = cs_basis.surface_gradient_matrix(grid)
         cases = _analytic_surface_cases(cs_basis.mesh.theta, cs_basis.mesh.phi)
 

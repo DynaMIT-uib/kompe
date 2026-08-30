@@ -5,7 +5,7 @@ import pytest
 
 from kompe import GlobalCSProjection
 from kompe.math import backend_context, to_numpy
-from kompe.spherical import enu_to_ecef
+from kompe.spherical_coordinates import enu_to_ecef
 
 
 def _interior_face_points():

@@ -4,7 +4,7 @@ import numpy as np
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
 from kompe.math.backend import backend_context, get_array_module, to_numpy
-from kompe.spherical import ecef_to_enu, enu_to_ecef, rotate_spherical_by_matrix
+from kompe.spherical_coordinates import ecef_to_enu, enu_to_ecef, rotate_spherical_by_matrix
 
 _NORTH_FACE = 4
 

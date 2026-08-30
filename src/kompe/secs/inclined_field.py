@@ -5,7 +5,7 @@ import numpy as np
 from kompe.constants import EARTH_RADIUS_M, MU0
 from kompe.math.backend import get_array_module
 from kompe.secs.kernels import magnetic_field_matrices
-from kompe.spherical import enu_to_ecef
+from kompe.spherical_coordinates import enu_to_ecef
 
 
 def _semi_infinite_current_magnetic_field_matrices(

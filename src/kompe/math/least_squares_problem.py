@@ -227,13 +227,12 @@ class LeastSquaresProblem:
         normal = np.array(data_normal, copy=True)
         diagonal_indices = np.diag_indices(self.solution_size)
         for weight, regularization in regularization_terms:
-            try:
+            if regularization.is_diagonal:
                 diagonal = np.asarray(regularization.diagonal(backend="numpy"))
-            except ValueError:
-                matrix = np.asarray(regularization.to_matrix(backend="numpy"))
-                normal += weight**2 * (matrix.T.conj() @ matrix)
-            else:
                 normal[diagonal_indices] += weight**2 * np.abs(diagonal) ** 2
+                continue
+            matrix = np.asarray(regularization.to_matrix(backend="numpy"))
+            normal += weight**2 * (matrix.T.conj() @ matrix)
         return get_array_module().asarray(normal)
 
     def _custom_data_normal_matrix(self) -> np.ndarray:

@@ -71,7 +71,7 @@ consume `LinearMap` without requiring dense materialization.
 Custom matrix-free maps use the ordinary constructor keywords `matvec`,
 `rmatvec`, and optional `matmat`, `rmatmat`, `dense_array`, or `diagonal`
 functions; implementation storage remains private.
-Materializing `.array` or `to_matrix()` caches the dense matrix; later
+Materializing with `to_array()` or `to_matrix()` caches the dense matrix; later
 applications reuse it instead of repeating the structured construction.
 Known diagonal and identity maps remain vector-backed even when a full matrix
 has been requested for inspection.

@@ -132,6 +132,11 @@ class LinearMap:
         """Discard derived dense materializations of this map."""
         self._dense_cache.clear()
 
+    @property
+    def is_diagonal(self) -> bool:
+        """Whether this map has an exact diagonal representation."""
+        return self._diagonal_array_func is not None
+
     def matvec(self, x: Any) -> Any:
         """Apply this map to one flattened vector."""
         xp = self.array_module(x)
@@ -214,12 +219,39 @@ class LinearMap:
         xp = _array_module_for_matrix_backend(backend)
         return block_until_ready(self._dense_array(xp))
 
-    @property
-    def array(self) -> Any:
-        """Lazily materialized shaped operator array."""
-        xp = self.array_module()
+    def to_array(self, *, backend: MatrixBackend | None = None) -> Any:
+        """Materialize this map with its shaped domain and codomain."""
+        xp = _array_module_for_matrix_backend(backend)
+        if xp is None:
+            xp = self.array_module()
         dense = self._dense_array(xp)
         return block_until_ready(xp.reshape(dense, self.output_shape + self.input_shape))
+
+    def adjoint(self) -> LinearMap:
+        """Return the conjugate-transpose linear map."""
+        diagonal_func = None
+        if self.is_diagonal:
+
+            def diagonal_func(xp: Any) -> Any:
+                return xp.conjugate(self._diagonal_array(xp))
+
+        def dense_array(xp: Any) -> Any:
+            dense = self._dense_array(xp)
+            return xp.swapaxes(xp.conjugate(dense), -2, -1)
+
+        return LinearMap(
+            shape=(self.shape[1], self.shape[0]),
+            dtype=self.dtype,
+            matvec=self.rmatvec,
+            rmatvec=self.matvec,
+            matmat=self.rmatmat,
+            rmatmat=self.matmat,
+            dense_array=dense_array,
+            diagonal=diagonal_func,
+            backend_operands=self.backend_operands,
+            input_shape=self.output_shape,
+            output_shape=self.input_shape,
+        )
 
     def diagonal(self, *, backend: MatrixBackend | None = None) -> Any:
         """Return diagonal scale values for a diagonal map."""

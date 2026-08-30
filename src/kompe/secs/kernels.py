@@ -4,7 +4,7 @@ import numpy as np
 
 from kompe.constants import EARTH_RADIUS_M, MU0
 from kompe.math.backend import get_array_module
-from kompe.spherical import ecef_to_enu
+from kompe.spherical_coordinates import ecef_to_enu
 
 DEGREES_TO_RADIANS = np.pi / 180
 

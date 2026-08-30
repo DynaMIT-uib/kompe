@@ -7,7 +7,7 @@ import numpy as np
 from scipy.special import assoc_legendre_p_all
 
 from kompe.basis import BasisSubset, SurfaceDifferentialBasis, _owned_readonly_array
-from kompe.math import as_linear_map
+from kompe.math import as_linear_map, diagonal_linear_map
 from kompe.math.backend import get_array_module, jax_enabled, to_numpy
 from kompe.spherical_harmonics.coefficients import (
     SHCoefficientIndices,
@@ -597,6 +597,11 @@ class SHBasis(SurfaceDifferentialBasis):
                     dP[:, nm] -= Knm * dP[:, prev2_idx]
         return dP
 
-    def _surface_laplacian(self, r=1.0):
-        """Factor to apply the spherical harmonic Laplacian operator."""
-        return get_array_module().asarray(-self.n * (self.n + 1) / r**2)
+    def surface_laplacian_operator(self, r=1.0):
+        """Return the diagonal spherical-harmonic surface Laplacian."""
+        factors = get_array_module().asarray(-self.n * (self.n + 1) / r**2)
+        return diagonal_linear_map(
+            factors,
+            input_shape=(self.index_length,),
+            output_shape=(self.index_length,),
+        )
