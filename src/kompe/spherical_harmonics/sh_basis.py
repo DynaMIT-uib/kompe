@@ -9,10 +9,7 @@ from scipy.special import assoc_legendre_p_all
 from kompe.basis import BasisSubset, SurfaceDifferentialBasis, _owned_readonly_array
 from kompe.math import as_linear_map, diagonal_linear_map
 from kompe.math.backend import get_array_module, jax_enabled, to_numpy
-from kompe.spherical_harmonics.coefficients import (
-    SHCoefficientIndices,
-    schmidt_quasi_normalization_factors,
-)
+from kompe.spherical_harmonics.coefficients import schmidt_quasi_normalization_factors
 
 _EVALUATION_CACHE_VERSION = 1
 
@@ -133,7 +130,7 @@ class SHBasis(SurfaceDifferentialBasis):
 
         self.kind = "SH"
         self.index_names = ("n", "m")
-        self.index_length = self.cnm.n.size + self.snm.n.size
+        self.index_length = self.cosine_degree.size + self.sine_degree.size
         self.index_arrays = (self.n, self.m)
         self.validate_metadata()
 
@@ -167,28 +164,34 @@ class SHBasis(SurfaceDifferentialBasis):
             (n, m) for n in range(self.max_degree + 1) for m in range(min(self.max_order, n) + 1)
         )
         self._index_map = {pair: index for index, pair in enumerate(self.index_pairs)}
-        self.cnm = SHCoefficientIndices(
+        self.cosine_index_pairs = tuple(
             pair for pair in self.index_pairs if pair[0] >= self.min_degree
         )
-        self.snm = SHCoefficientIndices(
+        self.sine_index_pairs = tuple(
             pair for pair in self.index_pairs if pair[0] >= self.min_degree and pair[1] >= 1
         )
+        cosine_indices = np.asarray(self.cosine_index_pairs, dtype=int).reshape(-1, 2)
+        sine_indices = np.asarray(self.sine_index_pairs, dtype=int).reshape(-1, 2)
+        self.cosine_degree = _owned_readonly_array(cosine_indices[:, 0].reshape(1, -1))
+        self.cosine_order = _owned_readonly_array(cosine_indices[:, 1].reshape(1, -1))
+        self.sine_degree = _owned_readonly_array(sine_indices[:, 0].reshape(1, -1))
+        self.sine_order = _owned_readonly_array(sine_indices[:, 1].reshape(1, -1))
 
-        cnm_pairs = set(self.cnm.index_pairs)
-        snm_pairs = set(self.snm.index_pairs)
-        self.cnm_filter = _owned_readonly_array(
-            [pair in cnm_pairs for pair in self.index_pairs], dtype=bool
+        cosine_pairs = set(self.cosine_index_pairs)
+        sine_pairs = set(self.sine_index_pairs)
+        self.cosine_filter = _owned_readonly_array(
+            [pair in cosine_pairs for pair in self.index_pairs], dtype=bool
         )
-        self.snm_filter = _owned_readonly_array(
-            [pair in snm_pairs for pair in self.index_pairs], dtype=bool
+        self.sine_filter = _owned_readonly_array(
+            [pair in sine_pairs for pair in self.index_pairs], dtype=bool
         )
 
-        self.n = _owned_readonly_array(np.hstack((self.cnm.n.reshape(-1), self.snm.n.reshape(-1))))
-        self.m = _owned_readonly_array(np.hstack((self.cnm.m.reshape(-1), self.snm.m.reshape(-1))))
-        self.cnm.n = _owned_readonly_array(self.cnm.n)
-        self.cnm.m = _owned_readonly_array(self.cnm.m)
-        self.snm.n = _owned_readonly_array(self.snm.n)
-        self.snm.m = _owned_readonly_array(self.snm.m)
+        self.n = _owned_readonly_array(
+            np.hstack((self.cosine_degree.reshape(-1), self.sine_degree.reshape(-1)))
+        )
+        self.m = _owned_readonly_array(
+            np.hstack((self.cosine_order.reshape(-1), self.sine_order.reshape(-1)))
+        )
 
     def _init_normalization(self, schmidt_quasi_normalized):
         """Build immutable coefficient normalization factors."""
@@ -257,7 +260,10 @@ class SHBasis(SurfaceDifferentialBasis):
         if entry is None:
             return build(None)
         if key not in entry["arrays"]:
-            entry["arrays"][key] = build(entry["legendre"])
+            values = build(entry["legendre"])
+            if isinstance(values, np.ndarray):
+                values.setflags(write=False)
+            entry["arrays"][key] = values
         return entry["arrays"][key]
 
     def _cached_grid_operator(self, grid, key, build):
@@ -284,8 +290,8 @@ class SHBasis(SurfaceDifferentialBasis):
         """Return the L2 norm of each spherical-harmonic surface mode."""
         coefficient_factors = np.hstack(
             (
-                self._schmidt_quasi_factors[self.cnm_filter],
-                self._schmidt_quasi_factors[self.snm_filter],
+                self._schmidt_quasi_factors[self.cosine_filter],
+                self._schmidt_quasi_factors[self.sine_filter],
             )
         )
         angular_norm = 1.0 / (2.0 * self.n + 1.0)
@@ -527,24 +533,24 @@ class SHBasis(SurfaceDifferentialBasis):
         sin_theta = sin_theta_values.reshape(-1, 1)
         phi_col = phi.reshape(-1, 1)
         is_pole = np.abs(sin_theta) <= 1e-12
-        m_c, m_s = self.cnm.m, self.snm.m
-        num_Gc = -P[:, self.cnm_filter] * m_c * np.sin(m_c * phi_col)
+        m_c, m_s = self.cosine_order, self.sine_order
+        num_Gc = -P[:, self.cosine_filter] * m_c * np.sin(m_c * phi_col)
         Gc = np.divide(num_Gc, sin_theta, out=np.zeros_like(num_Gc), where=~is_pole)
-        num_Gs = P[:, self.snm_filter] * m_s * np.cos(m_s * phi_col)
+        num_Gs = P[:, self.sine_filter] * m_s * np.cos(m_s * phi_col)
         Gs = np.divide(num_Gs, sin_theta, out=np.zeros_like(num_Gs), where=~is_pole)
 
         pole_rows = np.flatnonzero(is_pole)
         if pole_rows.size:
-            cnm_is_m1 = (self.cnm.m == 1).reshape(-1)
-            snm_is_m1 = (self.snm.m == 1).reshape(-1)
-            cnm_m1_cols = np.flatnonzero(cnm_is_m1)
-            snm_m1_cols = np.flatnonzero(snm_is_m1)
-            if cnm_m1_cols.size:
-                dP_pole = dP[pole_rows][:, self.cnm_filter][:, cnm_is_m1]
-                Gc[np.ix_(pole_rows, cnm_m1_cols)] = -dP_pole * np.sin(phi_col[pole_rows])
-            if snm_m1_cols.size:
-                dP_pole = dP[pole_rows][:, self.snm_filter][:, snm_is_m1]
-                Gs[np.ix_(pole_rows, snm_m1_cols)] = dP_pole * np.cos(phi_col[pole_rows])
+            cosine_is_m1 = (self.cosine_order == 1).reshape(-1)
+            sine_is_m1 = (self.sine_order == 1).reshape(-1)
+            cosine_m1_columns = np.flatnonzero(cosine_is_m1)
+            sine_m1_columns = np.flatnonzero(sine_is_m1)
+            if cosine_m1_columns.size:
+                dP_pole = dP[pole_rows][:, self.cosine_filter][:, cosine_is_m1]
+                Gc[np.ix_(pole_rows, cosine_m1_columns)] = -dP_pole * np.sin(phi_col[pole_rows])
+            if sine_m1_columns.size:
+                dP_pole = dP[pole_rows][:, self.sine_filter][:, sine_is_m1]
+                Gs[np.ix_(pole_rows, sine_m1_columns)] = dP_pole * np.cos(phi_col[pole_rows])
         return Gc, Gs
 
     def _evaluate_on_grid(self, grid, derivative=None, legendre_cache=None):
@@ -561,11 +567,11 @@ class SHBasis(SurfaceDifferentialBasis):
         )
 
         if derivative is None:
-            Gc = P[:, self.cnm_filter] * np.cos(phi.reshape((-1, 1)) * self.cnm.m)
-            Gs = P[:, self.snm_filter] * np.sin(phi.reshape((-1, 1)) * self.snm.m)
+            Gc = P[:, self.cosine_filter] * np.cos(phi.reshape((-1, 1)) * self.cosine_order)
+            Gs = P[:, self.sine_filter] * np.sin(phi.reshape((-1, 1)) * self.sine_order)
         elif derivative == "theta":
-            Gc = dP[:, self.cnm_filter] * np.cos(phi.reshape((-1, 1)) * self.cnm.m)
-            Gs = dP[:, self.snm_filter] * np.sin(phi.reshape((-1, 1)) * self.snm.m)
+            Gc = dP[:, self.cosine_filter] * np.cos(phi.reshape((-1, 1)) * self.cosine_order)
+            Gs = dP[:, self.sine_filter] * np.sin(phi.reshape((-1, 1)) * self.sine_order)
         elif derivative == "phi":
             Gc, Gs = self._phi_derivative_values(P, dP, phi, sin_theta_values)
         else:

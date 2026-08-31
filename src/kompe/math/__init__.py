@@ -39,10 +39,10 @@ from kompe.math.pseudoinverse import tensor_pinv, weighted_tensor_pinv
 __all__ = [
     "JAX_AVAILABLE",
     "LEAST_SQUARES_SOLVER_ENV",
+    "ArrayBackend",
     "LeastSquaresProblem",
     "LeastSquaresSolver",
     "LinearMap",
-    "ArrayBackend",
     "array_fingerprint",
     "as_linear_map",
     "backend_context",

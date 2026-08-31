@@ -1,22 +1,8 @@
-"""Spherical-harmonic index and normalization helpers."""
+"""Spherical-harmonic normalization helpers."""
 
 import math
 
 import numpy as np
-
-
-class SHCoefficientIndices:
-    """The paired arrays used by cosine or sine SH coefficients."""
-
-    def __init__(self, index_pairs):
-        self.index_pairs = tuple(index_pairs)
-        if self.index_pairs:
-            arr = np.array(self.index_pairs, dtype=int)
-            self.n = arr[:, 0].reshape(1, -1)
-            self.m = arr[:, 1].reshape(1, -1)
-        else:
-            self.n = np.empty((1, 0), dtype=int)
-            self.m = np.empty((1, 0), dtype=int)
 
 
 def schmidt_quasi_normalization_factors(max_degree: int, max_order: int):

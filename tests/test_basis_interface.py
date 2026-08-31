@@ -112,8 +112,8 @@ def test_basis_metadata_arrays_are_immutable_values():
         sh_basis.n,
         sh_basis.m,
         sh_basis.schmidt_factors,
-        sh_basis.cnm.n,
-        sh_basis.snm.m,
+        sh_basis.cosine_degree,
+        sh_basis.sine_order,
         cs_basis.mesh.theta,
         cs_basis.mesh.phi,
         cs_basis.mesh.cell_areas.reshape(-1),
@@ -682,6 +682,9 @@ def test_shbasis_cache_controls_do_not_change_numerical_results():
     grid = SphericalGrid(lat=[-60.0, 20.0, 70.0], lon=[0.0, 90.0, -120.0])
     expected = basis.surface_gradient_array(grid)
     _ = basis.surface_gradient_operator(grid)
+
+    if isinstance(expected, np.ndarray):
+        assert not expected.flags.writeable
 
     populated = basis.cache_info()
     assert populated["grids"] == 1
