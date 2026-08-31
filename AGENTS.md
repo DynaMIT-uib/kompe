@@ -43,7 +43,9 @@ interactively.
 - Name transformations by their mathematical direction. Use projection or analysis for sampled
   values to coefficients, and evaluation or synthesis for coefficients to field values. Make
   coordinate systems, component order, domains, and codomains explicit at transformation
-  boundaries.
+  boundaries. Name explicit values that retain scientific or component axes `array`, even
+  when a scalar instance happens to be two-dimensional; reserve `matrix` for contracts that
+  are always a flat two-dimensional linear-algebra representation.
 - Use Kompe's configured array-backend interface for operations supported by NumPy and JAX.
   Do not add isolated NumPy/JAX branches or silently transfer device arrays to NumPy. Keep
   SciPy algorithms, serialization, and plotting at explicit CPU boundaries, and make necessary

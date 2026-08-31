@@ -7,13 +7,13 @@ from kompe.cubed_sphere.geometry_linalg import inverse_3x3
 from kompe.math.backend import get_array_module
 
 
-def _cartesian_to_cube_matrix(xi, eta, radius=1, face=0):
-    """Return Cartesian-to-CS contravariant transform matrices."""
-    return inverse_3x3(_cube_to_cartesian_matrix(xi, eta, radius=radius, face=face))
+def _cartesian_to_cube_array(xi, eta, radius=1, face=0):
+    """Return Cartesian-to-CS contravariant transforms at each point."""
+    return inverse_3x3(_cube_to_cartesian_array(xi, eta, radius=radius, face=face))
 
 
-def _cube_to_cartesian_matrix(xi, eta, radius=1, face=0):
-    """Return CS-to-Cartesian contravariant transform matrices.
+def _cube_to_cartesian_array(xi, eta, radius=1, face=0):
+    """Return CS-to-Cartesian contravariant transforms at each point.
 
     The columns are the coordinate basis vectors
     ``(d x/dxi, d x/deta, d x/dr)`` in ECEF components.
@@ -51,7 +51,7 @@ def _cube_to_cartesian_matrix(xi, eta, radius=1, face=0):
     return xp.einsum("nij,njk->nik", face_rotation, local_jacobian)
 
 
-def _enu_to_cartesian_matrix(up):
+def _enu_to_cartesian_array(up):
     """Return local east, north, and up basis vectors in ECEF components."""
     xp = get_array_module(up)
     up = xp.asarray(up)
@@ -77,18 +77,18 @@ def _enu_to_cartesian_matrix(up):
     return xp.stack((east, north, up), axis=2)
 
 
-def _face_to_face_matrix(xi, eta, source_face, target_face):
+def _face_to_face_array(xi, eta, source_face, target_face):
     """Return component transforms between cubed-sphere faces."""
     xp = get_array_module(xi, eta, source_face, target_face)
     source_xi, source_eta, source_face, target_face = (
         value.reshape(-1) for value in xp.broadcast_arrays(xi, eta, source_face, target_face)
     )
 
-    source_to_cartesian = _cube_to_cartesian_matrix(source_xi, source_eta, face=source_face)
+    source_to_cartesian = _cube_to_cartesian_array(source_xi, source_eta, face=source_face)
     _, theta, phi = cs_coordinates.cube_to_spherical(
         source_xi, source_eta, source_face, degrees=True
     )
     target_xi, target_eta, _ = cs_coordinates.geographic_to_cube(phi, 90 - theta, face=target_face)
-    cartesian_to_target = _cartesian_to_cube_matrix(target_xi, target_eta, face=target_face)
+    cartesian_to_target = _cartesian_to_cube_array(target_xi, target_eta, face=target_face)
 
     return xp.einsum("nij,njk->nik", cartesian_to_target, source_to_cartesian)

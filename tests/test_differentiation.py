@@ -85,8 +85,8 @@ def test_csbasis_differentiates_low_degree_spherical_harmonics():
     grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
     weights = cs_basis.mesh.cell_areas.reshape(-1)
 
-    D_theta = cs_basis.scalar_evaluation_matrix(grid, derivative="theta")
-    D_phi = cs_basis.scalar_evaluation_matrix(grid, derivative="phi")
+    D_theta = cs_basis.scalar_evaluation_array(grid, derivative="theta")
+    D_phi = cs_basis.scalar_evaluation_array(grid, derivative="phi")
     laplacian = cs_basis.surface_laplacian_operator()
 
     constant = np.ones(cs_basis.index_length)
@@ -118,9 +118,9 @@ def test_csbasis_vector_surface_operators_match_analytic_composition():
     f, f_theta, f_phi, _ = cases["l2_cos2phi"]
     g, g_theta, g_phi, _ = cases["l2_sinphi"]
 
-    gradient = np.tensordot(cs_basis.surface_gradient_matrix(grid), f, axes=1)
-    rotated_gradient = np.tensordot(cs_basis.rhat_cross_gradient_matrix(grid), f, axes=1)
-    helmholtz = np.tensordot(cs_basis.helmholtz_synthesis_matrix(grid), np.stack([f, g]), axes=2)
+    gradient = np.tensordot(cs_basis.surface_gradient_array(grid), f, axes=1)
+    rotated_gradient = np.tensordot(cs_basis.rhat_cross_gradient_array(grid), f, axes=1)
+    helmholtz = np.tensordot(cs_basis.helmholtz_synthesis_array(grid), np.stack([f, g]), axes=2)
 
     expected_gradient = np.stack([f_theta, f_phi])
     expected_rotated_gradient = np.stack([-f_phi, f_theta])
@@ -144,8 +144,8 @@ def test_csbasis_differentiation_errors_converge_for_smooth_harmonics():
         grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
         weights = cs_basis.mesh.cell_areas.reshape(-1)
 
-        D_theta = cs_basis.scalar_evaluation_matrix(grid, derivative="theta")
-        D_phi = cs_basis.scalar_evaluation_matrix(grid, derivative="phi")
+        D_theta = cs_basis.scalar_evaluation_array(grid, derivative="theta")
+        D_phi = cs_basis.scalar_evaluation_array(grid, derivative="phi")
         laplacian = cs_basis.surface_laplacian_operator()
 
         gradient_errors = []
@@ -185,7 +185,7 @@ def test_csbasis_laplacian_integrates_to_zero_and_satisfies_green_identity():
         grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
         weights = cs_basis.mesh.cell_areas.reshape(-1)
         laplacian = cs_basis.surface_laplacian_operator()
-        gradient = cs_basis.surface_gradient_matrix(grid)
+        gradient = cs_basis.surface_gradient_array(grid)
         cases = _analytic_surface_cases(cs_basis.mesh.theta, cs_basis.mesh.phi)
 
         laplacian_integrals = []

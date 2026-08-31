@@ -56,7 +56,7 @@ def test_secs_is_scalar_synthesis_without_closed_surface_claims(secs_basis):
     assert secs_basis.index_length == 3
     assert secs_basis.index_names == ("latitude", "longitude")
     with pytest.raises(NotImplementedError, match="surface-current synthesis"):
-        secs_basis.scalar_evaluation_matrix(secs_basis.poles, derivative="theta")
+        secs_basis.scalar_evaluation_array(secs_basis.poles, derivative="theta")
 
 
 def test_secs_accepts_regional_grid_for_poles_and_evaluation():
@@ -68,10 +68,10 @@ def test_secs_accepts_regional_grid_for_poles_and_evaluation():
         radius=6371.2,
     )
     basis = SECSBasis(poles=regional.cell_centers, current_type="curl_free")
-    matrix = basis.scalar_evaluation_matrix(regional)
+    array = basis.scalar_evaluation_array(regional)
 
     assert basis.index_length == regional.size
-    assert matrix.shape == (regional.size, regional.size)
+    assert array.shape == (regional.size, regional.size)
 
 
 def test_secs_scalar_synthesis_has_explicit_physical_mode(evaluation_grid):
@@ -97,10 +97,10 @@ def test_secs_scalar_synthesis_has_explicit_physical_mode(evaluation_grid):
     )
 
     np.testing.assert_allclose(
-        curl_free.scalar_evaluation_matrix(evaluation_grid), expected_potential
+        curl_free.scalar_evaluation_array(evaluation_grid), expected_potential
     )
     np.testing.assert_allclose(
-        divergence_free.scalar_evaluation_matrix(evaluation_grid), expected_current_magnitude
+        divergence_free.scalar_evaluation_array(evaluation_grid), expected_current_magnitude
     )
     assert curl_free.signature != divergence_free.signature
 
@@ -119,7 +119,7 @@ def test_surface_current_kernel_matches_canonical_components(
         normalization=basis.normalization,
         source_radius=basis.radius,
     )
-    canonical = basis.surface_current_matrix(evaluation_grid)
+    canonical = basis.surface_current_array(evaluation_grid)
 
     np.testing.assert_allclose(canonical[0], -north)
     np.testing.assert_allclose(canonical[1], east)
@@ -131,15 +131,15 @@ def test_surface_current_kernel_matches_canonical_components(
     )
 
 
-def test_two_component_secs_helmholtz_operator_matches_tensor(secs_basis, evaluation_grid):
-    matrix = secs_basis.helmholtz_current_synthesis_matrix(evaluation_grid)
+def test_two_component_secs_helmholtz_operator_matches_array(secs_basis, evaluation_grid):
+    array = secs_basis.helmholtz_current_synthesis_array(evaluation_grid)
     operator = secs_basis.helmholtz_current_synthesis_operator(evaluation_grid)
     coefficients = np.array([[0.2, -0.5, 0.8], [1.0, 0.3, -0.4]])
 
-    assert matrix.shape == (2, evaluation_grid.size, 2, secs_basis.index_length)
+    assert array.shape == (2, evaluation_grid.size, 2, secs_basis.index_length)
     np.testing.assert_allclose(
         operator @ coefficients.reshape(-1),
-        np.tensordot(matrix, coefficients, axes=2).reshape(-1),
+        np.tensordot(array, coefficients, axes=2).reshape(-1),
     )
 
 
@@ -175,13 +175,13 @@ def test_magnetic_field_uses_canonical_radial_theta_phi_order(
         normalization=basis.normalization,
         source_radius=basis.radius,
     )
-    canonical = basis.magnetic_field_matrix(evaluation_grid, evaluation_radius)
+    canonical = basis.magnetic_field_array(evaluation_grid, evaluation_radius)
     np.testing.assert_allclose(canonical, np.stack([radial, -north, east]))
 
 
 def test_secs_kernel_does_not_mutate_numpy_error_policy(secs_basis, evaluation_grid):
     before = np.geterr().copy()
-    secs_basis.magnetic_field_matrix(evaluation_grid, 6371.2e3)
+    secs_basis.magnetic_field_array(evaluation_grid, 6371.2e3)
     assert np.geterr() == before
 
 

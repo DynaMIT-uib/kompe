@@ -52,11 +52,15 @@ Source-grid `sqrt_weights` cannot be carried through a grid remap; configure
 target-grid weights on the transform instead. `with_basis` returns a transform
 for another coefficient basis while reusing the same grid and numerical policy.
 
-Matrix names state what they do and end in `_matrix`; structured equivalents
-end in `_operator`. For example, `scalar_synthesis_matrix` and
-`helmholtz_synthesis_operator` have the same semantic direction. Geometric
-component transformations spell out both directions instead of changing
-meaning through an `inverse` flag.
+Explicit representations that retain scientific axes end in `_array`, even
+when a scalar case happens to be 2-D. Flat linear-algebra representations that
+are always exactly 2-D end in `_matrix`; structured equivalents end in
+`_operator`. For example, `scalar_synthesis_array`,
+`helmholtz_synthesis_array`, and `helmholtz_synthesis_operator` state both their
+representation and semantic direction. Vectorized geometric component
+transforms likewise end in `_array` because sample axes change their rank.
+They spell out both directions instead of changing meaning through an
+`inverse` flag.
 
 The word *projection* in Kompe's type vocabulary refers to coordinate charts.
 Mean-free coefficient projections retain that mathematical name because they
@@ -71,8 +75,9 @@ consume `LinearMap` without requiring dense materialization.
 Custom matrix-free maps use the ordinary constructor keywords `matvec`,
 `rmatvec`, and optional `matmat`, `rmatmat`, `dense_array`, or `diagonal`
 functions; implementation storage remains private.
-Materializing with `to_array()` or `to_matrix()` caches the dense matrix; later
-applications reuse it instead of repeating the structured construction.
+`to_matrix()` returns the flat 2-D representation; `to_array()` returns the
+same values with shaped domain and codomain axes. Both cache the dense
+representation instead of repeating its construction.
 Known diagonal and identity maps remain vector-backed even when a full matrix
 has been requested for inspection.
 
@@ -82,7 +87,7 @@ arrays. Kompe never changes JAX's global 64-bit setting.
 
 ## Cache lifecycle
 
-`GlobalCSBasis` and `SphericalTransform` expose `cache_info()` and
+`SHBasis`, `GlobalCSBasis`, and `SphericalTransform` expose `cache_info()` and
 `clear_cache()`. Caches use exact representation/grid signatures; shared CS
 remap matrices and per-basis target-grid caches are bounded. Long-running
 applications can clear them at known lifecycle boundaries without changing

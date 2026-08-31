@@ -20,11 +20,11 @@ from kompe.math.backend import (
 
 MatrixShape: TypeAlias = tuple[int, int]
 VectorizedMapFunc: TypeAlias = Callable[[Any], Any]
-MatrixBackend: TypeAlias = Literal["numpy", "jax"]
+ArrayBackend: TypeAlias = Literal["numpy", "jax"]
 
 
-def _array_module_for_matrix_backend(backend: MatrixBackend | None = None) -> Any:
-    """Return the array module for explicit matrix materialization."""
+def _array_module_for_backend(backend: ArrayBackend | None = None) -> Any:
+    """Return the requested array module for explicit values."""
     if backend is None:
         return None
     if not isinstance(backend, str):
@@ -39,7 +39,7 @@ def _array_module_for_matrix_backend(backend: MatrixBackend | None = None) -> An
         import jax.numpy as jnp
 
         return jnp
-    raise ValueError(f"Unknown matrix backend {backend!r}. Use None, 'numpy', or 'jax'.")
+    raise ValueError(f"Unknown array backend {backend!r}. Use None, 'numpy', or 'jax'.")
 
 
 @dataclass(frozen=True, init=False)
@@ -214,14 +214,14 @@ class LinearMap:
         self._store_dense(xp, dense)
         return dense
 
-    def to_matrix(self, *, backend: MatrixBackend | None = None) -> Any:
+    def to_matrix(self, *, backend: ArrayBackend | None = None) -> Any:
         """Materialize this map as an explicit flat 2-D matrix."""
-        xp = _array_module_for_matrix_backend(backend)
+        xp = _array_module_for_backend(backend)
         return block_until_ready(self._dense_array(xp))
 
-    def to_array(self, *, backend: MatrixBackend | None = None) -> Any:
+    def to_array(self, *, backend: ArrayBackend | None = None) -> Any:
         """Materialize this map with its shaped domain and codomain."""
-        xp = _array_module_for_matrix_backend(backend)
+        xp = _array_module_for_backend(backend)
         if xp is None:
             xp = self.array_module()
         dense = self._dense_array(xp)
@@ -253,9 +253,9 @@ class LinearMap:
             output_shape=self.input_shape,
         )
 
-    def diagonal(self, *, backend: MatrixBackend | None = None) -> Any:
+    def diagonal(self, *, backend: ArrayBackend | None = None) -> Any:
         """Return diagonal scale values for a diagonal map."""
-        xp = _array_module_for_matrix_backend(backend)
+        xp = _array_module_for_backend(backend)
         return block_until_ready(self._diagonal_array(xp))
 
     def _diagonal_array(self, xp: Any = None) -> Any:

@@ -244,7 +244,7 @@ class RegionalCSOperators:
         # Rows 0 and 1 are the dual basis vectors grad(xi) and grad(eta)
         # in local Cartesian coordinates.
         with backend_context("numpy"):
-            dual_basis_local = cs_vectors._cartesian_to_cube_matrix(
+            dual_basis_local = cs_vectors._cartesian_to_cube_array(
                 xi,
                 eta,
                 radius=grid.radius,

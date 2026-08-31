@@ -213,17 +213,17 @@ class SphericalTransform:
 
     _analysis_transform_cache_size = 16
     _cached_attribute_names = (
-        "scalar_synthesis_matrix",
+        "scalar_synthesis_array",
         "scalar_synthesis_operator",
-        "theta_derivative_matrix",
+        "theta_derivative_array",
         "theta_derivative_operator",
-        "phi_derivative_matrix",
+        "phi_derivative_array",
         "phi_derivative_operator",
-        "surface_gradient_matrix",
+        "surface_gradient_array",
         "surface_gradient_operator",
-        "rhat_cross_gradient_matrix",
+        "rhat_cross_gradient_array",
         "rhat_cross_gradient_operator",
-        "helmholtz_synthesis_matrix",
+        "helmholtz_synthesis_array",
         "helmholtz_synthesis_operator",
         "_optimized_helmholtz_analysis_operator",
         "helmholtz_analysis_operator",
@@ -268,7 +268,7 @@ class SphericalTransform:
             ``sin(theta)`` weights. Explicit ``sqrt_weights`` take precedence.
             This affects analysis only, never synthesis.
         use_persistent_evaluation_cache : bool, optional
-            Reuse deterministic basis-evaluation matrices through the basis
+            Reuse deterministic basis-evaluation arrays through the basis
             cache when available.
         """
         if not isinstance(basis, SurfaceDifferentialBasis):
@@ -321,7 +321,7 @@ class SphericalTransform:
         return self._basis_transforms[cache_key]
 
     def clear_cache(self):
-        """Discard matrices, operators, factorizations, and analysis transforms."""
+        """Discard arrays, operators, factorizations, and analysis transforms."""
         for name in self._cached_attribute_names:
             self.__dict__.pop(name, None)
         self._analysis_transforms.clear()
@@ -342,8 +342,8 @@ class SphericalTransform:
     def _evaluate_basis_on_grid(self, derivative=None):
         """Evaluate the basis on the transform grid."""
         if not self.use_persistent_evaluation_cache:
-            return self.basis._uncached_scalar_evaluation_matrix(self.grid, derivative=derivative)
-        return self.basis.scalar_evaluation_matrix(self.grid, derivative=derivative)
+            return self.basis._uncached_scalar_evaluation_array(self.grid, derivative=derivative)
+        return self.basis.scalar_evaluation_array(self.grid, derivative=derivative)
 
     def _operator_cache(self):
         """Return the basis's persistent operator cache."""
@@ -359,12 +359,12 @@ class SphericalTransform:
             return None
         if field_type == "scalar":
             return lambda: _scalar_data_normal_matrix(
-                self.scalar_synthesis_matrix, self.sqrt_weights
+                self.scalar_synthesis_array, self.sqrt_weights
             )
         if field_type == "helmholtz":
             return lambda: _helmholtz_data_normal_matrix(
-                self.theta_derivative_matrix,
-                self.phi_derivative_matrix,
+                self.theta_derivative_array,
+                self.phi_derivative_array,
                 self.helmholtz_sqrt_weights,
             )
         raise ValueError(f"Unknown transform field type {field_type!r}.")
@@ -391,8 +391,8 @@ class SphericalTransform:
         }
 
     @cached_property
-    def scalar_synthesis_matrix(self):
-        """Matrix mapping scalar coefficients to grid values."""
+    def scalar_synthesis_array(self):
+        """Array mapping scalar coefficients to grid values."""
         return self._evaluate_basis_on_grid()
 
     @cached_property
@@ -401,15 +401,15 @@ class SphericalTransform:
         if self.use_persistent_evaluation_cache:
             return self.basis.scalar_evaluation_operator(self.grid)
         return as_linear_map(
-            self.scalar_synthesis_matrix,
+            self.scalar_synthesis_array,
             input_shape=(self.basis.index_length,),
             output_shape=(self.grid.size,),
         )
 
     @cached_property
-    def theta_derivative_matrix(self):
-        """Matrix evaluating the theta derivative."""
-        gradient = self.__dict__.get("surface_gradient_matrix")
+    def theta_derivative_array(self):
+        """Array evaluating the theta derivative."""
+        gradient = self.__dict__.get("surface_gradient_array")
         return gradient[0] if gradient is not None else self._evaluate_basis_on_grid("theta")
 
     @cached_property
@@ -418,15 +418,15 @@ class SphericalTransform:
         if self.use_persistent_evaluation_cache:
             return self.basis.scalar_evaluation_operator(self.grid, derivative="theta")
         return as_linear_map(
-            self.theta_derivative_matrix,
+            self.theta_derivative_array,
             input_shape=(self.basis.index_length,),
             output_shape=(self.grid.size,),
         )
 
     @cached_property
-    def phi_derivative_matrix(self):
-        """Matrix evaluating the phi derivative."""
-        gradient = self.__dict__.get("surface_gradient_matrix")
+    def phi_derivative_array(self):
+        """Array evaluating the phi derivative."""
+        gradient = self.__dict__.get("surface_gradient_array")
         return gradient[1] if gradient is not None else self._evaluate_basis_on_grid("phi")
 
     @cached_property
@@ -435,15 +435,15 @@ class SphericalTransform:
         if self.use_persistent_evaluation_cache:
             return self.basis.scalar_evaluation_operator(self.grid, derivative="phi")
         return as_linear_map(
-            self.phi_derivative_matrix,
+            self.phi_derivative_array,
             input_shape=(self.basis.index_length,),
             output_shape=(self.grid.size,),
         )
 
     @cached_property
-    def surface_gradient_matrix(self):
-        """Matrix evaluating the horizontal gradient."""
-        return self.basis.surface_gradient_matrix(self.grid)
+    def surface_gradient_array(self):
+        """Array evaluating the horizontal gradient."""
+        return self.basis.surface_gradient_array(self.grid)
 
     @cached_property
     def surface_gradient_operator(self):
@@ -451,9 +451,9 @@ class SphericalTransform:
         return self.basis.surface_gradient_operator(self.grid)
 
     @cached_property
-    def rhat_cross_gradient_matrix(self):
-        """Matrix evaluating r-hat x horizontal gradient."""
-        return self.basis.rhat_cross_gradient_matrix(self.grid)
+    def rhat_cross_gradient_array(self):
+        """Array evaluating r-hat x horizontal gradient."""
+        return self.basis.rhat_cross_gradient_array(self.grid)
 
     @cached_property
     def rhat_cross_gradient_operator(self):
@@ -461,14 +461,14 @@ class SphericalTransform:
         return self.basis.rhat_cross_gradient_operator(self.grid)
 
     @cached_property
-    def helmholtz_synthesis_matrix(self):
-        """Matrix evaluating horizontal vector field expansions."""
-        gradient = self.__dict__.get("surface_gradient_matrix")
-        rotated_gradient = self.__dict__.get("rhat_cross_gradient_matrix")
+    def helmholtz_synthesis_array(self):
+        """Array evaluating horizontal vector field expansions."""
+        gradient = self.__dict__.get("surface_gradient_array")
+        rotated_gradient = self.__dict__.get("rhat_cross_gradient_array")
         if gradient is None and rotated_gradient is None:
-            return self.basis.helmholtz_synthesis_matrix(self.grid)
-        gradient = self.surface_gradient_matrix
-        rotated_gradient = self.rhat_cross_gradient_matrix
+            return self.basis.helmholtz_synthesis_array(self.grid)
+        gradient = self.surface_gradient_array
+        rotated_gradient = self.rhat_cross_gradient_array
         xp = get_array_module(gradient, rotated_gradient)
         return xp.stack([-xp.asarray(gradient), xp.asarray(rotated_gradient)], axis=2)
 
@@ -489,7 +489,7 @@ class SphericalTransform:
         if optimized is not None:
             return optimized
         analysis = weighted_tensor_pinv(
-            self.helmholtz_synthesis_matrix,
+            self.helmholtz_synthesis_array,
             sqrt_weights=self.helmholtz_sqrt_weights,
             n_leading_flattened=2,
             rtol=self.tolerance,
@@ -518,8 +518,8 @@ class SphericalTransform:
         if not self.basis.omits_constant_mode():
             return None
 
-        theta_matrix = self.theta_derivative_matrix
-        phi_matrix = self.phi_derivative_matrix
+        theta_array = self.theta_derivative_array
+        phi_array = self.phi_derivative_array
         try:
             cache = self._operator_cache()
             identity = self._least_squares_cache_identity("helmholtz")
@@ -528,12 +528,12 @@ class SphericalTransform:
                     "least_squares_factor",
                     {**identity, "factorization": "structured_helmholtz_cholesky"},
                     lambda: _helmholtz_normal_factor(
-                        theta_matrix, phi_matrix, self.helmholtz_sqrt_weights
+                        theta_array, phi_array, self.helmholtz_sqrt_weights
                     ),
                 )
             else:
                 factor = _helmholtz_normal_factor(
-                    theta_matrix, phi_matrix, self.helmholtz_sqrt_weights
+                    theta_array, phi_array, self.helmholtz_sqrt_weights
                 )
             return cholesky_least_squares_map(
                 self.helmholtz_synthesis_operator,
@@ -551,8 +551,8 @@ class SphericalTransform:
             coefficient_scale = np.ones(self.basis.index_length)
         scale = np.asarray(coefficient_scale)
         factor = _rhat_cross_gradient_normal_factor(
-            self.theta_derivative_matrix,
-            self.phi_derivative_matrix,
+            self.theta_derivative_array,
+            self.phi_derivative_array,
             self.helmholtz_sqrt_weights,
             scale,
         )

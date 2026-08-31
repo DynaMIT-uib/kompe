@@ -24,8 +24,8 @@ from kompe.math.least_squares_solver import (
     sparse_constrained_least_squares_map,
 )
 from kompe.math.linear_map import (
+    ArrayBackend,
     LinearMap,
-    MatrixBackend,
     as_linear_map,
     diagonal_linear_map,
     identity_linear_map,
@@ -42,7 +42,7 @@ __all__ = [
     "LeastSquaresProblem",
     "LeastSquaresSolver",
     "LinearMap",
-    "MatrixBackend",
+    "ArrayBackend",
     "array_fingerprint",
     "as_linear_map",
     "backend_context",

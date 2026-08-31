@@ -47,7 +47,7 @@ def main():
         lon=np.linspace(-180.0, 180.0, 1000),
     )
     sh_basis = SHBasis(args.sh_degree, args.sh_degree)
-    measure("SH scalar evaluation", lambda: sh_basis.scalar_evaluation_matrix(target), args.repeat)
+    measure("SH scalar evaluation", lambda: sh_basis.scalar_evaluation_array(target), args.repeat)
 
     regional = RegionalCSMesh(
         RegionalCSProjection((20.0, 70.0), 0.0),
@@ -65,8 +65,8 @@ def main():
     poles = SphericalGrid(lat=regional.lat.reshape(-1)[::12], lon=regional.lon.reshape(-1)[::12])
     secs = SECSBasis(poles=poles, current_type="divergence_free")
     measure(
-        "SECS current matrix",
-        lambda: secs.surface_current_matrix(target, singularity_limit=1.0),
+        "SECS current array",
+        lambda: secs.surface_current_array(target, singularity_limit=1.0),
         args.repeat,
     )
     chunked_secs = secs.surface_current_operator(target, singularity_limit=1.0, chunk_size=100)

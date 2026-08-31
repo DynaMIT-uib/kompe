@@ -38,7 +38,7 @@ def test_global_basis_exposes_validated_native_mesh():
     np.testing.assert_array_equal(independently_constructed.phi, mesh.phi)
     np.testing.assert_array_equal(independently_constructed.cell_areas, mesh.cell_areas)
     np.testing.assert_array_equal(
-        basis.scalar_evaluation_matrix(mesh.cell_centers), np.eye(mesh.size)
+        basis.scalar_evaluation_array(mesh.cell_centers), np.eye(mesh.size)
     )
 
 

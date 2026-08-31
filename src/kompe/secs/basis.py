@@ -115,7 +115,7 @@ class SECSBasis(ScalarBasis):
             raise ValueError("chunk_size must be positive")
         return int(chunk_size)
 
-    def scalar_evaluation_matrix(self, grid, derivative=None):
+    def scalar_evaluation_array(self, grid, derivative=None):
         """Evaluate scalar Green functions for the selected current-system mode.
 
         Derivatives are intentionally exposed through the explicitly framed
@@ -137,7 +137,7 @@ class SECSBasis(ScalarBasis):
             normalization=self.normalization,
         )
 
-    def surface_current_matrix(self, grid, *, singularity_limit=0.0):
+    def surface_current_array(self, grid, *, singularity_limit=0.0):
         """Return this basis's current synthesis in ``(theta, phi)`` order."""
         self._validate_grid(grid)
         east, north = surface_current_matrices(
@@ -168,9 +168,9 @@ class SECSBasis(ScalarBasis):
         """
         self._validate_grid(grid)
         if chunk_size is None:
-            matrix = self.surface_current_matrix(grid, singularity_limit=singularity_limit)
+            array = self.surface_current_array(grid, singularity_limit=singularity_limit)
             return as_linear_map(
-                matrix, input_shape=(self.index_length,), output_shape=(2, grid.size)
+                array, input_shape=(self.index_length,), output_shape=(2, grid.size)
             )
 
         chunk_size = self._validate_chunk_size(chunk_size)
@@ -254,7 +254,7 @@ class SECSBasis(ScalarBasis):
             output_shape=(2, grid.size),
         )
 
-    def helmholtz_current_synthesis_matrix(self, grid, *, singularity_limit=0.0):
+    def helmholtz_current_synthesis_array(self, grid, *, singularity_limit=0.0):
         """Return both current modes using this basis's pole geometry."""
         self._validate_grid(grid)
         curl_free_east, curl_free_north = surface_current_matrices(
@@ -284,12 +284,12 @@ class SECSBasis(ScalarBasis):
 
     def helmholtz_current_synthesis_operator(self, grid, *, singularity_limit=0.0):
         """Return two-potential SECS current synthesis operator."""
-        matrix = self.helmholtz_current_synthesis_matrix(grid, singularity_limit=singularity_limit)
+        array = self.helmholtz_current_synthesis_array(grid, singularity_limit=singularity_limit)
         return as_linear_map(
-            matrix, input_shape=(2, self.index_length), output_shape=(2, grid.size)
+            array, input_shape=(2, self.index_length), output_shape=(2, grid.size)
         )
 
-    def magnetic_field_matrix(
+    def magnetic_field_array(
         self,
         grid,
         evaluation_radius,
@@ -316,8 +316,8 @@ class SECSBasis(ScalarBasis):
 
     def magnetic_field_operator(self, grid, evaluation_radius, **kwargs):
         """Return coefficient-to-magnetic-field synthesis operator."""
-        matrix = self.magnetic_field_matrix(grid, evaluation_radius, **kwargs)
-        return as_linear_map(matrix, input_shape=(self.index_length,), output_shape=(3, grid.size))
+        array = self.magnetic_field_array(grid, evaluation_radius, **kwargs)
+        return as_linear_map(array, input_shape=(self.index_length,), output_shape=(3, grid.size))
 
 
 __all__ = ["DEFAULT_IONOSPHERE_RADIUS_M", "EARTH_RADIUS_M", "SECSBasis"]

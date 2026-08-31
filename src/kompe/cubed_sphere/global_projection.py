@@ -79,9 +79,9 @@ class GlobalCSProjection:
         )
 
     @staticmethod
-    def cartesian_to_cube_vector_matrix(xi, eta, radius=1, face=0):
-        """Return Cartesian-to-cube component transformation matrices."""
-        return cs_vectors._cartesian_to_cube_matrix(
+    def cartesian_to_cube_vector_array(xi, eta, radius=1, face=0):
+        """Return Cartesian-to-cube component transforms at each point."""
+        return cs_vectors._cartesian_to_cube_array(
             xi,
             eta,
             radius=radius,
@@ -89,9 +89,9 @@ class GlobalCSProjection:
         )
 
     @staticmethod
-    def cube_to_cartesian_vector_matrix(xi, eta, radius=1, face=0):
-        """Return cube-to-Cartesian component transformation matrices."""
-        return cs_vectors._cube_to_cartesian_matrix(
+    def cube_to_cartesian_vector_array(xi, eta, radius=1, face=0):
+        """Return cube-to-Cartesian component transforms at each point."""
+        return cs_vectors._cube_to_cartesian_array(
             xi,
             eta,
             radius=radius,
@@ -99,37 +99,37 @@ class GlobalCSProjection:
         )
 
     @staticmethod
-    def enu_to_cube_vector_matrix(xi, eta, radius=1, face=0):
-        """Return ENU-to-``(xi, eta, radial)`` component matrices."""
-        cube_to_cartesian = cs_vectors._cube_to_cartesian_matrix(
+    def enu_to_cube_vector_array(xi, eta, radius=1, face=0):
+        """Return ENU-to-``(xi, eta, radial)`` component transforms."""
+        cube_to_cartesian = cs_vectors._cube_to_cartesian_array(
             xi,
             eta,
             radius=radius,
             face=face,
         )
         cartesian_to_cube = inverse_3x3(cube_to_cartesian)
-        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(cube_to_cartesian[:, :, 2])
+        enu_to_cartesian = cs_vectors._enu_to_cartesian_array(cube_to_cartesian[:, :, 2])
         xp = get_array_module(cartesian_to_cube, enu_to_cartesian)
         return xp.einsum("nij,njk->nik", cartesian_to_cube, enu_to_cartesian)
 
     @staticmethod
-    def cube_to_enu_vector_matrix(xi, eta, radius=1, face=0):
-        """Return ``(xi, eta, radial)``-to-ENU component matrices."""
-        cube_to_cartesian = cs_vectors._cube_to_cartesian_matrix(
+    def cube_to_enu_vector_array(xi, eta, radius=1, face=0):
+        """Return ``(xi, eta, radial)``-to-ENU component transforms."""
+        cube_to_cartesian = cs_vectors._cube_to_cartesian_array(
             xi,
             eta,
             radius=radius,
             face=face,
         )
-        enu_to_cartesian = cs_vectors._enu_to_cartesian_matrix(cube_to_cartesian[:, :, 2])
+        enu_to_cartesian = cs_vectors._enu_to_cartesian_array(cube_to_cartesian[:, :, 2])
         xp = get_array_module(enu_to_cartesian, cube_to_cartesian)
         cartesian_to_enu = xp.swapaxes(enu_to_cartesian, 1, 2)
         return xp.einsum("nij,njk->nik", cartesian_to_enu, cube_to_cartesian)
 
     @staticmethod
-    def face_to_face_vector_matrix(xi, eta, source_face, target_face):
+    def face_to_face_vector_array(xi, eta, source_face, target_face):
         """Return component transformations between global cube faces."""
-        return cs_vectors._face_to_face_matrix(
+        return cs_vectors._face_to_face_array(
             xi,
             eta,
             source_face,

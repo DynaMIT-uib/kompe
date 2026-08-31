@@ -452,8 +452,8 @@ def test_scaled_einsum_map_preserves_composition_structure():
     )
 
 
-def test_materialized_linear_map_reuses_cached_matrix():
-    """An explicitly materialized map reuses that matrix for application."""
+def test_to_matrix_reuses_cached_matrix_for_application():
+    """A requested explicit matrix is reused for subsequent application."""
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])
     calls = 0
 
@@ -477,7 +477,7 @@ def test_materialized_linear_map_reuses_cached_matrix():
         output_shape=(2,),
         input_shape=(2,),
     )
-    np.testing.assert_allclose(linear_map.to_array(), matrix)
+    np.testing.assert_allclose(linear_map.to_matrix(), matrix)
 
     x = np.array([7.0, 11.0])
     block = np.eye(2)
@@ -1359,7 +1359,7 @@ def test_einsum_linear_map_dense_materialization_uses_active_backend():
 
 @pytest.mark.requires_jax
 def test_einsum_linear_map_dense_uses_active_backend():
-    """Einsum-backed LinearMap preserves the active matrix backend."""
+    """Einsum-backed LinearMap preserves the active array backend."""
     previous_backend = jax_enabled()
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])
     linear_map = einsum_linear_map(

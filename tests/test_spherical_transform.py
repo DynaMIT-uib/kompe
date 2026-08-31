@@ -90,7 +90,7 @@ def test_rotated_gradient_analysis_matches_dense_least_squares():
     transform = SphericalTransform(basis, grid, area_weighted=True)
     scale = np.linspace(0.5, 1.5, basis.index_length)
     synthesis = (
-        np.asarray(transform.rhat_cross_gradient_matrix) * scale.reshape(1, 1, -1)
+        np.asarray(transform.rhat_cross_gradient_array) * scale.reshape(1, 1, -1)
     ).reshape(2 * grid.size, basis.index_length)
     expected = dense_full_rank_least_squares_map(
         synthesis,
@@ -329,8 +329,8 @@ def test_schmidt_surface_norms_match_gauss_legendre_quadrature():
         area_weights=solid_angle.reshape(-1),
     )
     basis = SHBasis(5, 5, mean_free=False)
-    values = np.asarray(basis.scalar_evaluation_matrix(grid))
-    gradient = np.asarray(basis.surface_gradient_matrix(grid))
+    values = np.asarray(basis.scalar_evaluation_array(grid))
+    gradient = np.asarray(basis.surface_gradient_array(grid))
     normalized_area = solid_angle.reshape(-1) / (4.0 * np.pi)
     q = 1.0 / (2.0 * basis.n + 1.0)
     mu = basis.n * (basis.n + 1.0)
@@ -353,7 +353,7 @@ def test_unnormalized_sh_smoothness_matches_gauss_legendre_quadrature():
     )
     grid = SphericalGrid(theta=theta_grid, phi=phi_grid)
     basis = SHBasis(5, 5, mean_free=False, schmidt_quasi_normalized=False)
-    gradient = np.asarray(basis.surface_gradient_matrix(grid))
+    gradient = np.asarray(basis.surface_gradient_array(grid))
     normalized_area = solid_angle.reshape(-1) / (4.0 * np.pi)
     gradient_norms = np.sum(normalized_area[None, :, None] * gradient**2, axis=(0, 1))
 
@@ -455,8 +455,8 @@ def test_spherical_transform_least_squares_use_operator_properties():
 
     assert scalar_problem.A[0] is transform.scalar_synthesis_operator
     assert helmholtz_problem.A[0] is transform.helmholtz_synthesis_operator
-    assert "scalar_synthesis_matrix" not in transform.__dict__
-    assert "helmholtz_synthesis_matrix" not in transform.__dict__
+    assert "scalar_synthesis_array" not in transform.__dict__
+    assert "helmholtz_synthesis_array" not in transform.__dict__
 
 
 # Cubed-sphere remapping and analysis
@@ -485,7 +485,7 @@ def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch)
     def fail_evaluate_on_grid(*args, **kwargs):
         raise AssertionError("native CS synthesis should use operator paths")
 
-    monkeypatch.setattr(basis, "scalar_evaluation_matrix", fail_evaluate_on_grid)
+    monkeypatch.setattr(basis, "scalar_evaluation_array", fail_evaluate_on_grid)
 
     np.testing.assert_allclose(transform.synthesize_scalar(scalar_coeffs), scalar_coeffs)
     np.testing.assert_allclose(
@@ -495,8 +495,8 @@ def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch)
         transform.synthesize_scalar(scalar_coeffs, derivative="phi"), phi @ scalar_coeffs
     )
     np.testing.assert_allclose(transform.synthesize_helmholtz(vector_coeffs), expected_helmholtz)
-    assert "scalar_synthesis_matrix" not in transform.__dict__
-    assert "helmholtz_synthesis_matrix" not in transform.__dict__
+    assert "scalar_synthesis_array" not in transform.__dict__
+    assert "helmholtz_synthesis_array" not in transform.__dict__
 
 
 def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
@@ -803,10 +803,10 @@ def test_cs_non_native_vector_operators_use_remap_without_dense_interpolation(mo
     )
     helmholtz_coeffs = np.vstack([scalar_coeffs, scalar_coeffs[::-1]])
 
-    expected_gradient = np.tensordot(basis.surface_gradient_matrix(target), scalar_coeffs, axes=1)
-    expected_rxgrad = np.tensordot(basis.rhat_cross_gradient_matrix(target), scalar_coeffs, axes=1)
+    expected_gradient = np.tensordot(basis.surface_gradient_array(target), scalar_coeffs, axes=1)
+    expected_rxgrad = np.tensordot(basis.rhat_cross_gradient_array(target), scalar_coeffs, axes=1)
     expected_helmholtz = np.tensordot(
-        basis.helmholtz_synthesis_matrix(target), helmholtz_coeffs, axes=2
+        basis.helmholtz_synthesis_array(target), helmholtz_coeffs, axes=2
     )
 
     def fail_interpolate_vector(*args, **kwargs):
@@ -1129,19 +1129,19 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         assert "jax" in type(scalar_values).__module__
         backend_dtype = to_numpy(scalar_values).dtype
         assert np.issubdtype(backend_dtype, np.floating)
-        assert to_numpy(transform.scalar_synthesis_matrix).dtype == backend_dtype
+        assert to_numpy(transform.scalar_synthesis_array).dtype == backend_dtype
         np.testing.assert_allclose(
-            to_numpy(scalar_values), to_numpy(transform.scalar_synthesis_matrix) @ scalar_coeffs
+            to_numpy(scalar_values), to_numpy(transform.scalar_synthesis_array) @ scalar_coeffs
         )
 
         vector_coeffs = np.vstack([scalar_coeffs, scalar_coeffs[::-1]])
         vector_values = transform.synthesize_helmholtz(vector_coeffs)
         assert "jax" in type(vector_values).__module__
         assert to_numpy(vector_values).dtype == backend_dtype
-        assert to_numpy(transform.helmholtz_synthesis_matrix).dtype == backend_dtype
+        assert to_numpy(transform.helmholtz_synthesis_array).dtype == backend_dtype
         np.testing.assert_allclose(
             to_numpy(vector_values),
-            np.tensordot(to_numpy(transform.helmholtz_synthesis_matrix), vector_coeffs, 2),
+            np.tensordot(to_numpy(transform.helmholtz_synthesis_array), vector_coeffs, 2),
         )
     finally:
         set_backend(previous_backend)
@@ -1168,7 +1168,7 @@ def test_spherical_transform_preserves_explicit_jax_coefficients():
 
         assert "jax" in type(values).__module__
         np.testing.assert_allclose(
-            to_numpy(values), transform.scalar_synthesis_matrix @ to_numpy(coeffs)
+            to_numpy(values), transform.scalar_synthesis_array @ to_numpy(coeffs)
         )
     finally:
         set_backend(previous_backend)

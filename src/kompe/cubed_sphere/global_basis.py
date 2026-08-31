@@ -171,7 +171,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             cache.popitem(last=False)
         return operator
 
-    def scalar_evaluation_matrix(self, grid, derivative=None):
+    def scalar_evaluation_array(self, grid, derivative=None):
         """Materialize the canonical CS scalar evaluation operator."""
         return self.scalar_evaluation_operator(grid, derivative=derivative).to_array()
 
@@ -271,9 +271,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         )
         xi, eta, radius, face = map(np.ravel, [xi, eta, radius, face])
 
-        pc = self.mesh.projection.cartesian_to_cube_vector_matrix(
-            xi, eta, radius=radius, face=face
-        )
+        pc = self.mesh.projection.cartesian_to_cube_vector_array(xi, eta, radius=radius, face=face)
         _, theta, phi = self.mesh.projection.cube_to_spherical(xi, eta, face, radius=radius)
 
         sin_theta, cos_theta = np.sin(theta), np.cos(theta)
@@ -320,7 +318,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             "inv_sin2_theta": sp.diags(1.0 / (sin_theta**2)).tocsr(),
         }
 
-    def surface_gradient_matrix(self, grid):
+    def surface_gradient_array(self, grid):
         """Materialize the canonical CS surface-gradient operator."""
         return self.surface_gradient_operator(grid).to_array()
 
@@ -339,7 +337,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
         return self._cached_surface_operator("surface_gradient", grid, build)
 
-    def rhat_cross_gradient_matrix(self, grid):
+    def rhat_cross_gradient_array(self, grid):
         """Materialize the canonical CS rhat-cross-gradient operator."""
         return self.rhat_cross_gradient_operator(grid).to_array()
 
@@ -358,7 +356,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
         return self._cached_surface_operator("rhat_cross_gradient", grid, build)
 
-    def helmholtz_synthesis_matrix(self, grid):
+    def helmholtz_synthesis_array(self, grid):
         """Materialize the canonical CS Helmholtz synthesis operator."""
         return self.helmholtz_synthesis_operator(grid).to_array()
 

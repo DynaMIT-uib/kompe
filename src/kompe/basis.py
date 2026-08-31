@@ -137,18 +137,18 @@ class ScalarBasis(ABC):
             raise ValueError(f"{type(self).__name__} is missing basis metadata: {joined}.")
 
     @abstractmethod
-    def scalar_evaluation_matrix(self, grid, derivative=None):
-        """Return the scalar coefficient-to-grid matrix."""
+    def scalar_evaluation_array(self, grid, derivative=None):
+        """Return scalar basis values and optional derivatives on a grid."""
 
-    def _uncached_scalar_evaluation_matrix(self, grid, derivative=None):
+    def _uncached_scalar_evaluation_array(self, grid, derivative=None):
         """Evaluate without optional persistent materialization."""
-        return self.scalar_evaluation_matrix(grid, derivative=derivative)
+        return self.scalar_evaluation_array(grid, derivative=derivative)
 
     def scalar_evaluation_operator(self, grid, derivative=None):
         """Return the scalar coefficient-to-grid operator."""
-        matrix = self.scalar_evaluation_matrix(grid, derivative=derivative)
+        array = self.scalar_evaluation_array(grid, derivative=derivative)
         return as_linear_map(
-            matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
+            array, input_shape=(self.index_length,), output_shape=array.shape[:-1]
         )
 
 
@@ -207,42 +207,42 @@ class SurfaceDifferentialBasis(ScalarBasis):
             )
         return coeffs
 
-    def surface_gradient_matrix(self, grid):
+    def surface_gradient_array(self, grid):
         """Return ``[d_theta, sin(theta)^-1 d_phi]`` on a surface."""
         return _backend_stack(
             [
-                self.scalar_evaluation_matrix(grid, derivative="theta"),
-                self.scalar_evaluation_matrix(grid, derivative="phi"),
+                self.scalar_evaluation_array(grid, derivative="theta"),
+                self.scalar_evaluation_array(grid, derivative="phi"),
             ]
         )
 
     def surface_gradient_operator(self, grid):
         """Return the scalar-to-vector surface-gradient operator."""
-        matrix = self.surface_gradient_matrix(grid)
+        array = self.surface_gradient_array(grid)
         return as_linear_map(
-            matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
+            array, input_shape=(self.index_length,), output_shape=array.shape[:-1]
         )
 
-    def rhat_cross_gradient_matrix(self, grid):
+    def rhat_cross_gradient_array(self, grid):
         """Return the tangential ``rhat x grad`` operator."""
-        grad_theta, grad_phi = self.surface_gradient_matrix(grid)
+        grad_theta, grad_phi = self.surface_gradient_array(grid)
         return _backend_stack([-grad_phi, grad_theta])
 
     def rhat_cross_gradient_operator(self, grid):
         """Return the scalar-to-vector ``rhat x grad`` operator."""
-        matrix = self.rhat_cross_gradient_matrix(grid)
+        array = self.rhat_cross_gradient_array(grid)
         return as_linear_map(
-            matrix, input_shape=(self.index_length,), output_shape=matrix.shape[:-1]
+            array, input_shape=(self.index_length,), output_shape=array.shape[:-1]
         )
 
-    def helmholtz_synthesis_matrix(self, grid):
-        """Return the canonical tangential Helmholtz synthesis tensor.
+    def helmholtz_synthesis_array(self, grid):
+        """Return the canonical tangential Helmholtz synthesis array.
 
         Coefficients are ordered as curl-free then divergence-free
         potentials. Components are ordered as theta then phi. The field
         convention is ``-grad(phi) + rhat x grad(psi)``.
         """
-        gradient = self.surface_gradient_matrix(grid)
+        gradient = self.surface_gradient_array(grid)
         rhat_cross_gradient = _backend_stack([-gradient[1], gradient[0]])
         return _backend_stack([-gradient, rhat_cross_gradient], axis=2)
 
@@ -443,16 +443,16 @@ class BasisSubset(SurfaceDifferentialBasis):
             return result[:, slice(int(indices[0]), int(indices[-1]) + 1)]
         return result[:, indices]
 
-    def scalar_evaluation_matrix(self, grid, derivative=None):
+    def scalar_evaluation_array(self, grid, derivative=None):
         """Evaluate the selected basis functions on ``grid``."""
         return self._slice_evaluation(
-            self.parent_basis.scalar_evaluation_matrix(grid, derivative=derivative)
+            self.parent_basis.scalar_evaluation_array(grid, derivative=derivative)
         )
 
-    def _uncached_scalar_evaluation_matrix(self, grid, derivative=None):
+    def _uncached_scalar_evaluation_array(self, grid, derivative=None):
         """Evaluate the subset without persistent materialization."""
         return self._slice_evaluation(
-            self.parent_basis._uncached_scalar_evaluation_matrix(grid, derivative=derivative)
+            self.parent_basis._uncached_scalar_evaluation_array(grid, derivative=derivative)
         )
 
     def surface_laplacian_operator(self, r=1.0):

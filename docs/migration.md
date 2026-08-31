@@ -7,7 +7,7 @@
 Dense shaped materialization is now explicit through `to_array()`; the former
 `.array` property is removed. `to_matrix()` continues to return the flat 2-D
 representation. Surface differential bases expose one canonical
-`surface_laplacian_operator()`; explicitly materialize it when a matrix is
+`surface_laplacian_operator()`; call `to_matrix()` when its flat matrix is
 needed. Helmholtz component, divergence, and curl maps likewise use their
 `_operator` methods rather than parallel matrix wrappers.
 
@@ -46,9 +46,9 @@ environment settings.
 Historical `SphericalTransform.project_scalar` and `project_helmholtz` calls
 become `analyze_scalar_samples` and `analyze_helmholtz_samples`; the
 `projection_basis` argument becomes `analysis_basis`. This keeps coordinate
-projections distinct from coefficient analysis. Use `scalar_synthesis_matrix`
-and `helmholtz_synthesis_matrix` for the former short matrix spellings `G` and
-`G_helmholtz`.
+projections distinct from coefficient analysis. Use `scalar_synthesis_array`
+for the former scalar `G` spelling and `helmholtz_synthesis_array` for the
+former shaped `G_helmholtz` spelling.
 
 ## Lompe
 
@@ -82,8 +82,8 @@ partials instead of the former `cube_coordinates=True` mode.
 Global-CS direct vector interpolation is now `interpolate_vector()` in
 `(theta, phi, radial)` order. The old east/north
 `interpolate_vector_components()` entry point is removed. Physical chart
-transforms are `enu_to_cube_vector_matrix()` and
-`cube_to_enu_vector_matrix()`; the former public unnormalized spherical
+transforms are `enu_to_cube_vector_array()` and
+`cube_to_enu_vector_array()`; the former public unnormalized spherical
 component and normalization matrices are now internal implementation details.
 
 Lompe does not own a spherical-harmonic representation or transform. It calls

@@ -47,14 +47,14 @@ def test_global_projection_vector_components_round_trip_on_every_face():
         [np.cos(angle), np.sin(2.0 * angle), np.linspace(-0.8, 0.9, face.size)], axis=1
     )
 
-    cartesian_to_cube = projection.cartesian_to_cube_vector_matrix(
+    cartesian_to_cube = projection.cartesian_to_cube_vector_array(
         xi, eta, radius=radius, face=face
     )
-    cube_to_cartesian = projection.cube_to_cartesian_vector_matrix(
+    cube_to_cartesian = projection.cube_to_cartesian_vector_array(
         xi, eta, radius=radius, face=face
     )
-    cube_to_enu = projection.cube_to_enu_vector_matrix(xi, eta, radius=radius, face=face)
-    enu_to_cube = projection.enu_to_cube_vector_matrix(xi, eta, radius=radius, face=face)
+    cube_to_enu = projection.cube_to_enu_vector_array(xi, eta, radius=radius, face=face)
+    enu_to_cube = projection.enu_to_cube_vector_array(xi, eta, radius=radius, face=face)
 
     cube_vectors = np.einsum("nij,nj->ni", cartesian_to_cube, cartesian_vectors)
     recovered_cartesian = np.einsum("nij,nj->ni", cube_to_cartesian, cube_vectors)
@@ -75,10 +75,10 @@ def test_global_projection_enu_basis_matches_ecef_convention():
     """The direct ENU bridge agrees with the shared geographic convention."""
     projection = GlobalCSProjection()
     xi, eta, radius, face = _interior_face_points()
-    cube_to_cartesian = projection.cube_to_cartesian_vector_matrix(
+    cube_to_cartesian = projection.cube_to_cartesian_vector_array(
         xi, eta, radius=radius, face=face
     )
-    enu_to_cube = projection.enu_to_cube_vector_matrix(xi, eta, radius=radius, face=face)
+    enu_to_cube = projection.enu_to_cube_vector_array(xi, eta, radius=radius, face=face)
     actual = np.einsum("nij,njk->nik", cube_to_cartesian, enu_to_cube)
 
     _, theta, longitude = projection.cube_to_spherical(
@@ -103,8 +103,8 @@ def test_global_projection_enu_transforms_are_finite_at_poles():
     xi = np.zeros(2)
     eta = np.zeros(2)
 
-    cube_to_enu = projection.cube_to_enu_vector_matrix(xi, eta, radius=radius, face=face)
-    enu_to_cube = projection.enu_to_cube_vector_matrix(xi, eta, radius=radius, face=face)
+    cube_to_enu = projection.cube_to_enu_vector_array(xi, eta, radius=radius, face=face)
+    enu_to_cube = projection.enu_to_cube_vector_array(xi, eta, radius=radius, face=face)
     expected_cube_to_enu = np.zeros((2, 3, 3))
     expected_cube_to_enu[:, 0, 0] = radius
     expected_cube_to_enu[:, 1, 1] = radius
@@ -124,7 +124,7 @@ def test_global_projection_coordinate_directions_are_tangential():
     """Unit xi and eta directions have no radial ENU component."""
     projection = GlobalCSProjection()
     xi, eta, radius, face = _interior_face_points()
-    cube_to_enu = projection.cube_to_enu_vector_matrix(xi, eta, radius=radius, face=face)
+    cube_to_enu = projection.cube_to_enu_vector_array(xi, eta, radius=radius, face=face)
     xi_direction = np.broadcast_to(np.array([1.0, 0.0, 0.0]), (face.size, 3))
     eta_direction = np.broadcast_to(np.array([0.0, 1.0, 0.0]), (face.size, 3))
 
@@ -135,11 +135,11 @@ def test_global_projection_coordinate_directions_are_tangential():
     np.testing.assert_allclose(eta_enu[:, 2], 0.0, rtol=0.0, atol=2e-15)
 
 
-def test_cube_vector_matrix_is_the_coordinate_jacobian():
+def test_cube_vector_array_is_the_coordinate_jacobian():
     """Vector columns are derivatives of the coordinate transformation."""
     projection = GlobalCSProjection()
     xi, eta, radius, face = _interior_face_points()
-    jacobian = projection.cube_to_cartesian_vector_matrix(xi, eta, radius=radius, face=face)
+    jacobian = projection.cube_to_cartesian_vector_array(xi, eta, radius=radius, face=face)
     step = 1e-7
 
     derivatives = []
@@ -184,11 +184,11 @@ def test_global_projection_algebra_stays_on_jax_backend():
             *cube_coordinates,
             *cartesian,
             *spherical,
-            projection.cartesian_to_cube_vector_matrix(xi, eta, radius=radius, face=face),
-            projection.cube_to_cartesian_vector_matrix(xi, eta, radius=radius, face=face),
-            projection.enu_to_cube_vector_matrix(xi, eta, radius=radius, face=face),
-            projection.cube_to_enu_vector_matrix(xi, eta, radius=radius, face=face),
-            projection.face_to_face_vector_matrix(xi, eta, face, (face + 1) % 6),
+            projection.cartesian_to_cube_vector_array(xi, eta, radius=radius, face=face),
+            projection.cube_to_cartesian_vector_array(xi, eta, radius=radius, face=face),
+            projection.enu_to_cube_vector_array(xi, eta, radius=radius, face=face),
+            projection.cube_to_enu_vector_array(xi, eta, radius=radius, face=face),
+            projection.face_to_face_vector_array(xi, eta, face, (face + 1) % 6),
         )
         compiled_cartesian = jax.jit(
             lambda xi_values, eta_values, face_values: projection.cube_to_cartesian(
@@ -197,9 +197,9 @@ def test_global_projection_algebra_stays_on_jax_backend():
                 face=face_values,
             )
         )(xi, eta, face)
-        compiled_vector_matrix = jax.jit(
+        compiled_vector_array = jax.jit(
             lambda xi_values, eta_values, radius_values, face_values: (
-                projection.enu_to_cube_vector_matrix(
+                projection.enu_to_cube_vector_array(
                     xi_values,
                     eta_values,
                     radius=radius_values,
@@ -210,7 +210,7 @@ def test_global_projection_algebra_stays_on_jax_backend():
 
     assert all("jax" in type(array).__module__ for array in arrays)
     assert all("jax" in type(array).__module__ for array in compiled_cartesian)
-    assert "jax" in type(compiled_vector_matrix).__module__
+    assert "jax" in type(compiled_vector_array).__module__
     np.testing.assert_allclose(
         np.linalg.norm(np.column_stack(tuple(map(to_numpy, cartesian))), axis=1),
         to_numpy(radius),

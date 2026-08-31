@@ -675,11 +675,11 @@ def test_global_and_harmonic_bases_accept_regional_grid_contract():
     harmonic = SHBasis(2, 2)
     global_cs = GlobalCSBasis(4)
 
-    assert harmonic.scalar_evaluation_matrix(grid.cell_centers).shape == (
+    assert harmonic.scalar_evaluation_array(grid.cell_centers).shape == (
         grid.size,
         harmonic.index_length,
     )
-    assert global_cs.scalar_evaluation_matrix(grid.cell_centers).shape == (
+    assert global_cs.scalar_evaluation_array(grid.cell_centers).shape == (
         grid.size,
         global_cs.index_length,
     )

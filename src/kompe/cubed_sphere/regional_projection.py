@@ -307,13 +307,13 @@ class RegionalCSProjection:
             xp.asarray(self.geographic_to_local_matrix),
             geographic_ecef,
         )
-        cube_matrix = cs_vectors._cartesian_to_cube_matrix(
+        cube_transform = cs_vectors._cartesian_to_cube_array(
             xi,
             eta,
             radius=1.0,
             face=_NORTH_FACE,
         )
-        cube = xp.einsum("nij,nj->ni", cube_matrix, local_ecef)
+        cube = xp.einsum("nij,nj->ni", cube_transform, local_ecef)
         return xi, eta, cube[:, 0], cube[:, 1]
 
     def cube_vector_to_geographic(self, xi_component, eta_component, xi, eta):
@@ -349,13 +349,13 @@ class RegionalCSProjection:
         )
         lon, lat = self.cube_to_geographic(xi, eta)
         cube = xp.stack((xi_component, eta_component, xp.zeros_like(xi_component)), axis=1)
-        cartesian_matrix = cs_vectors._cube_to_cartesian_matrix(
+        cartesian_transform = cs_vectors._cube_to_cartesian_array(
             xi,
             eta,
             radius=1.0,
             face=_NORTH_FACE,
         )
-        local_ecef = xp.einsum("nij,nj->ni", cartesian_matrix, cube)
+        local_ecef = xp.einsum("nij,nj->ni", cartesian_transform, cube)
         geographic_ecef = xp.einsum(
             "ij,nj->ni",
             xp.asarray(self.local_to_geographic_matrix),

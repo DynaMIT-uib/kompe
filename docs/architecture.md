@@ -84,8 +84,8 @@ The conversion to geographic EN components is `east = phi`, `north = -theta`.
 Regional and global surface operators both follow this convention; local
 `(xi, eta)` coordinate derivatives are exposed under a distinct name.
 Global-CS vector interpolation also uses `(theta, phi, radial)`. Coordinate
-charts expose physical `enu_to_cube_vector_matrix()` and
-`cube_to_enu_vector_matrix()` directions; unnormalized spherical-coordinate
+charts expose physical `enu_to_cube_vector_array()` and
+`cube_to_enu_vector_array()` directions; unnormalized spherical-coordinate
 components remain an internal numerical detail.
 Full magnetic vectors use `(radial, theta, phi)`. SECS kernels use geographic
 `(east, north, radial)` return order; secsy retains its historical names in its

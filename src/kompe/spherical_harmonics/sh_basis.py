@@ -146,6 +146,21 @@ class SHBasis(SurfaceDifferentialBasis):
             f"legendre_method={self.legendre_method!r})"
         )
 
+    def clear_cache(self):
+        """Discard grid evaluation values, arrays, and operators."""
+        self._grid_cache.clear()
+
+    def cache_info(self):
+        """Return cache occupancy without exposing mutable entries."""
+        entries = self._grid_cache.values()
+        return {
+            "grids": len(self._grid_cache),
+            "legendre_values": sum(len(entry["legendre"]) for entry in entries),
+            "arrays": sum(len(entry["arrays"]) for entry in entries),
+            "operators": sum(len(entry["operators"]) for entry in entries),
+            "max_size": self._grid_cache_size,
+        }
+
     def _init_coefficient_indices(self):
         """Build cosine/sine coefficient indices and filters."""
         self.index_pairs = tuple(
@@ -230,20 +245,20 @@ class SHBasis(SurfaceDifferentialBasis):
         if key in cache:
             cache.move_to_end(key)
             return cache[key]
-        entry = {"legendre": {}, "matrices": {}, "operators": {}}
+        entry = {"legendre": {}, "arrays": {}, "operators": {}}
         cache[key] = entry
         if len(cache) > self._grid_cache_size:
             cache.popitem(last=False)
         return entry
 
-    def _cached_grid_matrix(self, grid, key, build):
-        """Return a cached grid matrix when the grid has a signature."""
+    def _cached_grid_array(self, grid, key, build):
+        """Return a cached grid array when the grid has a signature."""
         entry = self._grid_cache_entry(grid)
         if entry is None:
             return build(None)
-        if key not in entry["matrices"]:
-            entry["matrices"][key] = build(entry["legendre"])
-        return entry["matrices"][key]
+        if key not in entry["arrays"]:
+            entry["arrays"][key] = build(entry["legendre"])
+        return entry["arrays"][key]
 
     def _cached_grid_operator(self, grid, key, build):
         """Return a cached grid operator when possible."""
@@ -254,11 +269,11 @@ class SHBasis(SurfaceDifferentialBasis):
             entry["operators"][key] = build()
         return entry["operators"][key]
 
-    def _operator_from_matrix(self, matrix, *, input_shape):
-        """Return a LinearMap shaped like ``matrix``."""
-        output_rank = matrix.ndim - len(input_shape)
+    def _operator_from_array(self, array, *, input_shape):
+        """Return a LinearMap shaped like ``array``."""
+        output_rank = array.ndim - len(input_shape)
         return as_linear_map(
-            matrix, input_shape=input_shape, output_shape=matrix.shape[:output_rank]
+            array, input_shape=input_shape, output_shape=array.shape[:output_rank]
         )
 
     def omits_constant_mode(self):
@@ -370,7 +385,7 @@ class SHBasis(SurfaceDifferentialBasis):
         dP_scaled = dP_std * self.scipy_scaling_factors if compute_derivative else None
         return P_scaled, dP_scaled
 
-    def _build_scalar_evaluation_matrix(self, grid, derivative=None):
+    def _build_scalar_evaluation_array(self, grid, derivative=None):
         """Evaluate scalar basis or surface derivatives on ``grid``."""
 
         def build(legendre_cache):
@@ -385,63 +400,63 @@ class SHBasis(SurfaceDifferentialBasis):
             cached = self.operator_cache.get_or_create("sh_evaluation", identity, evaluate)
             return get_array_module().asarray(cached)
 
-        return self._cached_grid_matrix(grid, ("scalar_evaluation", derivative), build)
+        return self._cached_grid_array(grid, ("scalar_evaluation", derivative), build)
 
-    def _uncached_scalar_evaluation_matrix(self, grid, derivative=None):
+    def _uncached_scalar_evaluation_array(self, grid, derivative=None):
         """Evaluate without the persistent array cache."""
         return get_array_module().asarray(self._evaluate_on_grid(grid, derivative=derivative))
 
-    def scalar_evaluation_matrix(self, grid, derivative=None):
-        """Return the cached SH scalar evaluation matrix."""
-        return self._build_scalar_evaluation_matrix(grid, derivative=derivative)
+    def scalar_evaluation_array(self, grid, derivative=None):
+        """Return the cached SH scalar evaluation array."""
+        return self._build_scalar_evaluation_array(grid, derivative=derivative)
 
     def scalar_evaluation_operator(self, grid, derivative=None):
         """Return the cached SH scalar evaluation operator."""
         return self._cached_grid_operator(
             grid,
             ("scalar_evaluation", derivative),
-            lambda: self._operator_from_matrix(
-                self.scalar_evaluation_matrix(grid, derivative=derivative),
+            lambda: self._operator_from_array(
+                self.scalar_evaluation_array(grid, derivative=derivative),
                 input_shape=(self.index_length,),
             ),
         )
 
-    def surface_gradient_matrix(self, grid):
-        """Return the cached SH surface-gradient matrix."""
-        return self._cached_grid_matrix(
+    def surface_gradient_array(self, grid):
+        """Return the cached SH surface-gradient array."""
+        return self._cached_grid_array(
             grid,
             "surface_gradient",
-            lambda _legendre_cache: self._build_surface_gradient_matrix(grid),
+            lambda _legendre_cache: self._build_surface_gradient_array(grid),
         )
 
-    def _build_surface_gradient_matrix(self, grid):
-        """Build the SH surface-gradient matrix."""
-        theta_matrix = self.scalar_evaluation_matrix(grid, derivative="theta")
-        phi_matrix = self.scalar_evaluation_matrix(grid, derivative="phi")
-        xp = get_array_module(theta_matrix, phi_matrix)
-        return xp.stack([xp.asarray(theta_matrix), xp.asarray(phi_matrix)])
+    def _build_surface_gradient_array(self, grid):
+        """Build the SH surface-gradient array."""
+        theta_array = self.scalar_evaluation_array(grid, derivative="theta")
+        phi_array = self.scalar_evaluation_array(grid, derivative="phi")
+        xp = get_array_module(theta_array, phi_array)
+        return xp.stack([xp.asarray(theta_array), xp.asarray(phi_array)])
 
     def surface_gradient_operator(self, grid):
         """Return the cached SH surface-gradient operator."""
         return self._cached_grid_operator(
             grid,
             "surface_gradient",
-            lambda: self._operator_from_matrix(
-                self.surface_gradient_matrix(grid), input_shape=(self.index_length,)
+            lambda: self._operator_from_array(
+                self.surface_gradient_array(grid), input_shape=(self.index_length,)
             ),
         )
 
-    def rhat_cross_gradient_matrix(self, grid):
-        """Return the cached SH r-hat-cross-gradient matrix."""
-        return self._cached_grid_matrix(
+    def rhat_cross_gradient_array(self, grid):
+        """Return the cached SH r-hat-cross-gradient array."""
+        return self._cached_grid_array(
             grid,
             "rhat_cross_gradient",
-            lambda _legendre_cache: self._build_rhat_cross_gradient_matrix(grid),
+            lambda _legendre_cache: self._build_rhat_cross_gradient_array(grid),
         )
 
-    def _build_rhat_cross_gradient_matrix(self, grid):
-        """Build the SH r-hat-cross-gradient matrix."""
-        gradient = self.surface_gradient_matrix(grid)
+    def _build_rhat_cross_gradient_array(self, grid):
+        """Build the SH r-hat-cross-gradient array."""
+        gradient = self.surface_gradient_array(grid)
         xp = get_array_module(gradient)
         return xp.stack([-gradient[1], gradient[0]])
 
@@ -450,22 +465,22 @@ class SHBasis(SurfaceDifferentialBasis):
         return self._cached_grid_operator(
             grid,
             "rhat_cross_gradient",
-            lambda: self._operator_from_matrix(
-                self.rhat_cross_gradient_matrix(grid), input_shape=(self.index_length,)
+            lambda: self._operator_from_array(
+                self.rhat_cross_gradient_array(grid), input_shape=(self.index_length,)
             ),
         )
 
-    def helmholtz_synthesis_matrix(self, grid):
-        """Return the cached SH Helmholtz synthesis tensor."""
-        return self._cached_grid_matrix(
+    def helmholtz_synthesis_array(self, grid):
+        """Return the cached SH Helmholtz synthesis array."""
+        return self._cached_grid_array(
             grid,
             "helmholtz_synthesis",
-            lambda _legendre_cache: self._build_helmholtz_synthesis_matrix(grid),
+            lambda _legendre_cache: self._build_helmholtz_synthesis_array(grid),
         )
 
-    def _build_helmholtz_synthesis_matrix(self, grid):
-        """Build the SH Helmholtz synthesis tensor."""
-        gradient = self.surface_gradient_matrix(grid)
+    def _build_helmholtz_synthesis_array(self, grid):
+        """Build the SH Helmholtz synthesis array."""
+        gradient = self.surface_gradient_array(grid)
         xp = get_array_module(gradient)
         rotated_gradient = xp.stack([-gradient[1], gradient[0]])
         return xp.stack([-xp.asarray(gradient), rotated_gradient], axis=2)
