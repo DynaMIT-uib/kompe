@@ -17,7 +17,6 @@ def lsmr(
     btol: float | None = 1e-6,
     conlim: float | None = 1e8,
     maxiter: int | None = None,
-    show: bool = False,
     x0: Any = None,
 ) -> tuple[Any, int, int, float, float, float, float, float]:
     """Solve ``min ||b - A x||`` using JAX array operations.
@@ -28,11 +27,8 @@ def lsmr(
 
     Greek-derived recurrence names follow the Fong--Saunders algorithm;
     diagnostic names describe the quantities exposed in SciPy's return
-    value. ``show`` is accepted for call compatibility, but this compact
-    implementation does not print iteration logs.
+    value.
     """
-    del show
-
     import jax.numpy as jnp
 
     m, n = A.shape

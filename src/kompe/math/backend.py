@@ -55,23 +55,12 @@ def _is_jax_array(array: Any) -> bool:
     return isinstance(array, _jax_array_type)
 
 
-def _env_flag(value: str | None) -> bool:
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-_USE_JAX = JAX_AVAILABLE and _env_flag(os.environ.get("KOMPE_USE_JAX"))
-
-
-def _set_jax_enabled(flag: bool) -> None:
-    """Set the backend flag after validating JAX availability."""
-    global _USE_JAX
-    if flag and not JAX_AVAILABLE:
-        raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
-    if flag:
-        _load_jax()
-    _USE_JAX = bool(flag)
+_USE_JAX = JAX_AVAILABLE and os.environ.get("KOMPE_USE_JAX", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def jax_enabled() -> bool:
@@ -86,6 +75,8 @@ def get_backend() -> str:
 
 def set_backend(backend: str | bool | None) -> str:
     """Set the active array backend."""
+    global _USE_JAX
+
     if isinstance(backend, bool):
         target = backend
     elif backend is None:
@@ -103,7 +94,11 @@ def set_backend(backend: str | bool | None) -> str:
     else:
         raise TypeError("backend must be a string, boolean, or None.")
 
-    _set_jax_enabled(target)
+    if target and not JAX_AVAILABLE:
+        raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
+    if target:
+        _load_jax()
+    _USE_JAX = bool(target)
     os.environ["KOMPE_USE_JAX"] = "1" if target else "0"
     return "jax" if target else "numpy"
 

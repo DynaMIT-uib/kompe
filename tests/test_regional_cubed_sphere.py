@@ -440,7 +440,7 @@ def test_regional_grid_rejects_nonuniform_edges_and_invalid_stencils():
 
     grid = RegionalCSMesh(projection, 1000.0, 800.0, shape=(3, 3), radius=6371.2)
     with pytest.raises(ValueError, match="at least"):
-        grid.operators.surface_gradient_matrices(stencil_size=2)
+        grid.operators.surface_gradient_matrices(stencil_radius=2)
 
 
 def test_regional_scalar_interpolation_preserves_shape_and_complex_values():
@@ -576,9 +576,9 @@ def test_regional_gradient_and_divergence_recover_spherical_laplacian():
     assert isinstance(grid.operators, RegionalCSOperators)
     assert grid.operators is grid.operators
     theta_derivative, phi_derivative = grid.operators.surface_gradient_matrices(
-        stencil_size=2, sparse=True
+        stencil_radius=2, sparse=True
     )
-    divergence = grid.operators.surface_divergence_matrix(stencil_size=2, sparse=True)
+    divergence = grid.operators.surface_divergence_matrix(stencil_radius=2, sparse=True)
     assert sparse.issparse(theta_derivative)
     assert sparse.issparse(phi_derivative)
     assert sparse.issparse(divergence)
@@ -600,8 +600,10 @@ def test_regional_gradient_and_divergence_recover_spherical_laplacian():
     )
     assert relative_error < 5e-4
 
-    gradient_from_operator = grid.operators.surface_gradient_operator(stencil_size=2).matvec(field)
-    divergence_from_operator = grid.operators.surface_divergence_operator(stencil_size=2).matvec(
+    gradient_from_operator = grid.operators.surface_gradient_operator(stencil_radius=2).matvec(
+        field
+    )
+    divergence_from_operator = grid.operators.surface_divergence_operator(stencil_radius=2).matvec(
         gradient_from_operator
     )
     np.testing.assert_allclose(

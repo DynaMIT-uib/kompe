@@ -23,9 +23,9 @@ def _interpolation_axis(position, first_center, spacing, count):
 
 
 class RegionalCSOperators:
-    """Numerical operators associated with one regional cubed-sphere grid.
+    """Numerical operators associated with one regional cubed-sphere mesh.
 
-    The grid owns coordinates, cells, and topology. This object owns the
+    The mesh owns coordinates, cells, and topology. This object owns the
     discretization choices and constructs interpolation and differential
     operators against that immutable geometry.
     """
@@ -37,115 +37,119 @@ class RegionalCSOperators:
 
     @property
     def signature(self):
-        """Return the identity of the operator family and its grid."""
+        """Return the identity of the operator family and its mesh."""
         return ("REGIONAL_CS_OPERATORS", self.mesh.signature)
 
-    def coordinate_derivative_matrices(self, stencil_size=1, *, sparse=True):
+    def coordinate_derivative_matrices(self, stencil_radius=1, *, sparse=True):
         """Return partial-derivative matrices with respect to xi and eta.
 
         Parameters
         ----------
-        stencil_size: int, optional
-            Stencil size. Default is 1, in which case derivatives will be calculated
-            with a 3-point stencil. With ``stencil_size=2``, a 5-point
-            stencil is used, and so on.
+        stencil_radius: int, optional
+            Number of neighbouring cells used on each side. The default of
+            1 gives a 3-point stencil; 2 gives a 5-point stencil, and so on.
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
-        grid = self.mesh
-        if isinstance(stencil_size, bool) or not isinstance(stencil_size, (int, np.integer)):
-            raise TypeError("stencil_size must be an integer")
-        S = int(stencil_size)
-        if S < 1:
-            raise ValueError("stencil_size must be positive")
-        if min(grid.shape) < 2 * S + 1:
+        mesh = self.mesh
+        if isinstance(stencil_radius, bool) or not isinstance(stencil_radius, (int, np.integer)):
+            raise TypeError("stencil_radius must be an integer")
+        stencil_radius = int(stencil_radius)
+        if stencil_radius < 1:
+            raise ValueError("stencil_radius must be positive")
+        if min(mesh.shape) < 2 * stencil_radius + 1:
             raise ValueError(
-                "stencil_size requires at least 2*stencil_size+1 cells along each axis"
+                "stencil_radius requires at least 2*stencil_radius+1 cells along each axis"
             )
-        dxi = grid.dxi
-        deta = grid.deta
-        N = grid.n_eta
-        M = grid.n_xi
+        dxi = mesh.dxi
+        deta = mesh.deta
+        n_eta = mesh.n_eta
+        n_xi = mesh.n_xi
 
-        D_xi = {"rows": [], "cols": [], "elements": []}
-        D_eta = {"rows": [], "cols": [], "elements": []}
+        dxi_entries = {"rows": [], "cols": [], "elements": []}
+        deta_entries = {"rows": [], "cols": [], "elements": []}
 
-        # index arrays (0 to N, M)
-        i_arr = np.arange(N)
-        j_arr = np.arange(M)
+        # Cell indices along the eta and xi axes.
+        i_arr = np.arange(n_eta)
+        j_arr = np.arange(n_xi)
 
-        # meshgrid versions:
+        # Two-dimensional index arrays.
         ii, jj = np.meshgrid(i_arr, j_arr, indexing="xy")
 
-        # inner grid points:
-        points = np.r_[-S : S + 1 : 1]
+        # Interior cells use a centered stencil.
+        points = np.r_[-stencil_radius : stencil_radius + 1 : 1]
         coefficients = finite_differences.finite_difference_weights(points, order=1)
-        i_dx, j_dx = ii[:, S:-S], jj[:, S:-S]
-        i_dy, j_dy = ii.T[:, S:-S], jj.T[:, S:-S]
+        i_dx, j_dx = ii[:, stencil_radius:-stencil_radius], jj[:, stencil_radius:-stencil_radius]
+        i_dy, j_dy = (
+            ii.T[:, stencil_radius:-stencil_radius],
+            jj.T[:, stencil_radius:-stencil_radius],
+        )
 
-        for ll in range(len(points)):
-            D_eta["rows"].append(grid.flat_index(i_dx, j_dx))
-            D_eta["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
-            D_eta["elements"].append(np.full(i_dx.size, coefficients[ll] / deta))
+        for point, coefficient in zip(points, coefficients, strict=True):
+            deta_entries["rows"].append(mesh.flat_index(i_dx, j_dx))
+            deta_entries["cols"].append(mesh.flat_index(i_dx + point, j_dx))
+            deta_entries["elements"].append(np.full(i_dx.size, coefficient / deta))
 
-            D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
-            D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
-            D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
+            dxi_entries["rows"].append(mesh.flat_index(i_dy, j_dy))
+            dxi_entries["cols"].append(mesh.flat_index(i_dy, j_dy + point))
+            dxi_entries["elements"].append(np.full(i_dy.size, coefficient / dxi))
 
-        # boundaries
-        for kk in np.arange(0, S)[::-1]:
+        # Boundary cells use one-sided stencils of the same order.
+        for boundary_index in np.arange(0, stencil_radius)[::-1]:
             # LEFT
-            points = np.r_[-kk : S + 1 : 1]
+            points = np.r_[-boundary_index : stencil_radius + 1 : 1]
             coefficients = finite_differences.finite_difference_weights(points, order=1)
-            i_dx, j_dx = ii[:, kk], jj[:, kk]
-            i_dy, j_dy = ii.T[:, kk], jj.T[:, kk]
+            i_dx, j_dx = ii[:, boundary_index], jj[:, boundary_index]
+            i_dy, j_dy = ii.T[:, boundary_index], jj.T[:, boundary_index]
 
-            for ll in range(len(points)):
-                D_eta["rows"].append(grid.flat_index(i_dx, j_dx))
-                D_eta["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
-                D_eta["elements"].append(np.full(i_dx.size, coefficients[ll] / deta))
+            for point, coefficient in zip(points, coefficients, strict=True):
+                deta_entries["rows"].append(mesh.flat_index(i_dx, j_dx))
+                deta_entries["cols"].append(mesh.flat_index(i_dx + point, j_dx))
+                deta_entries["elements"].append(np.full(i_dx.size, coefficient / deta))
 
-                D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
-                D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
-                D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
+                dxi_entries["rows"].append(mesh.flat_index(i_dy, j_dy))
+                dxi_entries["cols"].append(mesh.flat_index(i_dy, j_dy + point))
+                dxi_entries["elements"].append(np.full(i_dy.size, coefficient / dxi))
 
             # RIGHT
-            points = np.r_[-S : kk + 1 : 1]
+            points = np.r_[-stencil_radius : boundary_index + 1 : 1]
             coefficients = finite_differences.finite_difference_weights(points, order=1)
-            i_dx, j_dx = ii[:, -(kk + 1)], jj[:, -(kk + 1)]
-            i_dy, j_dy = ii.T[:, -(kk + 1)], jj.T[:, -(kk + 1)]
+            i_dx, j_dx = ii[:, -(boundary_index + 1)], jj[:, -(boundary_index + 1)]
+            i_dy, j_dy = ii.T[:, -(boundary_index + 1)], jj.T[:, -(boundary_index + 1)]
 
-            for ll in range(len(points)):
-                D_eta["rows"].append(grid.flat_index(i_dx, j_dx))
-                D_eta["cols"].append(grid.flat_index(i_dx + points[ll], j_dx))
-                D_eta["elements"].append(np.full(i_dx.size, coefficients[ll] / deta))
+            for point, coefficient in zip(points, coefficients, strict=True):
+                deta_entries["rows"].append(mesh.flat_index(i_dx, j_dx))
+                deta_entries["cols"].append(mesh.flat_index(i_dx + point, j_dx))
+                deta_entries["elements"].append(np.full(i_dx.size, coefficient / deta))
 
-                D_xi["rows"].append(grid.flat_index(i_dy, j_dy))
-                D_xi["cols"].append(grid.flat_index(i_dy, j_dy + points[ll]))
-                D_xi["elements"].append(np.full(i_dy.size, coefficients[ll] / dxi))
+                dxi_entries["rows"].append(mesh.flat_index(i_dy, j_dy))
+                dxi_entries["cols"].append(mesh.flat_index(i_dy, j_dy + point))
+                dxi_entries["elements"].append(np.full(i_dy.size, coefficient / dxi))
 
-        D_xi = {key: np.hstack(D_xi[key]) for key in D_xi}
-        D_eta = {key: np.hstack(D_eta[key]) for key in D_eta}
+        dxi_entries = {key: np.hstack(dxi_entries[key]) for key in dxi_entries}
+        deta_entries = {key: np.hstack(deta_entries[key]) for key in deta_entries}
 
         D_xi = scipy_sparse.csc_matrix(
-            (D_xi["elements"], (D_xi["rows"], D_xi["cols"])), shape=(N * M, N * M)
+            (dxi_entries["elements"], (dxi_entries["rows"], dxi_entries["cols"])),
+            shape=(n_eta * n_xi, n_eta * n_xi),
         )
         D_eta = scipy_sparse.csc_matrix(
-            (D_eta["elements"], (D_eta["rows"], D_eta["cols"])), shape=(N * M, N * M)
+            (deta_entries["elements"], (deta_entries["rows"], deta_entries["cols"])),
+            shape=(n_eta * n_xi, n_eta * n_xi),
         )
 
         if sparse:
             return D_xi, D_eta
         return D_xi.toarray(), D_eta.toarray()
 
-    def surface_gradient_matrices(self, stencil_size=1, *, sparse=True):
+    def surface_gradient_matrices(self, stencil_radius=1, *, sparse=True):
         """Return scalar-gradient matrices in ``(theta, phi)`` order.
 
         ``theta`` points south and ``phi`` points east. The matrices act on
         flattened cell-centred scalar values.
         """
         D_xi, D_eta = self.coordinate_derivative_matrices(
-            stencil_size=stencil_size,
+            stencil_radius=stencil_radius,
             sparse=True,
         )
 
@@ -166,9 +170,9 @@ class RegionalCSOperators:
             return D_theta, D_phi
         return D_theta.toarray(), D_phi.toarray()
 
-    def surface_gradient_operator(self, stencil_size=1):
+    def surface_gradient_operator(self, stencil_radius=1):
         """Return the scalar-to-tangential-gradient linear map."""
-        theta, phi = self.surface_gradient_matrices(stencil_size=stencil_size, sparse=True)
+        theta, phi = self.surface_gradient_matrices(stencil_radius=stencil_radius, sparse=True)
         matrix = scipy_sparse.vstack((theta, phi), format="csc")
         return as_linear_map(
             matrix,
@@ -176,12 +180,12 @@ class RegionalCSOperators:
             output_shape=(2, self.mesh.size),
         )
 
-    def surface_divergence_matrix(self, stencil_size=1, *, sparse=True):
+    def surface_divergence_matrix(self, stencil_radius=1, *, sparse=True):
         """Return the matrix mapping a tangential vector field to divergence.
 
         The returned N x 2N matrix operates on a 1D array that represents a
         vector field. The array must be of length 2N, where N is the number
-        of grid cells. The first N elements are the southward ``theta``
+        of mesh cells. The first N elements are the southward ``theta``
         components and the last N are the eastward ``phi`` components.
 
         For ``V = (V_theta, V_phi)``, the spherical components are converted
@@ -190,15 +194,14 @@ class RegionalCSOperators:
 
         Parameters
         ----------
-        stencil_size: int, optional
-            Stencil size. Default is 1, in which case derivatives will be calculated
-            with a 3-point stencil. With ``stencil_size=2``, a 5-point
-            stencil is used, and so on.
+        stencil_radius: int, optional
+            Number of neighbouring cells used on each side. The default of
+            1 gives a 3-point stencil; 2 gives a 5-point stencil, and so on.
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
         D_xi, D_eta = self.coordinate_derivative_matrices(
-            stencil_size=stencil_size,
+            stencil_radius=stencil_radius,
             sparse=True,
         )
         theta_coeff, phi_coeff, sqrt_g = self._surface_geometry
@@ -219,9 +222,9 @@ class RegionalCSOperators:
         result = scipy_sparse.hstack((theta, phi), format="csc")
         return result if sparse else result.toarray()
 
-    def surface_divergence_operator(self, stencil_size=1):
+    def surface_divergence_operator(self, stencil_radius=1):
         """Return the tangential-vector-to-divergence linear map."""
-        matrix = self.surface_divergence_matrix(stencil_size=stencil_size, sparse=True)
+        matrix = self.surface_divergence_matrix(stencil_radius=stencil_radius, sparse=True)
         return as_linear_map(
             matrix,
             input_shape=(2, self.mesh.size),
@@ -237,9 +240,9 @@ class RegionalCSOperators:
         divergence operators, keeping those two constructions geometrically
         consistent.
         """
-        grid = self.mesh
-        xi = grid.xi.reshape(-1)
-        eta = grid.eta.reshape(-1)
+        mesh = self.mesh
+        xi = mesh.xi.reshape(-1)
+        eta = mesh.eta.reshape(-1)
 
         # Rows 0 and 1 are the dual basis vectors grad(xi) and grad(eta)
         # in local Cartesian coordinates.
@@ -247,17 +250,17 @@ class RegionalCSOperators:
             dual_basis_local = cs_vectors._cartesian_to_cube_array(
                 xi,
                 eta,
-                radius=grid.radius,
+                radius=mesh.radius,
                 face=_NORTH_FACE,
             )[:, :2, :].transpose(0, 2, 1)
-            metric = cs_coordinates.surface_metric_tensor(xi, eta, radius=grid.radius)
+            metric = cs_coordinates.surface_metric_tensor(xi, eta, radius=mesh.radius)
         dual_basis = np.einsum(
             "ij,njk->nik",
-            grid.projection.local_to_geographic_matrix,
+            mesh.projection.local_to_geographic_matrix,
             dual_basis_local,
         )
-        lon = np.deg2rad(grid.lon.reshape(-1))
-        lat = np.deg2rad(grid.lat.reshape(-1))
+        lon = np.deg2rad(mesh.lon.reshape(-1))
+        lat = np.deg2rad(mesh.lat.reshape(-1))
         east = np.column_stack((-np.sin(lon), np.cos(lon), np.zeros_like(lon)))
         north = np.column_stack(
             (
@@ -281,7 +284,7 @@ class RegionalCSOperators:
         Parameters
         ----------
         values: array
-            2D array (or flattened) of the scalar field as defined on the CS grid
+            2D array (or flattened) of the scalar field defined on the CS mesh
             (dimensions must match)
         lon: array
             array of longitudes [degrees] - must have same shape as lat_
@@ -293,40 +296,40 @@ class RegionalCSOperators:
         Interpolated values of the 2D scalar field at the desired input (lon, lat)
         locations.
         """
-        grid = self.mesh
+        mesh = self.mesh
         xp = get_array_module(values, lon, lat)
         lon, lat = xp.broadcast_arrays(xp.asarray(lon), xp.asarray(lat))
         scalar_values = xp.asarray(values).reshape(-1)
-        if scalar_values.size != grid.size:
+        if scalar_values.size != mesh.size:
             raise ValueError(
-                f"values must contain {grid.size} grid values; got {scalar_values.size}"
+                f"values must contain {mesh.size} mesh values; got {scalar_values.size}"
             )
-        xi, eta = grid.projection.geographic_to_cube(lon.reshape(-1), lat.reshape(-1))
+        xi, eta = mesh.projection.geographic_to_cube(lon.reshape(-1), lat.reshape(-1))
         coordinate_tolerance = 32 * np.finfo(float).eps
         inside = (
-            (xi >= grid.xi_min - coordinate_tolerance)
-            & (xi <= grid.xi_max + coordinate_tolerance)
-            & (eta >= grid.eta_min - coordinate_tolerance)
-            & (eta <= grid.eta_max + coordinate_tolerance)
+            (xi >= mesh.xi_min - coordinate_tolerance)
+            & (xi <= mesh.xi_max + coordinate_tolerance)
+            & (eta >= mesh.eta_min - coordinate_tolerance)
+            & (eta <= mesh.eta_max + coordinate_tolerance)
         )
         # Outside values are replaced only for safe array indexing; the final
         # result retains NaN there. This also avoids dynamic boolean slices in
         # JAX-compiled interpolation.
-        xi_for_interpolation = xp.where(inside, xi, grid.xi[0, 0])
-        eta_for_interpolation = xp.where(inside, eta, grid.eta[0, 0])
+        xi_for_interpolation = xp.where(inside, xi, mesh.xi[0, 0])
+        eta_for_interpolation = xp.where(inside, eta, mesh.eta[0, 0])
         i0, i1, eta_fraction = _interpolation_axis(
             eta_for_interpolation,
-            grid.eta[0, 0],
-            grid.deta,
-            grid.n_eta,
+            mesh.eta[0, 0],
+            mesh.deta,
+            mesh.n_eta,
         )
         j0, j1, xi_fraction = _interpolation_axis(
             xi_for_interpolation,
-            grid.xi[0, 0],
-            grid.dxi,
-            grid.n_xi,
+            mesh.xi[0, 0],
+            mesh.dxi,
+            mesh.n_xi,
         )
-        field = scalar_values.reshape(grid.shape)
+        field = scalar_values.reshape(mesh.shape)
         interpolated = (
             (1 - eta_fraction) * (1 - xi_fraction) * field[i0, j0]
             + eta_fraction * (1 - xi_fraction) * field[i1, j0]

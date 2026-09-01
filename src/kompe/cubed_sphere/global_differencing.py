@@ -25,12 +25,12 @@ def global_cs_derivative_matrices(
     projection,
     cells_per_face,
     *,
-    stencil_half_width=1,
+    stencil_radius=1,
     cross_face_points=4,
 ):
     """Return the native-grid ``(d/dxi, d/deta)`` SciPy matrices."""
-    if stencil_half_width < 1:
-        raise ValueError("stencil_half_width must be at least 1")
+    if stencil_radius < 1:
+        raise ValueError("stencil_radius must be at least 1")
 
     # Coordinate round trips classify stencil points on exact cube-face grid
     # lines before constructing SciPy sparse matrices.  Keep this entire
@@ -38,66 +38,50 @@ def global_cs_derivative_matrices(
     # adds a device round trip and makes that discrete classification depend
     # on JAX's trigonometric implementation.
     with backend_context("numpy"):
-        return _build_global_cs_derivative_matrices(
-            projection,
-            cells_per_face,
-            stencil_half_width=stencil_half_width,
-            cross_face_points=cross_face_points,
+        shape = (6, cells_per_face, cells_per_face)
+        size = np.prod(shape)
+        h = cs_coordinates.face_coordinate(1, cells_per_face) - cs_coordinates.face_coordinate(
+            0, cells_per_face
+        )
+        face, i, j = map(
+            np.ravel,
+            np.meshgrid(
+                np.arange(6),
+                np.arange(cells_per_face),
+                np.arange(cells_per_face),
+                indexing="ij",
+            ),
         )
 
+        offsets = np.hstack((np.r_[-stencil_radius:0], np.r_[1 : stencil_radius + 1]))
+        offset_count = len(offsets)
+        weights = np.repeat(finite_difference_weights(offsets, order=1, h=h), size)
+        face_repeated = np.tile(face, offset_count)
+        i_repeated = np.tile(i, offset_count)
+        j_repeated = np.tile(j, offset_count)
+        rows = np.tile(np.ravel_multi_index((face, i, j), shape), offset_count)
 
-def _build_global_cs_derivative_matrices(
-    projection,
-    cells_per_face,
-    *,
-    stencil_half_width,
-    cross_face_points,
-):
-    """Build global cubed-sphere derivative matrices on NumPy."""
-    shape = (6, cells_per_face, cells_per_face)
-    size = np.prod(shape)
-    h = cs_coordinates.face_coordinate(1, cells_per_face) - cs_coordinates.face_coordinate(
-        0, cells_per_face
-    )
-    face, i, j = map(
-        np.ravel,
-        np.meshgrid(
-            np.arange(6),
-            np.arange(cells_per_face),
-            np.arange(cells_per_face),
-            indexing="ij",
-        ),
-    )
-
-    offsets = np.hstack((np.r_[-stencil_half_width:0], np.r_[1 : stencil_half_width + 1]))
-    offset_count = len(offsets)
-    weights = np.repeat(finite_difference_weights(offsets, order=1, h=h), size)
-    face_repeated = np.tile(face, offset_count)
-    i_repeated = np.tile(i, offset_count)
-    j_repeated = np.tile(j, offset_count)
-    rows = np.tile(np.ravel_multi_index((face, i, j), shape), offset_count)
-
-    dxi = _cross_face_interpolation_matrix(
-        projection,
-        face_repeated,
-        np.hstack([i + offset for offset in offsets]),
-        j_repeated,
-        cells_per_face,
-        cross_face_points,
-        rows=rows,
-        weights=weights,
-    )
-    deta = _cross_face_interpolation_matrix(
-        projection,
-        face_repeated,
-        i_repeated,
-        np.hstack([j + offset for offset in offsets]),
-        cells_per_face,
-        cross_face_points,
-        rows=rows,
-        weights=weights,
-    )
-    return dxi, deta
+        dxi = _cross_face_interpolation_matrix(
+            projection,
+            face_repeated,
+            np.hstack([i + offset for offset in offsets]),
+            j_repeated,
+            cells_per_face,
+            cross_face_points,
+            rows=rows,
+            weights=weights,
+        )
+        deta = _cross_face_interpolation_matrix(
+            projection,
+            face_repeated,
+            i_repeated,
+            np.hstack([j + offset for offset in offsets]),
+            cells_per_face,
+            cross_face_points,
+            rows=rows,
+            weights=weights,
+        )
+        return dxi, deta
 
 
 def _cross_face_interpolation_matrix(
