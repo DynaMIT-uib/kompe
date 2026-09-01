@@ -86,6 +86,50 @@ def test_positive_strength_on_zero_regularization_operator_is_explicit():
 # Explicit least-squares maps
 
 
+def test_problem_exposes_operators_with_their_mathematical_roles():
+    """Stored weighting maps are operators, not raw sqrt-weight values."""
+    problem = LeastSquaresProblem(
+        A=np.eye(2), solution_shape=2, data_shapes=2, sqrt_weights=np.array([2.0, 3.0])
+    )
+    assert isinstance(problem.data_operators[0], LinearMap)
+    assert problem.weight_operators[0].is_diagonal
+    np.testing.assert_array_equal(problem.weight_operators[0].diagonal(), [2.0, 3.0])
+    np.testing.assert_array_equal(problem.data_operator.to_matrix(), np.diag([2.0, 3.0]))
+
+
+def test_least_squares_requires_a_data_operator():
+    """An empty objective is rejected at construction."""
+    with pytest.raises(ValueError, match="At least one data operator"):
+        LeastSquaresProblem(A=[], solution_shape=2, data_shapes=[])
+
+
+def test_positive_strength_requires_a_regularization_operator():
+    """A missing regularizer must not silently disable its strength."""
+    with pytest.raises(ValueError, match="missing but has positive strength"):
+        LeastSquaresProblem(
+            A=np.eye(2),
+            solution_shape=2,
+            data_shapes=2,
+            regularization_operators=[None],
+            regularization_strengths=1.0,
+        )
+
+
+@pytest.mark.parametrize("zero_weights", [False, True])
+def test_relative_regularization_requires_a_nonzero_data_scale(zero_weights):
+    """Relative strengths cannot be normalized to an arbitrary unit scale."""
+    problem = LeastSquaresProblem(
+        A=np.eye(2) if zero_weights else np.zeros((2, 2)),
+        solution_shape=2,
+        data_shapes=2,
+        sqrt_weights=np.zeros(2) if zero_weights else None,
+        regularization_operators=np.eye(2),
+        regularization_strengths=1.0,
+    )
+    with pytest.raises(ValueError, match="nonzero weighted data operator"):
+        _ = problem.regularization_row_scales
+
+
 @pytest.mark.parametrize("complex_data", [False, True])
 def test_sparse_constrained_least_squares_map_matches_kkt_and_adjoint(complex_data):
     """Constrained analysis handles rectangular and complex RHS data."""

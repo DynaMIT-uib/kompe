@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import operator
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
@@ -15,6 +16,7 @@ from kompe.math.backend import (
     JAX_AVAILABLE,
     block_until_ready,
     get_array_module,
+    readonly_numpy_array,
     to_numpy,
 )
 
@@ -61,7 +63,7 @@ class LinearMap:
     _diagonal_array_func: Callable[[Any], Any] | None = field(default=None, repr=False)
     _normal_matrix_diag: Callable[[], np.ndarray] | None = field(default=None, repr=False)
     _backend_operands: tuple[Any, ...] = field(default=(), repr=False)
-    _is_noop: bool = field(default=False, repr=False)
+    _is_identity: bool = field(default=False, repr=False)
     _einsum_map: Any = field(default=None, repr=False, compare=False)
     _dense_tensor: Any = field(default=None, repr=False, compare=False)
     output_shape: tuple[int, ...] | None = None
@@ -99,7 +101,7 @@ class LinearMap:
         object.__setattr__(self, "_diagonal_array_func", diagonal)
         object.__setattr__(self, "_normal_matrix_diag", normal_matrix_diag)
         object.__setattr__(self, "_backend_operands", tuple(backend_operands))
-        object.__setattr__(self, "_is_noop", False)
+        object.__setattr__(self, "_is_identity", False)
         object.__setattr__(self, "_einsum_map", None)
         object.__setattr__(self, "_dense_tensor", None)
         object.__setattr__(self, "output_shape", output_shape)
@@ -254,7 +256,10 @@ class LinearMap:
         )
 
     def diagonal(self, *, backend: ArrayBackend | None = None) -> Any:
-        """Return diagonal scale values for a diagonal map."""
+        """Return scale values from a known diagonal representation.
+
+        This never materializes a dense matrix to discover structure.
+        """
         xp = _array_module_for_backend(backend)
         return block_until_ready(self._diagonal_array(xp))
 
@@ -263,14 +268,10 @@ class LinearMap:
         xp = self.array_module() if xp is None else xp
         if self._diagonal_array_func is not None:
             return self._diagonal_array_func(xp)
-        if self.shape[0] != self.shape[1]:
-            raise ValueError("Diagonal values require a square operator.")
-
-        dense = np.asarray(self.to_matrix(backend="numpy"))
-        diagonal = np.diag(dense)
-        if not np.allclose(dense, np.diag(diagonal), rtol=0.0, atol=0.0):
-            raise ValueError("Operator is not diagonal.")
-        return xp.asarray(diagonal)
+        raise ValueError(
+            "This map has no known diagonal representation. "
+            "Use diagonal_linear_map to declare diagonal structure."
+        )
 
     def normal_matrix_diag(self) -> np.ndarray:
         """Compute ``diag(A* A)`` for this map."""
@@ -303,11 +304,11 @@ class LinearMap:
             raise ValueError(
                 f"Dimension mismatch for composition: {self.shape} @ {other_map.shape}"
             )
-        if self._is_noop:
+        if self._is_identity:
             return as_linear_map(
                 other_map, input_shape=other_map.input_shape, output_shape=self.output_shape
             )
-        if other_map._is_noop:
+        if other_map._is_identity:
             return as_linear_map(
                 self, input_shape=other_map.input_shape, output_shape=self.output_shape
             )
@@ -829,7 +830,7 @@ def identity_linear_map(shape: int | tuple[int, ...], *, dtype: Any = np.float64
         output_shape=value_shape,
         input_shape=value_shape,
     )
-    object.__setattr__(identity, "_is_noop", True)
+    object.__setattr__(identity, "_is_identity", True)
     return identity
 
 
@@ -920,10 +921,10 @@ def pointwise_matrix_linear_map(matrix: Any) -> LinearMap:
 
 def _normalize_take_selection(input_shape, indices, axis):
     """Return validated shapes, axis, and integer selection indices."""
-    input_shape = tuple(int(dim) for dim in input_shape)
+    input_shape = tuple(operator.index(dim) for dim in input_shape)
     if not input_shape:
         raise ValueError("input_shape must have at least one axis.")
-    axis = int(axis)
+    axis = operator.index(axis)
     if axis < 0:
         axis += len(input_shape)
     if axis < 0 or axis >= len(input_shape):
@@ -934,37 +935,50 @@ def _normalize_take_selection(input_shape, indices, axis):
         if index_array.shape != (input_shape[axis],):
             raise ValueError("Boolean indices must match the selected input axis length.")
         index_array = np.flatnonzero(index_array)
-    index_array = np.asarray(index_array, dtype=int).reshape(-1)
+    if index_array.ndim > 1:
+        raise ValueError("indices must be a scalar, a one-dimensional array, or an axis mask.")
+    if index_array.size and not np.issubdtype(index_array.dtype, np.integer):
+        raise TypeError("indices must contain integers.")
     if np.any(index_array < 0) or np.any(index_array >= input_shape[axis]):
         raise IndexError("take_linear_map indices are outside input_shape.")
 
     output_shape = list(input_shape)
-    output_shape[axis] = int(index_array.size)
+    if index_array.ndim == 0:
+        selection = int(index_array)
+        del output_shape[axis]
+    else:
+        selection = readonly_numpy_array(index_array, dtype=np.intp)
+        output_shape[axis] = int(index_array.size)
     output_shape = tuple(output_shape)
-    return input_shape, output_shape, index_array, axis
+    return input_shape, output_shape, selection, axis
 
 
 def take_linear_map(
     input_shape: tuple[int, ...], indices: Any, *, axis: int = -1, dtype: Any = np.float64
 ) -> LinearMap:
-    """Return a map selecting ``indices`` along one shaped axis."""
-    input_shape, output_shape, index_array, axis = _normalize_take_selection(
+    """Select values along one shaped axis without a dense matrix.
+
+    A scalar index removes the selected axis; an index array retains it.
+    Scalar selections use basic slicing. Array selections may repeat
+    indices, in which case the adjoint adds their contributions.
+    """
+    input_shape, output_shape, selection, axis = _normalize_take_selection(
         input_shape, indices, axis
     )
     input_size = int(math.prod(input_shape))
     output_size = int(math.prod(output_shape))
     dtype = np.dtype(dtype)
+    scalar_selection = isinstance(selection, int)
+    prefix = (slice(None),) * axis
+    scalar_indexer = prefix + (selection,) if scalar_selection else None
 
-    def _indexer(xp: Any, *, batched: bool = False):
-        idx = xp.asarray(index_array)
-        indexer = [slice(None)] * (len(input_shape) + int(batched))
-        indexer[axis] = idx
-        return tuple(indexer)
+    def _indexer(xp: Any):
+        return scalar_indexer if scalar_selection else prefix + (xp.asarray(selection),)
 
     def matvec(vec: Any) -> Any:
         xp = get_array_module(vec)
         values = xp.asarray(vec).reshape(input_shape)
-        return xp.take(values, xp.asarray(index_array), axis=axis).reshape(-1)
+        return values[_indexer(xp)].reshape(-1)
 
     def rmatvec(vec: Any) -> Any:
         xp = get_array_module(vec)
@@ -972,36 +986,51 @@ def take_linear_map(
         result = xp.zeros(input_shape, dtype=values.dtype)
         indexer = _indexer(xp)
         if hasattr(result, "at"):
-            return result.at[indexer].add(values).reshape(-1)
-        np.add.at(result, indexer, values)
+            update = result.at[indexer]
+            return (update.set(values) if scalar_selection else update.add(values)).reshape(-1)
+        if scalar_selection:
+            result[indexer] = values
+        else:
+            np.add.at(result, indexer, values)
         return result.reshape(-1)
 
     def matmat(block: Any) -> Any:
         xp = get_array_module(block)
-        values = xp.asarray(block).reshape(input_shape + (-1,))
-        selected = xp.take(values, xp.asarray(index_array), axis=axis)
-        return selected.reshape(output_size, -1)
+        values = xp.asarray(block)
+        if values.ndim == 1:
+            return matvec(values)
+        values = values.reshape(input_shape + (-1,))
+        selected = values[_indexer(xp)]
+        return selected.reshape(output_size, values.shape[-1])
 
     def rmatmat(block: Any) -> Any:
         xp = get_array_module(block)
-        values = xp.asarray(block).reshape(output_shape + (-1,))
+        values = xp.asarray(block)
+        if values.ndim == 1:
+            return rmatvec(values)
+        values = values.reshape(output_shape + (values.shape[-1],))
         result = xp.zeros(input_shape + (values.shape[-1],), dtype=values.dtype)
-        indexer = _indexer(xp, batched=True)
+        indexer = _indexer(xp)
         if hasattr(result, "at"):
-            return result.at[indexer].add(values).reshape(input_size, -1)
-        np.add.at(result, indexer, values)
+            update = result.at[indexer]
+            result = update.set(values) if scalar_selection else update.add(values)
+        elif scalar_selection:
+            result[indexer] = values
+        else:
+            np.add.at(result, indexer, values)
         return result.reshape(input_size, -1)
 
     def normal_matrix_diag() -> np.ndarray:
         diagonal = np.zeros(input_shape, dtype=dtype)
-        indexer = [slice(None)] * len(input_shape)
-        indexer[axis] = index_array
-        np.add.at(diagonal, tuple(indexer), 1.0)
+        if scalar_selection:
+            diagonal[scalar_indexer] = 1.0
+        else:
+            np.add.at(diagonal, _indexer(np), 1.0)
         return diagonal.reshape(-1)
 
     def dense_array(xp: Any) -> Any:
         input_indices = xp.arange(input_size).reshape(input_shape)
-        selected = xp.take(input_indices, xp.asarray(index_array), axis=axis).reshape(-1)
+        selected = input_indices[_indexer(xp)].reshape(-1)
         dense = xp.zeros((output_size, input_size), dtype=dtype)
         rows = xp.arange(output_size)
         if hasattr(dense, "at"):
@@ -1038,9 +1067,9 @@ def is_identity_linear_map(
         return False
     if linear_map.input_shape != linear_map.output_shape:
         return False
-    if getattr(linear_map, "_is_noop", False):
+    if linear_map._is_identity:
         return True
-    if getattr(linear_map, "_diagonal_array_func", None) is None:
+    if not linear_map.is_diagonal:
         return False
     diagonal = np.asarray(linear_map.diagonal(backend="numpy"))
     return bool(np.array_equal(diagonal, np.ones_like(diagonal)))
@@ -1420,7 +1449,7 @@ def as_linear_map(
             output_shape=out_shape,
             input_shape=in_shape,
         )
-        object.__setattr__(relabeled, "_is_noop", op._is_noop)
+        object.__setattr__(relabeled, "_is_identity", op._is_identity)
         object.__setattr__(relabeled, "_einsum_map", op._einsum_map)
         object.__setattr__(relabeled, "_dense_tensor", op._dense_tensor)
         # The flat matrix is unchanged by shaped metadata. Share any dense

@@ -1,8 +1,28 @@
-"""Interfaces for cell-based meshes embedded in spherical surfaces."""
+"""Spherical cell geometry and the structured surface mesh interface."""
 
 from abc import ABC, abstractmethod
 
 import numpy as np
+
+from kompe.math.backend import get_array_module
+
+
+def spherical_triangle_solid_angle(first, second, third):
+    """Return unsigned solid angles of unit-vector triangles in steradians.
+
+    Vertices have shape ``(..., 3)`` and are unit Cartesian directions.
+    Leading axes broadcast. Multiply by radius squared for cell areas.
+    """
+    xp = get_array_module(first, second, third)
+    first, second, third = map(xp.asarray, (first, second, third))
+    numerator = xp.abs(xp.einsum("...i,...i->...", first, xp.cross(second, third)))
+    denominator = (
+        1.0
+        + xp.einsum("...i,...i->...", first, second)
+        + xp.einsum("...i,...i->...", second, third)
+        + xp.einsum("...i,...i->...", third, first)
+    )
+    return 2.0 * xp.arctan2(numerator, denominator)
 
 
 class StructuredSurfaceMesh(ABC):
@@ -70,4 +90,4 @@ class StructuredSurfaceMesh(ABC):
             raise ValueError("cell_areas must be strictly positive.")
 
 
-__all__ = ["StructuredSurfaceMesh"]
+__all__ = ["StructuredSurfaceMesh", "spherical_triangle_solid_angle"]

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from kompe.cubed_sphere import cs_coordinates, cs_vectors
-from kompe.cubed_sphere.geometry_linalg import inverse_3x3
 from kompe.math.backend import get_array_module
+from kompe.math.small_matrices import inverse_3x3
 
 
 class GlobalCSProjection:

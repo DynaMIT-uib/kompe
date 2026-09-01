@@ -6,7 +6,38 @@ import os
 import subprocess
 import sys
 
+import numpy as np
 import pytest
+
+from kompe.math import readonly_numpy_array
+
+
+def test_readonly_numpy_array_owns_contiguous_metadata():
+    """Cached metadata cannot be changed through its original array."""
+    source = np.arange(12).reshape(3, 4).T
+    owned = readonly_numpy_array(source, dtype=float)
+    np.testing.assert_array_equal(owned, source)
+    source[0, 0] = -1
+    assert owned[0, 0] == 0.0
+    assert owned.dtype == np.dtype(float)
+    assert owned.flags.c_contiguous
+    assert not owned.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        owned[0, 0] = 1.0
+
+
+@pytest.mark.requires_jax
+def test_readonly_numpy_array_is_an_explicit_host_boundary():
+    """Metadata stays on NumPy even when the numerical backend is JAX."""
+    import jax.numpy as jnp
+
+    from kompe.math import backend_context
+
+    with backend_context("jax"):
+        owned = readonly_numpy_array(jnp.arange(3.0))
+    assert isinstance(owned, np.ndarray)
+    assert not owned.flags.writeable
+    np.testing.assert_array_equal(owned, np.arange(3.0))
 
 
 def _run_python(source, *, env=None):

@@ -1,4 +1,4 @@
-"""Spherical-harmonic normalization helpers."""
+"""Schmidt quasi-normalization factors for spherical harmonics."""
 
 import math
 

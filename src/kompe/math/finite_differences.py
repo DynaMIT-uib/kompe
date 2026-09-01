@@ -1,4 +1,4 @@
-"""Finite-difference weights used by regional cubed-sphere operators."""
+"""Finite-difference stencil weights for CPU operator construction."""
 
 from math import factorial
 

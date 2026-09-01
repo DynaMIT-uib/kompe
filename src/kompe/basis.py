@@ -4,80 +4,14 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from kompe.math import LinearMap, as_linear_map, diagonal_linear_map, take_linear_map
-from kompe.math.backend import get_array_module
-
-
-def _owned_readonly_array(values, *, dtype=None):
-    """Return an owned immutable NumPy metadata array."""
-    array = np.array(values, dtype=dtype, copy=True)
-    array.setflags(write=False)
-    return array
+from kompe.math import as_linear_map, diagonal_linear_map, take_linear_map
+from kompe.math.backend import get_array_module, readonly_numpy_array
 
 
 def _backend_stack(values, axis=0):
     """Stack arrays on their active backend."""
     xp = get_array_module(*values)
     return xp.stack([xp.asarray(value) for value in values], axis=axis)
-
-
-def _helmholtz_component_operator(size, component):
-    """Return a structured selector for one Helmholtz potential."""
-    component = int(component)
-    if component not in (0, 1):
-        raise ValueError("Helmholtz component must be 0 or 1.")
-    size = int(size)
-
-    def matvec(vec):
-        xp = get_array_module(vec)
-        values = xp.asarray(vec).reshape(2, size)
-        return values[component]
-
-    def rmatvec(vec):
-        xp = get_array_module(vec)
-        values = xp.asarray(vec).reshape(size)
-        zeros = xp.zeros_like(values)
-        parts = [values, zeros] if component == 0 else [zeros, values]
-        return xp.stack(parts, axis=0).reshape(2 * size)
-
-    def matmat(block):
-        xp = get_array_module(block)
-        values = xp.asarray(block)
-        if values.ndim == 1:
-            return matvec(values)
-        return values.reshape(2, size, -1)[component].reshape(size, -1)
-
-    def rmatmat(block):
-        xp = get_array_module(block)
-        values = xp.asarray(block).reshape(size, -1)
-        zeros = xp.zeros_like(values)
-        parts = [values, zeros] if component == 0 else [zeros, values]
-        return xp.stack(parts, axis=0).reshape(2 * size, -1)
-
-    def dense_array(xp):
-        identity = xp.eye(size)
-        zeros = xp.zeros_like(identity)
-        parts = [identity, zeros] if component == 0 else [zeros, identity]
-        return xp.concatenate(parts, axis=1)
-
-    def normal_matrix_diag():
-        diagonal = np.zeros(2 * size)
-        start = component * size
-        diagonal[start : start + size] = 1.0
-        return diagonal
-
-    return LinearMap(
-        shape=(size, 2 * size),
-        dtype=np.float64,
-        matvec=matvec,
-        rmatvec=rmatvec,
-        matmat=matmat,
-        rmatmat=rmatmat,
-        dense_array=dense_array,
-        normal_matrix_diag=normal_matrix_diag,
-        input_shape=(2, size),
-        output_shape=(size,),
-    )
 
 
 class ScalarBasis(ABC):
@@ -93,34 +27,21 @@ class ScalarBasis(ABC):
     @property
     def signature(self):
         """Return a stable cache signature for this basis."""
-        parts = [type(self).__module__, type(self).__qualname__, self.kind]
-        for name in (
-            "max_degree",
-            "max_order",
-            "min_degree",
-            "mean_free",
-            "legendre_method",
-            "schmidt_quasi_normalized",
-            "cells_per_face",
-        ):
-            if hasattr(self, name):
-                parts.append((name, getattr(self, name)))
-        return tuple(parts)
+        return (type(self).__module__, type(self).__qualname__, self.coefficient_space_signature)
 
     @property
+    @abstractmethod
     def coefficient_space_signature(self):
         """Return a signature for coefficient-space compatibility.
 
         This describes coefficient layout and scaling, not incidental
         implementation choices.
         """
-        return (
-            type(self).__module__,
-            type(self).__qualname__,
-            self.kind,
-            tuple(self.index_names),
-            self.index_length,
-        )
+
+    @property
+    def root_basis(self):
+        """Return the underlying basis, before any coefficient subsets."""
+        return self
 
     def coefficients_are_compatible_with(self, other):
         """Return whether coefficient vectors share operators."""
@@ -248,21 +169,22 @@ class SurfaceDifferentialBasis(ScalarBasis):
 
     def helmholtz_synthesis_operator(self, grid):
         """Return the Helmholtz-potential-to-vector operator."""
-        curl_free = self.surface_gradient_operator(grid) @ _helmholtz_component_operator(
-            self.index_length, 0
+        curl_free = (
+            self.surface_gradient_operator(grid) @ self.helmholtz_curl_free_potential_operator()
         )
-        divergence_free = self.rhat_cross_gradient_operator(grid) @ _helmholtz_component_operator(
-            self.index_length, 1
+        divergence_free = (
+            self.rhat_cross_gradient_operator(grid)
+            @ self.helmholtz_divergence_free_potential_operator()
         )
         return -curl_free + divergence_free
 
     def helmholtz_curl_free_potential_operator(self):
         """Return the Helmholtz-to-curl-free-potential operator."""
-        return _helmholtz_component_operator(self.index_length, 0)
+        return take_linear_map((2, self.index_length), 0, axis=0)
 
     def helmholtz_divergence_free_potential_operator(self):
         """Return the Helmholtz-to-div-free-potential operator."""
-        return _helmholtz_component_operator(self.index_length, 1)
+        return take_linear_map((2, self.index_length), 1, axis=0)
 
     def mean_free_surface_poisson_operator(self, r=1.0):
         """Return the gauge-fixed inverse surface Laplacian.
@@ -292,14 +214,13 @@ class SurfaceDifferentialBasis(ScalarBasis):
 
     def helmholtz_surface_divergence_operator(self, r=1.0):
         """Return the Helmholtz-to-surface-divergence operator."""
-        return -self.surface_laplacian_operator(r) @ _helmholtz_component_operator(
-            self.index_length, 0
-        )
+        return -self.surface_laplacian_operator(r) @ self.helmholtz_curl_free_potential_operator()
 
     def helmholtz_radial_curl_operator(self, r=1.0):
         """Return the Helmholtz-coefficient to radial-curl operator."""
-        return self.surface_laplacian_operator(r) @ _helmholtz_component_operator(
-            self.index_length, 1
+        return (
+            self.surface_laplacian_operator(r)
+            @ self.helmholtz_divergence_free_potential_operator()
         )
 
 
@@ -321,7 +242,7 @@ class BasisSubset(SurfaceDifferentialBasis):
 
         parent_basis.validate_metadata()
         self.parent_basis = parent_basis
-        self._parent_coefficient_indices = _owned_readonly_array(
+        self._parent_coefficient_indices = readonly_numpy_array(
             self._normalize_coefficient_indices(parent_basis, coefficient_indices), dtype=int
         )
         self._subset_name = str(subset_name)
@@ -387,10 +308,10 @@ class BasisSubset(SurfaceDifferentialBasis):
         for values in parent_basis.index_arrays:
             array = np.asarray(values)
             if array.shape == (parent_basis.index_length,):
-                arrays.append(_owned_readonly_array(array[coefficient_indices]))
+                arrays.append(readonly_numpy_array(array[coefficient_indices]))
             elif array.size == parent_basis.index_length:
                 arrays.append(
-                    _owned_readonly_array(
+                    readonly_numpy_array(
                         array.reshape(parent_basis.index_length)[coefficient_indices]
                     )
                 )
@@ -427,10 +348,7 @@ class BasisSubset(SurfaceDifferentialBasis):
     @property
     def root_basis(self):
         """Return the first ancestor that is not a subset."""
-        basis = self.parent_basis
-        while isinstance(basis, BasisSubset):
-            basis = basis.parent_basis
-        return basis
+        return self.parent_basis.root_basis
 
     def _slice_evaluation(self, result):
         """Slice parent evaluation columns into this subset."""

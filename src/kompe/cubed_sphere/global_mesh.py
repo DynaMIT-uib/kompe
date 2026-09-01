@@ -7,18 +7,17 @@ from functools import cached_property
 
 import numpy as np
 
-from kompe.basis import _owned_readonly_array
 from kompe.cubed_sphere.cs_coordinates import (
     cube_to_cartesian,
     cube_to_spherical,
     face_coordinate,
     metric_tensor,
 )
-from kompe.cubed_sphere.geometry_linalg import determinant_3x3
 from kompe.cubed_sphere.global_projection import GlobalCSProjection
 from kompe.grid import SphericalGrid
-from kompe.math.backend import backend_context
-from kompe.mesh import StructuredSurfaceMesh
+from kompe.math.backend import backend_context, readonly_numpy_array
+from kompe.math.small_matrices import determinant_3x3
+from kompe.mesh import StructuredSurfaceMesh, spherical_triangle_solid_angle
 
 
 @dataclass(frozen=True, init=False)
@@ -83,7 +82,7 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             "sqrt_detg",
             "_cell_areas",
         ):
-            object.__setattr__(self, name, _owned_readonly_array(getattr(self, name)))
+            object.__setattr__(self, name, readonly_numpy_array(getattr(self, name)))
         self.validate_mesh_metadata()
 
     def __repr__(self):
@@ -135,18 +134,6 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             indexing="ij",
         )
 
-    @staticmethod
-    def spherical_triangle_area(a, b, c):
-        """Return oriented unit-sphere triangle area magnitude."""
-        numerator = np.einsum("ij,ij->i", a, np.cross(b, c))
-        denominator = (
-            1.0
-            + np.einsum("ij,ij->i", a, b)
-            + np.einsum("ij,ij->i", b, c)
-            + np.einsum("ij,ij->i", c, a)
-        )
-        return np.abs(2.0 * np.arctan2(numerator, denominator))
-
     @classmethod
     def _compute_cell_areas(cls, cells_per_face):
         """Return exact spherical CS cell areas."""
@@ -167,9 +154,9 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             vector = np.stack([x, y, z], axis=1)
             vectors.append(vector / np.linalg.norm(vector, axis=1).reshape((-1, 1)))
 
-        return cls.spherical_triangle_area(
+        return spherical_triangle_solid_angle(
             vectors[0], vectors[1], vectors[2]
-        ) + cls.spherical_triangle_area(vectors[0], vectors[2], vectors[3])
+        ) + spherical_triangle_solid_angle(vectors[0], vectors[2], vectors[3])
 
 
 __all__ = ["GlobalCSMesh"]

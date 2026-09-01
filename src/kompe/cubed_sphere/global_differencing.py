@@ -7,8 +7,8 @@ from scipy.sparse import coo_matrix
 from scipy.special import binom
 
 from kompe.cubed_sphere import cs_coordinates
-from kompe.cubed_sphere.finite_differences import finite_difference_weights
 from kompe.math.backend import backend_context
+from kompe.math.finite_differences import finite_difference_weights
 
 
 def _shift_rows_into_bounds(values, lower, upper):

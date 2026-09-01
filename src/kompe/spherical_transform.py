@@ -13,7 +13,7 @@ from kompe.basis import SurfaceDifferentialBasis
 from kompe.cache import BoundedCache
 from kompe.grid import SphericalGrid
 from kompe.math import array_fingerprint
-from kompe.math.backend import get_array_module
+from kompe.math.backend import get_array_module, readonly_numpy_array
 from kompe.math.least_squares_problem import LeastSquaresProblem
 from kompe.math.least_squares_solver import (
     LeastSquaresSolver,
@@ -27,7 +27,7 @@ from kompe.math.linear_map import (
 )
 from kompe.math.pseudoinverse import weighted_tensor_pinv
 
-_LEAST_SQUARES_CACHE_VERSION = 2
+_LEAST_SQUARES_CACHE_VERSION = 3
 _WEIGHTED_PRODUCT_WORK_BYTES = 512 * 1024**2
 
 
@@ -80,13 +80,6 @@ def resolve_sqrt_weights(grid, sqrt_weights=None, area_weighted=False, vector=Fa
     weights = grid_sqrt_area_weights(grid)
     xp = get_array_module(weights)
     return xp.tile(weights, (2, 1)) if vector else weights
-
-
-def _owned_explicit_weights(values):
-    """Own weights so cached analysis cannot be mutated externally."""
-    owned = np.array(values, copy=True, order="C")
-    owned.setflags(write=False)
-    return owned
 
 
 def _helmholtz_squared_weights(sqrt_weights, grid_size):
@@ -274,7 +267,6 @@ class SphericalTransform:
             raise TypeError("SphericalTransform basis must implement SurfaceDifferentialBasis.")
         if not isinstance(grid, SphericalGrid):
             raise TypeError("SphericalTransform grid must be a SphericalGrid.")
-        basis.validate_metadata()
         self.basis = basis
         self.grid = grid
         self.explicit_sqrt_weights = sqrt_weights is not None
@@ -303,8 +295,7 @@ class SphericalTransform:
         """Return this transform bound to a coefficient basis on the same grid."""
         if not isinstance(basis, SurfaceDifferentialBasis):
             raise TypeError("basis must implement SurfaceDifferentialBasis.")
-        basis.validate_metadata()
-        if self.basis.coefficients_are_compatible_with(basis):
+        if self.basis.signature == basis.signature:
             return self
         cache_key = basis.signature
 
@@ -349,14 +340,13 @@ class SphericalTransform:
 
     def _operator_cache(self):
         """Return the basis's persistent operator cache."""
-        basis = getattr(self.basis, "root_basis", self.basis)
-        return getattr(basis, "operator_cache", None)
+        return getattr(self.basis.root_basis, "operator_cache", None)
 
     def _data_normal_matrix_builder(self, field_type):
         """Return a memory-bounded SH normal-matrix builder."""
         from kompe.spherical_harmonics.sh_basis import SHBasis
 
-        root_basis = getattr(self.basis, "root_basis", self.basis)
+        root_basis = self.basis.root_basis
         if get_array_module() is not np or not isinstance(root_basis, SHBasis):
             return None
         if field_type == "scalar":
@@ -973,7 +963,7 @@ class SphericalTransform:
                 analysis_basis,
                 input_grid,
                 sqrt_weights=(
-                    None if sqrt_weights is None else _owned_explicit_weights(sqrt_weights)
+                    None if sqrt_weights is None else readonly_numpy_array(sqrt_weights)
                 ),
                 reg_lambda=reg_lambda,
                 tolerance=tolerance,

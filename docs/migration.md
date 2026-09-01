@@ -1,6 +1,40 @@
 # Consumer migration
 
+## Function locations
+
+- The standalone `kompe.mesh.spherical_triangle_solid_angle` replaces
+  `GlobalCSMesh.spherical_triangle_area`. Inputs are unit Cartesian vertices,
+  with broadcast leading axes; results are unsigned solid angles in steradians.
+- Import `finite_difference_weights`, `determinant_3x3`, and `inverse_3x3`
+  from `kompe.math`. Their implementations are in `math.finite_differences`
+  and `math.small_matrices`, not `cubed_sphere`.
+- Schmidt normalization factors moved from
+  `spherical_harmonics.coefficients` to `spherical_harmonics.normalization`.
+- The private basis helper `_owned_readonly_array` is now
+  `kompe.math.readonly_numpy_array`; it owns a read-only contiguous CPU copy.
+
 ## Kompe operator names
+
+`LeastSquaresProblem.A` is now `data_operators`; its former `sqrt_weights`
+attribute is `weight_operators`, because it stores maps rather than the raw
+constructor weights. The constructor keywords `A` and `sqrt_weights` are
+unchanged. Use `len(problem.data_operators)` or
+`len(problem.regularization_operators)` instead of stored term counts.
+
+`LinearMap.diagonal()` requires declared diagonal structure. It no longer
+materializes an unknown operator to test whether its off-diagonal entries
+happen to be zero. Use `diagonal_linear_map` when constructing a diagonal map.
+
+`take_linear_map(shape, index, axis=...)` removes the selected axis when
+`index` is a scalar integer; use `[index]` to retain a length-one axis.
+Index arrays and axis masks retain the axis, and repeated indices add in the
+adjoint. Indices must be nonnegative integers: floats are no longer silently
+truncated. Maps own their index metadata, so later caller edits cannot change
+the selection. Helmholtz component operators now use this same primitive.
+
+Custom `ScalarBasis` implementations must define `coefficient_space_signature`.
+Override `signature` as well when evaluation choices affect cached arrays
+without changing the coefficient layout.
 
 `LinearMap` construction now uses the public operation names `matvec`,
 `rmatvec`, `matmat`, and `rmatmat` instead of private field keywords.

@@ -74,6 +74,17 @@ def test_transform_with_basis_reuses_compatible_and_cached_transforms():
         transform.with_basis(object())
 
 
+def test_with_basis_honors_an_explicit_evaluation_algorithm():
+    """A compatible coefficient layout must not erase an algorithm choice."""
+    transform = SphericalTransform(SHBasis(3, 2), _regular_grid())
+    scipy_basis = SHBasis(3, 2, legendre_method="scipy")
+    rebound = transform.with_basis(scipy_basis)
+    assert rebound is not transform
+    assert rebound.basis is scipy_basis
+    assert rebound is transform.with_basis(scipy_basis)
+    np.testing.assert_allclose(rebound.scalar_synthesis_array, transform.scalar_synthesis_array)
+
+
 def test_explicit_empty_solver_name_is_not_treated_as_default():
     """An invalid explicit solver selection fails visibly."""
     basis = SHBasis(3, 2, mean_free=True)
@@ -453,8 +464,8 @@ def test_spherical_transform_least_squares_use_operator_properties():
     scalar_problem = transform.scalar_least_squares_problem
     helmholtz_problem = transform.helmholtz_least_squares_problem
 
-    assert scalar_problem.A[0] is transform.scalar_synthesis_operator
-    assert helmholtz_problem.A[0] is transform.helmholtz_synthesis_operator
+    assert scalar_problem.data_operators[0] is transform.scalar_synthesis_operator
+    assert helmholtz_problem.data_operators[0] is transform.helmholtz_synthesis_operator
     assert "scalar_synthesis_array" not in transform.__dict__
     assert "helmholtz_synthesis_array" not in transform.__dict__
 

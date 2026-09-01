@@ -166,6 +166,16 @@ def to_numpy(array: Any) -> Any:
     return _np.asarray(array)
 
 
+def readonly_numpy_array(values: Any, *, dtype=None) -> _np.ndarray:
+    """Own a read-only CPU copy of metadata or cached analysis weights.
+
+    This is an explicit host boundary, not an array-backend choice.
+    """
+    array = _np.array(values, dtype=dtype, copy=True, order="C")
+    array.setflags(write=False)
+    return array
+
+
 __all__ = [
     "JAX_AVAILABLE",
     "backend_context",
@@ -173,6 +183,7 @@ __all__ = [
     "get_array_module",
     "get_backend",
     "jax_enabled",
+    "readonly_numpy_array",
     "set_backend",
     "synchronize_linalg_result",
     "to_numpy",

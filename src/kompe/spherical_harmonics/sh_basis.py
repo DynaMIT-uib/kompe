@@ -1,30 +1,15 @@
 """Spherical Harmonic Basis Class."""
 
-import math
-
 import numpy as np
-from scipy.special import assoc_legendre_p_all
+from scipy.special import sph_legendre_p_all
 
-from kompe.basis import BasisSubset, SurfaceDifferentialBasis, _owned_readonly_array
+from kompe.basis import BasisSubset, SurfaceDifferentialBasis
 from kompe.cache import BoundedCache
 from kompe.math import as_linear_map, diagonal_linear_map
-from kompe.math.backend import get_array_module, jax_enabled, to_numpy
-from kompe.spherical_harmonics.coefficients import schmidt_quasi_normalization_factors
+from kompe.math.backend import get_array_module, jax_enabled, readonly_numpy_array, to_numpy
+from kompe.spherical_harmonics.normalization import schmidt_quasi_normalization_factors
 
-_EVALUATION_CACHE_VERSION = 1
-
-
-def _double_factorial(n):
-    """Double factorial that correctly handles the n=-1 case."""
-    if n < -1:
-        # This case is not expected, but defined for completeness.
-        raise ValueError("Double factorial is not defined for n < -1 in this context.")
-    if n == -1 or n == 0:
-        return 1.0
-    result = 1.0
-    for i in range(n, 0, -2):
-        result *= i
-    return result
+_EVALUATION_CACHE_VERSION = 2
 
 
 def _normalized_degree_limits(max_degree, max_order):
@@ -124,7 +109,14 @@ class SHBasis(SurfaceDifferentialBasis):
         self._init_normalization(schmidt_quasi_normalized)
 
         if self.legendre_method == "scipy":
-            self._compute_scipy_scaling_factors()
+            n, m = np.asarray(self.index_pairs).T
+            # Convert SciPy's spherical normalization and Condon--Shortley
+            # phase to the unnormalized Langel recurrence used internally.
+            self.scipy_scaling_factors = (
+                (-1.0) ** m
+                * np.sqrt(4.0 * np.pi * np.where(m == 0, 1.0, 2.0) / (2 * n + 1))
+                / self._schmidt_quasi_factors
+            )
 
         self.kind = "SH"
         self.index_names = ("n", "m")
@@ -170,24 +162,24 @@ class SHBasis(SurfaceDifferentialBasis):
         )
         cosine_indices = np.asarray(self.cosine_index_pairs, dtype=int).reshape(-1, 2)
         sine_indices = np.asarray(self.sine_index_pairs, dtype=int).reshape(-1, 2)
-        self.cosine_degree = _owned_readonly_array(cosine_indices[:, 0].reshape(1, -1))
-        self.cosine_order = _owned_readonly_array(cosine_indices[:, 1].reshape(1, -1))
-        self.sine_degree = _owned_readonly_array(sine_indices[:, 0].reshape(1, -1))
-        self.sine_order = _owned_readonly_array(sine_indices[:, 1].reshape(1, -1))
+        self.cosine_degree = readonly_numpy_array(cosine_indices[:, 0].reshape(1, -1))
+        self.cosine_order = readonly_numpy_array(cosine_indices[:, 1].reshape(1, -1))
+        self.sine_degree = readonly_numpy_array(sine_indices[:, 0].reshape(1, -1))
+        self.sine_order = readonly_numpy_array(sine_indices[:, 1].reshape(1, -1))
 
         cosine_pairs = set(self.cosine_index_pairs)
         sine_pairs = set(self.sine_index_pairs)
-        self.cosine_filter = _owned_readonly_array(
+        self.cosine_filter = readonly_numpy_array(
             [pair in cosine_pairs for pair in self.index_pairs], dtype=bool
         )
-        self.sine_filter = _owned_readonly_array(
+        self.sine_filter = readonly_numpy_array(
             [pair in sine_pairs for pair in self.index_pairs], dtype=bool
         )
 
-        self.n = _owned_readonly_array(
+        self.n = readonly_numpy_array(
             np.hstack((self.cosine_degree.reshape(-1), self.sine_degree.reshape(-1)))
         )
-        self.m = _owned_readonly_array(
+        self.m = readonly_numpy_array(
             np.hstack((self.cosine_order.reshape(-1), self.sine_order.reshape(-1)))
         )
 
@@ -195,7 +187,7 @@ class SHBasis(SurfaceDifferentialBasis):
         """Build immutable coefficient normalization factors."""
         self.schmidt_quasi_normalized = schmidt_quasi_normalized
         s_matrix = schmidt_quasi_normalization_factors(self.max_degree, self.max_order)
-        self._schmidt_quasi_factors = _owned_readonly_array(
+        self._schmidt_quasi_factors = readonly_numpy_array(
             [s_matrix[n, m] for n, m in self.index_pairs]
         )
         factors = (
@@ -203,7 +195,12 @@ class SHBasis(SurfaceDifferentialBasis):
             if self.schmidt_quasi_normalized
             else np.ones(len(self.index_pairs))
         )
-        self.schmidt_factors = _owned_readonly_array(factors)
+        self.schmidt_factors = readonly_numpy_array(factors)
+
+    @property
+    def signature(self):
+        """Distinguish evaluation algorithms for the same coefficients."""
+        return super().signature + (self.legendre_method,)
 
     @property
     def coefficient_space_signature(self):
@@ -342,45 +339,20 @@ class SHBasis(SurfaceDifferentialBasis):
         sibling._related_basis_cache[bool(self.mean_free)] = self
         return sibling
 
-    def _compute_scipy_scaling_factors(self):
-        """Calculate the analytical scaling factor.
-
-        Such that P_internal = F * P_scipy.
-        F(n, m) = (n - m)! / (2n - 1)!!
-        """
-        factors = np.ones(len(self.index_pairs), dtype=np.float64)
-        for i, (n, m) in enumerate(self.index_pairs):
-            denominator = _double_factorial(2 * n - 1)
-            numerator = math.factorial(n - m)
-            factors[i] = numerator / denominator
-        self.scipy_scaling_factors = factors
-
     def _get_legendre_scipy(self, theta, compute_derivative=False):
-        """Return Legendre functions from SciPy."""
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
-        diff_order = 1 if compute_derivative else 0
-        p_and_dp_all = assoc_legendre_p_all(
-            self.max_degree, self.max_order, cos_theta, diff_n=diff_order
+        """Evaluate P and dP/dtheta directly in the angular coordinate.
+
+        Differentiating with respect to cos(theta) would introduce an
+        artificial infinity at the poles before multiplication by sin(theta).
+        """
+        p_and_dp_all = sph_legendre_p_all(
+            self.max_degree, self.max_order, theta, diff_n=int(compute_derivative)
         )
-        p_all, dp_dz_all = (
-            (p_and_dp_all[0], p_and_dp_all[1]) if compute_derivative else (p_and_dp_all[0], None)
+        n, m = np.asarray(self.index_pairs).T
+        P_scaled = p_and_dp_all[0, n, m].T * self.scipy_scaling_factors
+        dP_scaled = (
+            p_and_dp_all[1, n, m].T * self.scipy_scaling_factors if compute_derivative else None
         )
-
-        P_std = np.empty((theta.size, len(self.index_pairs)), dtype=np.float64)
-        dP_std = np.empty_like(P_std) if compute_derivative else None
-
-        for i, (n, m) in enumerate(self.index_pairs):
-            p_values = p_all[n, self.max_order + m].T
-            cs_phase = (-1) ** m
-            P_std[:, i] = p_values * cs_phase
-            if compute_derivative:
-                dp_dz_values = dp_dz_all[n, self.max_order + m].T
-                dp_dz = dp_dz_values * cs_phase
-                dP_std[:, i] = dp_dz * (-sin_theta)
-
-        P_scaled = P_std * self.scipy_scaling_factors
-        dP_scaled = dP_std * self.scipy_scaling_factors if compute_derivative else None
         return P_scaled, dP_scaled
 
     def _build_scalar_evaluation_array(self, grid, derivative=None):
@@ -520,29 +492,23 @@ class SHBasis(SurfaceDifferentialBasis):
         dP = dP_unnormalized * self.schmidt_factors if dP_unnormalized is not None else None
         return P, dP
 
-    def _phi_derivative_values(self, P, dP, phi, sin_theta_values):
+    def _phi_derivative_values(self, P, dP, theta, phi):
         """Evaluate azimuthal derivatives, including the poles."""
-        sin_theta = sin_theta_values.reshape(-1, 1)
+        sin_theta = np.sin(theta).reshape(-1, 1)
         phi_col = phi.reshape(-1, 1)
-        is_pole = np.abs(sin_theta) <= 1e-12
-        m_c, m_s = self.cosine_order, self.sine_order
-        num_Gc = -P[:, self.cosine_filter] * m_c * np.sin(m_c * phi_col)
-        Gc = np.divide(num_Gc, sin_theta, out=np.zeros_like(num_Gc), where=~is_pole)
-        num_Gs = P[:, self.sine_filter] * m_s * np.cos(m_s * phi_col)
-        Gs = np.divide(num_Gs, sin_theta, out=np.zeros_like(num_Gs), where=~is_pole)
+        is_pole = ((theta == 0.0) | (theta == np.pi)).reshape(-1, 1)
+        P_over_sin = np.divide(P, sin_theta, out=np.zeros_like(P), where=~is_pole)
 
         pole_rows = np.flatnonzero(is_pole)
         if pole_rows.size:
-            cosine_is_m1 = (self.cosine_order == 1).reshape(-1)
-            sine_is_m1 = (self.sine_order == 1).reshape(-1)
-            cosine_m1_columns = np.flatnonzero(cosine_is_m1)
-            sine_m1_columns = np.flatnonzero(sine_is_m1)
-            if cosine_m1_columns.size:
-                dP_pole = dP[pole_rows][:, self.cosine_filter][:, cosine_is_m1]
-                Gc[np.ix_(pole_rows, cosine_m1_columns)] = -dP_pole * np.sin(phi_col[pole_rows])
-            if sine_m1_columns.size:
-                dP_pole = dP[pole_rows][:, self.sine_filter][:, sine_is_m1]
-                Gs[np.ix_(pole_rows, sine_m1_columns)] = dP_pole * np.cos(phi_col[pole_rows])
+            m1_columns = np.flatnonzero(np.asarray(self.index_pairs)[:, 1] == 1)
+            indices = np.ix_(pole_rows, m1_columns)
+            # lim P/sin(theta) = (dP/dtheta)/cos(theta). Only m=1 survives.
+            P_over_sin[indices] = dP[indices] / np.cos(theta[pole_rows, None])
+
+        m_c, m_s = self.cosine_order, self.sine_order
+        Gc = -P_over_sin[:, self.cosine_filter] * m_c * np.sin(m_c * phi_col)
+        Gs = P_over_sin[:, self.sine_filter] * m_s * np.cos(m_s * phi_col)
         return Gc, Gs
 
     def _evaluate_on_grid(self, grid, derivative=None, legendre_cache=None):
@@ -550,9 +516,8 @@ class SHBasis(SurfaceDifferentialBasis):
         xp = get_array_module(grid.phi, grid.theta)
         phi = np.deg2rad(to_numpy(grid.phi))
         theta = np.deg2rad(to_numpy(grid.theta))
-        sin_theta_values = np.sin(theta)
         needs_legendre_derivative = derivative == "theta" or (
-            derivative == "phi" and np.any(np.abs(sin_theta_values) <= 1e-12)
+            derivative == "phi" and np.any((theta == 0.0) | (theta == np.pi))
         )
         P, dP = self._normalized_legendre_values(
             theta, derivative_required=needs_legendre_derivative, cache=legendre_cache
@@ -565,7 +530,7 @@ class SHBasis(SurfaceDifferentialBasis):
             Gc = dP[:, self.cosine_filter] * np.cos(phi.reshape((-1, 1)) * self.cosine_order)
             Gs = dP[:, self.sine_filter] * np.sin(phi.reshape((-1, 1)) * self.sine_order)
         elif derivative == "phi":
-            Gc, Gs = self._phi_derivative_values(P, dP, phi, sin_theta_values)
+            Gc, Gs = self._phi_derivative_values(P, dP, theta, phi)
         else:
             raise ValueError(f'Invalid derivative "{derivative}".')
 

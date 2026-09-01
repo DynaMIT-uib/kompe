@@ -204,6 +204,31 @@ def test_basis_coefficient_compatibility_uses_coefficient_space():
 # Shared surface operators and solid harmonics
 
 
+def test_basis_identity_separates_coefficients_from_evaluation_algorithm():
+    """Numerical algorithms may differ while coefficients remain compatible."""
+    internal = SHBasis(3, 2)
+    scipy = SHBasis(3, 2, legendre_method="scipy")
+    assert internal.coefficient_space_signature == scipy.coefficient_space_signature
+    assert internal.signature != scipy.signature
+    assert internal.signature == SHBasis(3, 2).signature
+    assert GlobalCSBasis(4).signature != GlobalCSBasis(6).signature
+    assert internal.root_basis is internal
+    subset = BasisSubset(internal, coefficient_indices=[0, 1])
+    assert subset.root_basis is internal
+    assert BasisSubset(subset, coefficient_indices=[0]).root_basis is internal
+
+
+def test_custom_bases_must_define_coefficient_identity():
+    """Matching index names and sizes alone do not identify a basis."""
+
+    class MissingIdentity(ScalarBasis):
+        def scalar_evaluation_array(self, grid, derivative=None):
+            return np.ones((grid.size, 1))
+
+    with pytest.raises(TypeError, match="coefficient_space_signature"):
+        MissingIdentity()
+
+
 def test_surface_operator_builders_match_component_arrays():
     """Surface operators assemble the expected component arrays."""
     cs_basis = GlobalCSBasis(8)

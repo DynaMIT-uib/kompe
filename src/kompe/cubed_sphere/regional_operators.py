@@ -5,10 +5,11 @@ from functools import cached_property
 import numpy as np
 from scipy import sparse as scipy_sparse
 
-from kompe.cubed_sphere import cs_coordinates, cs_vectors, finite_differences
+from kompe.cubed_sphere import cs_coordinates, cs_vectors
 from kompe.cubed_sphere.regional_mesh import RegionalCSMesh
 from kompe.cubed_sphere.regional_projection import _NORTH_FACE
 from kompe.math import as_linear_map, backend_context, get_array_module
+from kompe.math.finite_differences import finite_difference_weights
 
 
 def _interpolation_axis(position, first_center, spacing, count):
@@ -78,7 +79,7 @@ class RegionalCSOperators:
 
         # Interior cells use a centered stencil.
         points = np.r_[-stencil_radius : stencil_radius + 1 : 1]
-        coefficients = finite_differences.finite_difference_weights(points, order=1)
+        coefficients = finite_difference_weights(points, order=1)
         i_dx, j_dx = ii[:, stencil_radius:-stencil_radius], jj[:, stencil_radius:-stencil_radius]
         i_dy, j_dy = (
             ii.T[:, stencil_radius:-stencil_radius],
@@ -98,7 +99,7 @@ class RegionalCSOperators:
         for boundary_index in np.arange(0, stencil_radius)[::-1]:
             # LEFT
             points = np.r_[-boundary_index : stencil_radius + 1 : 1]
-            coefficients = finite_differences.finite_difference_weights(points, order=1)
+            coefficients = finite_difference_weights(points, order=1)
             i_dx, j_dx = ii[:, boundary_index], jj[:, boundary_index]
             i_dy, j_dy = ii.T[:, boundary_index], jj.T[:, boundary_index]
 
@@ -113,7 +114,7 @@ class RegionalCSOperators:
 
             # RIGHT
             points = np.r_[-stencil_radius : boundary_index + 1 : 1]
-            coefficients = finite_differences.finite_difference_weights(points, order=1)
+            coefficients = finite_difference_weights(points, order=1)
             i_dx, j_dx = ii[:, -(boundary_index + 1)], jj[:, -(boundary_index + 1)]
             i_dy, j_dy = ii.T[:, -(boundary_index + 1)], jj.T[:, -(boundary_index + 1)]
 

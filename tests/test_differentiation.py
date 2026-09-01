@@ -1,8 +1,50 @@
-"""Analytic checks for cubed-sphere surface differentiation."""
+"""Analytic checks for spherical surface differentiation."""
 
 import numpy as np
+import pytest
 
-from kompe import GlobalCSBasis, SphericalGrid
+from kompe import GlobalCSBasis, SHBasis, SphericalGrid
+from kompe.math.backend import backend_context
+
+
+@pytest.mark.parametrize("legendre_method", ["internal", "scipy"])
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_sh_gradient_at_and_near_both_poles(legendre_method, backend):
+    """Analytic Cartesian harmonics need no displaced poles or sine floor."""
+    grid = SphericalGrid(theta=[0.0, 1e-11, 30.0, 150.0, 180.0 - 1e-11, 180.0], phi=30.0)
+    basis = SHBasis(2, 2, legendre_method=legendre_method)
+    theta, phi = np.deg2rad(grid.theta), np.deg2rad(grid.phi)
+    with backend_context(backend):
+        gradient = np.asarray(basis.surface_gradient_array(grid))
+
+    x_column = basis.cosine_index_pairs.index((1, 1))
+    y_column = len(basis.cosine_index_pairs) + basis.sine_index_pairs.index((1, 1))
+    np.testing.assert_allclose(gradient[0, :, x_column], np.cos(theta) * np.cos(phi), atol=1e-14)
+    np.testing.assert_allclose(gradient[1, :, x_column], -np.sin(phi), atol=1e-14)
+    np.testing.assert_allclose(gradient[0, :, y_column], np.cos(theta) * np.sin(phi), atol=1e-14)
+    np.testing.assert_allclose(gradient[1, :, y_column], np.cos(phi), atol=1e-14)
+
+    # The m=2 mode tends to zero, but is not zero at nearby non-polar points.
+    xy_column = len(basis.cosine_index_pairs) + basis.sine_index_pairs.index((2, 2))
+    sin_theta = np.sin(theta)
+    sin_theta[[0, -1]] = 0.0
+    expected = np.sqrt(3.0) * sin_theta * np.cos(2.0 * phi)
+    np.testing.assert_allclose(gradient[1, :, xy_column], expected, rtol=1e-13, atol=1e-27)
+
+
+@pytest.mark.parametrize("derivative", [None, "theta", "phi"])
+@pytest.mark.parametrize("normalized", [False, True])
+def test_scipy_and_internal_sh_evaluation_agree_through_the_poles(derivative, normalized):
+    """Both explicit Legendre algorithms use the same phase and normalization."""
+    grid = SphericalGrid(theta=[0.0, 1e-11, 26.0, 90.0, 155.0, 180.0 - 1e-11, 180.0], phi=37.0)
+    internal = SHBasis(6, 4, schmidt_quasi_normalized=normalized, legendre_method="internal")
+    scipy = SHBasis(6, 4, schmidt_quasi_normalized=normalized, legendre_method="scipy")
+    np.testing.assert_allclose(
+        scipy.scalar_evaluation_array(grid, derivative=derivative),
+        internal.scalar_evaluation_array(grid, derivative=derivative),
+        atol=2e-14,
+        rtol=2e-13,
+    )
 
 
 def _weighted_rms(values, weights):

@@ -7,6 +7,7 @@ import pytest
 from scipy.sparse import csr_matrix
 
 from kompe.math import (
+    backend_context,
     einsum_linear_map,
     einsum_linear_map_from_matvec,
     get_array_module,
@@ -269,6 +270,77 @@ def test_take_linear_map_accepts_boolean_mask():
     np.testing.assert_allclose(linear_map.matvec(values), values[:, [0, 2]].reshape(-1))
 
 
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+@pytest.mark.parametrize("axis", [0, 1, -1])
+@pytest.mark.parametrize("indices", [1, [2, 0, 2]])
+def test_take_linear_map_scalar_and_array_selection(backend, axis, indices):
+    """Scalar slicing and repeated gathers have the expected adjoints."""
+    values = np.arange(27.0).reshape(3, 3, 3) * (1.0 + 2.0j)
+    output = np.take(values, indices, axis=axis)
+    matrix = np.take(
+        np.eye(values.size).reshape(*values.shape, values.size), indices, axis=axis % values.ndim
+    ).reshape(output.size, values.size)
+    columns = np.stack((values.reshape(-1), 2.0 * values.reshape(-1)), axis=-1)
+    adjoint_columns = np.stack((output.reshape(-1), 3.0 * output.reshape(-1)), axis=-1)
+    with backend_context(backend):
+        xp = get_array_module()
+        selection = take_linear_map(values.shape, indices, axis=axis)
+        assert selection.output_shape == output.shape
+        forward = selection.matvec(xp.asarray(values))
+        adjoint = selection.rmatvec(xp.asarray(output))
+        assert isinstance(forward, xp.ndarray)
+        assert isinstance(adjoint, xp.ndarray)
+        np.testing.assert_array_equal(forward, output.reshape(-1))
+        np.testing.assert_array_equal(adjoint, matrix.T @ output.reshape(-1))
+        np.testing.assert_array_equal(selection.matmat(xp.asarray(columns)), matrix @ columns)
+        np.testing.assert_array_equal(
+            selection.rmatmat(xp.asarray(adjoint_columns)), matrix.T @ adjoint_columns
+        )
+        np.testing.assert_array_equal(selection.matmat(xp.asarray(values.reshape(-1))), forward)
+        np.testing.assert_array_equal(selection.rmatmat(xp.asarray(output.reshape(-1))), adjoint)
+        np.testing.assert_array_equal(selection.normal_matrix_diag(), np.sum(matrix**2, axis=0))
+        np.testing.assert_array_equal(
+            selection.to_array(), matrix.reshape(output.shape + values.shape)
+        )
+
+
+def test_scalar_take_is_a_view_without_gathering_or_materialization(monkeypatch):
+    """Helmholtz component extraction retains its NumPy slicing path."""
+    values = np.arange(16.0).reshape(2, 8)
+    selection = take_linear_map(values.shape, 1, axis=0)
+
+    def fail(*args, **kwargs):
+        pytest.fail("Scalar selection must use a view, not gather or dense materialization")
+
+    monkeypatch.setattr(np, "take", fail)
+    monkeypatch.setattr(LinearMap, "to_matrix", fail)
+    with backend_context("numpy"):
+        selected = selection.matvec(values)
+    assert np.shares_memory(selected, values)
+    np.testing.assert_array_equal(selected, values[1])
+
+
+def test_take_linear_map_owns_indices_and_handles_empty_selection():
+    """Caller mutation does not alter the map; empty subsets have zero rows."""
+    indices = np.array([0, 2])
+    selection = take_linear_map((3,), indices)
+    indices[:] = 1
+    np.testing.assert_array_equal(selection.matvec(np.arange(3.0)), [0.0, 2.0])
+    scalar = take_linear_map((3,), 1)
+    assert scalar.output_shape == ()
+    np.testing.assert_array_equal(scalar.matvec(np.arange(3.0)), [1.0])
+    empty = take_linear_map((3,), [])
+    assert empty.shape == (0, 3)
+    assert empty.matmat(np.ones((3, 2))).shape == (0, 2)
+    np.testing.assert_array_equal(empty.rmatmat(np.empty((0, 2))), np.zeros((3, 2)))
+
+
+@pytest.mark.parametrize("indices", [0.5, [1.5], ["1"]])
+def test_take_linear_map_does_not_truncate_noninteger_indices(indices):
+    with pytest.raises(TypeError, match="integers"):
+        take_linear_map((3,), indices)
+
+
 def test_pointwise_matrix_linear_map_matches_local_component_transform():
     """Pointwise component maps apply local matrices and adjoints."""
     matrix = (
@@ -367,17 +439,19 @@ def test_diagonal_composition_preserves_diagonal_metadata():
     np.testing.assert_allclose(composed.normal_matrix_diag(), [100.0, 441.0])
 
 
-def test_linear_map_diagonal_accessor_is_strict():
-    """Diagonal values are available only for diagonal operators."""
-    diagonal_matrix = as_linear_map(np.diag([2.0, 3.0]))
-    non_diagonal_matrix = as_linear_map(np.array([[2.0, 1.0], [0.0, 3.0]]))
-
-    np.testing.assert_allclose(diagonal_matrix.diagonal(backend="numpy"), [2.0, 3.0])
+def test_linear_map_diagonal_accessor_requires_known_structure(monkeypatch):
+    """Unknown structure never causes an implicit dense CPU calculation."""
     np.testing.assert_allclose(
         (4.0 * diagonal_linear_map(np.array([2.0, 3.0]))).diagonal(backend="numpy"), [8.0, 12.0]
     )
-    with pytest.raises(ValueError, match="not diagonal"):
-        non_diagonal_matrix.diagonal(backend="numpy")
+
+    def no_materialization(*args, **kwargs):
+        pytest.fail("diagonal() must not materialize unknown structure")
+
+    monkeypatch.setattr(LinearMap, "to_matrix", no_materialization)
+    for matrix in (np.diag([2.0, 3.0]), np.array([[2.0, 1.0], [0.0, 3.0]])):
+        with pytest.raises(ValueError, match="no known diagonal representation"):
+            as_linear_map(matrix).diagonal(backend="numpy")
 
 
 def test_scaled_dense_map_preserves_composition_structure():

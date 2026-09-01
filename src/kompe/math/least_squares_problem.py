@@ -65,16 +65,17 @@ class LeastSquaresProblem:
 
     def _process_data_terms(self, A_in, data_shapes_in, sqrt_weights_in):
         A_list = self._prepare_input_list(A_in, "A")
-        self.num_data_terms = len(A_list)
-        self.data_shapes = self._normalize_data_shapes(data_shapes_in, self.num_data_terms)
-        self.A = [
+        if not A_list:
+            raise ValueError("At least one data operator is required.")
+        self.data_shapes = self._normalize_data_shapes(data_shapes_in, len(A_list))
+        self.data_operators = [
             as_linear_map(op, output_shape=self.data_shapes[i], input_shape=self.solution_shape)
             for i, op in enumerate(A_list)
         ]
         sqrt_weights_list = self._prepare_input_list(
-            sqrt_weights_in, "sqrt_weights", count=self.num_data_terms
+            sqrt_weights_in, "sqrt_weights", count=len(A_list)
         )
-        self.sqrt_weights = [
+        self.weight_operators = [
             self._create_weight_operator(w, self.data_shapes[i])
             for i, w in enumerate(sqrt_weights_list)
         ]
@@ -83,7 +84,6 @@ class LeastSquaresProblem:
         operators = self._prepare_input_list(
             regularization_operators, "regularization_operators", is_optional=True
         )
-        self.num_reg_terms = len(operators)
         self.regularization_operators = [
             as_linear_map(operator, input_shape=self.solution_shape)
             if operator is not None
@@ -94,10 +94,17 @@ class LeastSquaresProblem:
             self._prepare_input_list(
                 regularization_strengths,
                 "regularization_strengths",
-                count=self.num_reg_terms,
+                count=len(operators),
                 default_val=0.0,
             )
         )
+        for index, (operator, strength) in enumerate(
+            zip(self.regularization_operators, self.regularization_strengths, strict=True)
+        ):
+            if operator is None and strength > 0.0:
+                raise ValueError(
+                    f"regularization_operators[{index}] is missing but has positive strength."
+                )
 
     def _create_weight_operator(self, w_val: Any, shape: tuple[int, ...]) -> LinearMap | None:
         if w_val is None:
@@ -107,7 +114,7 @@ class LeastSquaresProblem:
             arr_shape = getattr(w_val, "shape", None)
             if arr_shape is None:
                 arr_shape = np.shape(w_val)
-            if arr_shape is not None and tuple(arr_shape) == shape:
+            if tuple(arr_shape) == shape:
                 xp = get_array_module(w_val)
                 w_val = xp.asarray(w_val).reshape(flat_dim)
         return as_linear_map(w_val, output_shape=shape, input_shape=shape)
@@ -125,7 +132,9 @@ class LeastSquaresProblem:
         else:
             diag_A_T_A = np.diag(self._custom_data_normal_matrix()).real
         active_diag_A = diag_A_T_A[diag_A_T_A > 0]
-        data_term_scale = np.median(active_diag_A) if active_diag_A.size > 0 else 1.0
+        if active_diag_A.size == 0:
+            raise ValueError("Relative regularization requires a nonzero weighted data operator.")
+        data_term_scale = np.median(active_diag_A)
         regularization_row_scales = []
         for i, L_item in enumerate(self.regularization_operators):
             strength = self.regularization_strengths[i]
@@ -147,8 +156,8 @@ class LeastSquaresProblem:
     def data_operator(self) -> LinearMap:
         """Assemble the data operator without regularization."""
         row_maps = [
-            a_item if self.sqrt_weights[i] is None else self.sqrt_weights[i] @ a_item
-            for i, a_item in enumerate(self.A)
+            operator if weight is None else weight @ operator
+            for operator, weight in zip(self.data_operators, self.weight_operators, strict=True)
         ]
         return vstack_linear_maps(row_maps, input_shape=self.solution_shape)
 
@@ -256,7 +265,7 @@ class LeastSquaresProblem:
         self, b: Any | list[Any], *, include_regularization: bool = True
     ) -> tuple[Any, tuple[int, ...], int]:
         """Assemble one or more right-hand side columns."""
-        b_list = self._prepare_input_list(b, "b", count=self.num_data_terms)
+        b_list = self._prepare_input_list(b, "b", count=len(self.data_operators))
         processed = [
             self._process_b_vector(b_val, self.data_shapes[i]) for i, b_val in enumerate(b_list)
         ]
@@ -268,21 +277,21 @@ class LeastSquaresProblem:
             raise ValueError("Inconsistent RHS column shapes in b terms.")
 
         num_rhs = math.prod(rhs_shape) if rhs_shape else 1
-        dtype = self.A[0].dtype if self.A else np.float64
         active_regularization_terms = (
             self._active_regularization_terms() if include_regularization else ()
         )
         system_operator = self.system_operator if include_regularization else self.data_operator
+        dtype = system_operator.dtype
         backend_operands = system_operator.backend_operands
         xp = get_array_module(*(p[0] for p in valid_b), *backend_operands)
 
         blocks = []
         for i, (b_col_block, _) in enumerate(processed):
-            num_a_rows = self.A[i].shape[0]
+            num_a_rows = self.data_operators[i].shape[0]
             if b_col_block is None:
                 blocks.append(xp.zeros((num_a_rows, num_rhs), dtype=dtype))
                 continue
-            w_item = self.sqrt_weights[i]
+            w_item = self.weight_operators[i]
             if w_item is not None:
                 b_col_block = w_item.matmat(b_col_block)
             blocks.append(xp.asarray(b_col_block).reshape(num_a_rows, num_rhs))
@@ -290,7 +299,7 @@ class LeastSquaresProblem:
         for _, L_item in active_regularization_terms:
             blocks.append(xp.zeros((L_item.shape[0], num_rhs), dtype=dtype))
 
-        d_block = xp.vstack(blocks) if blocks else xp.zeros((0, num_rhs), dtype=dtype)
+        d_block = xp.vstack(blocks)
         return d_block, rhs_shape, num_rhs
 
     @cached_property
@@ -308,7 +317,7 @@ class LeastSquaresProblem:
         return tuple(
             (row_scales[i], L_item)
             for i, L_item in enumerate(self.regularization_operators)
-            if i < len(row_scales) and L_item is not None and row_scales[i] > 0.0
+            if L_item is not None and row_scales[i] > 0.0
         )
 
     @staticmethod

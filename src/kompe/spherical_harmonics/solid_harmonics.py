@@ -39,12 +39,12 @@ class SolidHarmonicOperators:
         """Initialize radial operations for an SH angular basis."""
         from kompe.spherical_harmonics.sh_basis import SHBasis
 
-        root_basis = getattr(basis, "root_basis", basis)
-        if not isinstance(basis, SurfaceDifferentialBasis) or not isinstance(root_basis, SHBasis):
+        if not isinstance(basis, SurfaceDifferentialBasis) or not isinstance(
+            basis.root_basis, SHBasis
+        ):
             raise TypeError("SolidHarmonicOperators requires an SH surface basis.")
         if not hasattr(basis, "n"):
             raise TypeError("SolidHarmonicOperators basis must expose harmonic degrees as 'n'.")
-        basis.validate_metadata()
         self.basis = basis
 
     @property

@@ -1,8 +1,8 @@
-"""Fused linear algebra for batches of cubed-sphere geometry matrices.
+"""Fused determinant and inverse formulas for batches of small matrices.
 
-Metric tensors and coordinate Jacobians are 3-by-3 at every grid point.
-Their explicit determinant and inverse avoid the overhead of a general
-matrix factorization and fuse efficiently under JAX.
+The explicit 3-by-3 formulas avoid a general matrix factorization and
+fuse efficiently under JAX. Cubed-sphere metrics and Jacobians are one
+application; the routines do not depend on a coordinate system.
 """
 
 from kompe.math.backend import get_array_module

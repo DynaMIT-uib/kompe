@@ -193,10 +193,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     def scalar_mean_weights(self):
         """Return area-normalized weights for scalar surface means."""
         weights = np.asarray(self.mesh.cell_areas.reshape(-1), dtype=float)
-        total_area = float(np.sum(weights))
-        if total_area <= 0.0:
-            raise ValueError("GlobalCSBasis unit_area must have positive total area.")
-        weights = weights / total_area
+        weights = weights / np.sum(weights)
         weights.setflags(write=False)
         return weights
 
@@ -248,12 +245,6 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         """Return a cached tangential grid-remap operator."""
         return self._remapper.tangential_grid_remap_operator(source_grid, target_grid)
 
-    @staticmethod
-    def _safe_sin_theta(theta_deg):
-        """Return sin(theta) with a pole-safe floor."""
-        sin_theta = np.sin(np.deg2rad(np.asarray(theta_deg).reshape(-1)))
-        return np.where(np.abs(sin_theta) < 1e-10, 1e-10, sin_theta)
-
     def _coordinate_derivatives(self):
         """Return derivatives of xi/eta with respect to theta/phi."""
         xi, eta, radius, face = np.broadcast_arrays(
@@ -295,7 +286,8 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
         dtheta = sp.diags(dxi_dtheta) @ dxi + sp.diags(deta_dtheta) @ deta
         dphi_unscaled = sp.diags(dxi_dphi) @ dxi + sp.diags(deta_dphi) @ deta
-        sin_theta = self._safe_sin_theta(self.mesh.theta)
+        # The required even, cell-centred mesh does not sample either pole.
+        sin_theta = np.sin(np.deg2rad(self.mesh.theta))
 
         # ``phi_unscaled`` is d/dphi. ``phi`` is the azimuthal
         # surface component sin(theta)^-1 d/dphi used by gradients.

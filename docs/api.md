@@ -37,6 +37,12 @@ constructor used by serialization and derived meshes.
 - `SolidHarmonicOperators`: regular/irregular radial continuation for an
   `SHBasis`; these are not surface-basis operations.
 
+SH surface gradients use the analytic limit at each pole, with tangential
+components expressed in the direction of the supplied longitude. Nearby points
+are evaluated at their actual coordinates without a sine floor or pole shift.
+Both `legendre_method="internal"` and `"scipy"` follow the same convention.
+The even, cell-centred global cubed-sphere mesh does not sample either pole.
+
 ## Analysis and synthesis
 
 `SphericalTransform(basis, grid)` binds a closed-surface basis to evaluation
@@ -51,6 +57,8 @@ cubed-sphere bases remap them to the bound grid before target-basis analysis.
 Source-grid `sqrt_weights` cannot be carried through a grid remap; configure
 target-grid weights on the transform instead. `with_basis` returns a transform
 for another coefficient basis while reusing the same grid and numerical policy.
+An explicitly different evaluation algorithm is retained even when its
+coefficient layout is compatible with the previous basis.
 
 Explicit representations that retain scientific axes end in `_array`, even
 when a scalar case happens to be 2-D. Flat linear-algebra representations that
@@ -80,6 +88,16 @@ same values with shaped domain and codomain axes. Both cache the dense
 representation instead of repeating its construction.
 Known diagonal and identity maps remain vector-backed even when a full matrix
 has been requested for inspection.
+`diagonal()` returns the scale vector only when a diagonal representation is
+known. It does not materialize a matrix or transfer it to the CPU to discover
+structure. Declare diagonal maps with `diagonal_linear_map(values)`; use
+`xp.diag(map.to_matrix())` for the diagonal of a general dense matrix.
+
+`LeastSquaresProblem` exposes `data_operators` and `weight_operators` as lists
+of maps, separate from the assembled weighted `data_operator` and regularized
+`system_operator`. Relative regularization requires a nonzero weighted data
+operator and an explicit nonzero regularizer; it never invents a unit scale or
+silently discards a positive strength.
 
 NumPy/SciPy is the reference backend. JAX is optional and lazy. Select it with
 `kompe.math.set_backend("jax")`, a `backend_context("jax")`, or explicit JAX
@@ -92,3 +110,9 @@ arrays. Kompe never changes JAX's global 64-bit setting.
 remap matrices and per-basis target-grid caches are bounded. Long-running
 applications can clear them at known lifecycle boundaries without changing
 numerical results.
+
+Each concrete basis defines `coefficient_space_signature` from its mathematical
+layout and normalization. `signature` additionally identifies evaluation
+details such as the SH Legendre algorithm. The base class does not inspect
+subclass-specific parameter names to guess identity. `root_basis` returns the
+underlying basis before any nested coefficient subsets.

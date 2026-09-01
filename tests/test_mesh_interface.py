@@ -1,6 +1,7 @@
 """Tests for the distinction between point grids and structured meshes."""
 
 import numpy as np
+import pytest
 
 from kompe import (
     GlobalCSBasis,
@@ -10,6 +11,26 @@ from kompe import (
     SphericalGrid,
     StructuredSurfaceMesh,
 )
+from kompe.math import backend_context, get_array_module
+from kompe.mesh import spherical_triangle_solid_angle
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_spherical_triangle_geometry_broadcasts_without_a_mesh(backend):
+    """Octant triangles have pi/2 steradians regardless of orientation."""
+    with backend_context(backend):
+        xp = get_array_module()
+        first = xp.array([[[1.0, 0.0, 0.0]], [[-1.0, 0.0, 0.0]]])
+        second = xp.array([0.0, 1.0, 0.0])
+        third = xp.array([[[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]]])
+        angles = spherical_triangle_solid_angle(first, second, third)
+        reversed_angles = spherical_triangle_solid_angle(first, third, second)
+        degenerate = spherical_triangle_solid_angle(first, first, third)
+        assert isinstance(angles, xp.ndarray)
+    assert angles.shape == (2, 2)
+    np.testing.assert_allclose(angles, np.pi / 2, rtol=1e-14)
+    np.testing.assert_array_equal(reversed_angles, angles)
+    np.testing.assert_array_equal(degenerate, np.zeros((2, 2)))
 
 
 def test_grid_does_not_claim_mesh_topology():

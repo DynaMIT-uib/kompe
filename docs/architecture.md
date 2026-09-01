@@ -70,6 +70,26 @@ directly, ensuring there is only one implementation and one class identity.
 Persistent caches are accepted through the small `get_or_create` protocol and
 remain consumer-owned.
 
+General stencil weights live in `math.finite_differences`; the CPU sparse
+operator builders use them without involving spherical-coordinate machinery.
+`math.small_matrices` contains fused 3-by-3 determinant and inverse formulas,
+while the cubed-sphere modules own the metrics and Jacobians that use them.
+Read-only CPU metadata ownership lives at the array boundary as
+`readonly_numpy_array`, shared by bases, meshes, and cached analysis weights.
+Meshes do not import coefficient-basis code just to copy metadata.
+`mesh.spherical_triangle_solid_angle` provides shared spherical cell geometry
+without requiring a cubed-sphere mesh object.
+
+Component selection belongs to `take_linear_map`, not to a separate Helmholtz
+implementation. Scalar indices use basic slicing rather than gathering;
+array indices support repeated samples with an accumulating adjoint. Neither
+selection requires a materialized matrix.
+
+Schmidt factors live in `spherical_harmonics.normalization`, alongside the SH
+implementation. SH-specific Helmholtz normal-matrix assembly remains next to
+`SphericalTransform`: its block signs and component weights are part of that
+transform, not generic solver policy.
+
 JAX is an optional execution backend, not an import-time policy. Merely
 importing Kompe does not import JAX or enable 64-bit values. Explicit JAX
 arrays select JAX for compatible operations, and callers can select the global
