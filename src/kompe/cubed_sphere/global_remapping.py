@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from typing import ClassVar
 
 import numpy as np
@@ -10,6 +9,7 @@ import scipy.sparse as sp
 from scipy.interpolate import griddata
 from scipy.spatial import Delaunay
 
+from kompe.cache import BoundedCache
 from kompe.math import as_linear_map, identity_linear_map
 from kompe.math.backend import backend_context, to_numpy
 
@@ -17,13 +17,11 @@ from kompe.math.backend import backend_context, to_numpy
 class _GlobalCSRemapper:
     """Build and cache remaps between CS-compatible grids."""
 
-    _shared_remap_matrix_cache: ClassVar[OrderedDict] = OrderedDict()
-    _shared_remap_matrix_cache_size: ClassVar[int] = 8
-    _operator_cache_size: ClassVar[int] = 16
+    _shared_remap_matrix_cache: ClassVar[BoundedCache] = BoundedCache(8)
 
     def __init__(self, basis):
         self.basis = basis
-        self.operator_cache = OrderedDict()
+        self._operator_cache = BoundedCache(16)
 
     @classmethod
     def clear_shared_cache(cls):
@@ -35,23 +33,16 @@ class _GlobalCSRemapper:
         """Return process-wide remapping cache occupancy and limit."""
         return {
             "size": len(cls._shared_remap_matrix_cache),
-            "max_size": cls._shared_remap_matrix_cache_size,
+            "max_size": cls._shared_remap_matrix_cache.max_size,
         }
 
     def clear_cache(self):
         """Clear operators owned by this remapper instance."""
-        self.operator_cache.clear()
+        self._operator_cache.clear()
 
     def cache_info(self):
         """Return instance operator-cache occupancy and limit."""
-        return {"size": len(self.operator_cache), "max_size": self._operator_cache_size}
-
-    def _store_operator(self, key, operator):
-        """Store one operator while enforcing the per-basis cache limit."""
-        self.operator_cache[key] = operator
-        self.operator_cache.move_to_end(key)
-        while len(self.operator_cache) > self._operator_cache_size:
-            self.operator_cache.popitem(last=False)
+        return {"size": len(self._operator_cache), "max_size": self._operator_cache.max_size}
 
     @staticmethod
     def grid_theta_phi(grid):
@@ -71,20 +62,15 @@ class _GlobalCSRemapper:
 
     def _cached_remap_matrix(self, key, build):
         """Return a bounded shared remap matrix cache entry."""
-        cache = self._shared_remap_matrix_cache
-        if key in cache:
-            cache.move_to_end(key)
-            return cache[key]
 
-        # Delaunay triangulation and sparse assembly are SciPy CPU work.  The
-        # cube-coordinate round trip must use the same NumPy arithmetic as the
-        # triangulation, especially for points on face boundaries.
-        with backend_context("numpy"):
-            matrix = build()
-        cache[key] = matrix
-        if len(cache) > self._shared_remap_matrix_cache_size:
-            cache.popitem(last=False)
-        return matrix
+        def build_on_cpu():
+            # Delaunay triangulation and sparse assembly are SciPy CPU work.
+            # The cube-coordinate round trip must use the same NumPy arithmetic
+            # as the triangulation, especially for points on face boundaries.
+            with backend_context("numpy"):
+                return build()
+
+        return self._shared_remap_matrix_cache.get_or_create(key, build_on_cpu)
 
     def remap_matrix_key(self, kind, source_grid, target_grid):
         """Return a shared remap-matrix cache key."""
@@ -238,17 +224,16 @@ class _GlobalCSRemapper:
             return identity_linear_map((source_grid.size,))
         matrix_key = self.remap_matrix_key("scalar_grid_remap_matrix", source_grid, target_grid)
         key = ("scalar_grid_remap", matrix_key)
-        if key not in self.operator_cache:
+
+        def build():
             matrix = self._cached_remap_matrix(
                 matrix_key, lambda: self.build_scalar_grid_remap_matrix(source_grid, target_grid)
             )
-            self._store_operator(
-                key,
-                as_linear_map(
-                    matrix, input_shape=(source_grid.size,), output_shape=(target_grid.size,)
-                ),
+            return as_linear_map(
+                matrix, input_shape=(source_grid.size,), output_shape=(target_grid.size,)
             )
-        return self.operator_cache[key]
+
+        return self._operator_cache.get_or_create(key, build)
 
     def tangential_grid_remap_operator(self, source_grid, target_grid):
         """Return a cached tangential grid-remap operator."""
@@ -258,20 +243,19 @@ class _GlobalCSRemapper:
             "tangential_grid_remap_matrix", source_grid, target_grid
         )
         key = ("tangential_grid_remap", matrix_key)
-        if key not in self.operator_cache:
+
+        def build():
             matrix = self._cached_remap_matrix(
                 matrix_key,
                 lambda: self.build_tangential_grid_remap_matrix(source_grid, target_grid),
             )
-            self._store_operator(
-                key,
-                as_linear_map(
-                    matrix,
-                    input_shape=(2, source_grid.size),
-                    output_shape=(2, target_grid.size),
-                ),
+            return as_linear_map(
+                matrix,
+                input_shape=(2, source_grid.size),
+                output_shape=(2, target_grid.size),
             )
-        return self.operator_cache[key]
+
+        return self._operator_cache.get_or_create(key, build)
 
     def _face_interpolation_points(self, theta, phi, xi_target, eta_target, face_target):
         """Yield source and target points for interpolation on each cube face."""

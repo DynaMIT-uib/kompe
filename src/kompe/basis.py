@@ -264,10 +264,6 @@ class SurfaceDifferentialBasis(ScalarBasis):
         """Return the Helmholtz-to-div-free-potential operator."""
         return _helmholtz_component_operator(self.index_length, 1)
 
-    def surface_laplacian_matrix(self, r=1.0):
-        """Materialize the scalar surface-Laplacian coefficient matrix."""
-        return self.surface_laplacian_operator(r).to_matrix()
-
     def mean_free_surface_poisson_operator(self, r=1.0):
         """Return the gauge-fixed inverse surface Laplacian.
 

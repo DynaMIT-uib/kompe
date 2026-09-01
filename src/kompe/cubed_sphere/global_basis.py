@@ -1,12 +1,12 @@
 """Global cubed-sphere surface basis."""
 
-from collections import OrderedDict
 from functools import cached_property
 
 import numpy as np
 import scipy.sparse as sp
 
 from kompe.basis import SurfaceDifferentialBasis
+from kompe.cache import BoundedCache
 from kompe.cubed_sphere.global_differencing import global_cs_derivative_matrices
 from kompe.cubed_sphere.global_mesh import GlobalCSMesh
 from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
@@ -65,7 +65,6 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         DOI: 10.1093/gji/ggx125
     """
 
-    _surface_cache_size = 16
     sample_analysis_uses_grid_remapping = True
 
     def __init__(self, cells_per_face):
@@ -87,9 +86,8 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             If ``cells_per_face`` is not a positive even number.
         """
         self.kind = "CS"
-        self._laplacian_matrix_cache = {}
         self._remapper = _GlobalCSRemapper(self)
-        self._surface_operator_cache = OrderedDict()
+        self._surface_operator_cache = BoundedCache(16)
 
         if isinstance(cells_per_face, bool) or not isinstance(cells_per_face, (int, np.integer)):
             raise TypeError("cells_per_face must be an integer")
@@ -121,7 +119,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         geometry-only interpolation matrices.
         """
         self.__dict__.pop("_native_derivatives", None)
-        self._laplacian_matrix_cache.clear()
+        self.__dict__.pop("_unit_surface_laplacian_matrix", None)
         self._surface_operator_cache.clear()
         self._remapper.clear_cache()
         if shared_remaps:
@@ -131,9 +129,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         """Return cache occupancy without exposing mutable cache objects."""
         return {
             "derivatives_built": "_native_derivatives" in self.__dict__,
-            "laplacian_matrices": len(self._laplacian_matrix_cache),
+            "laplacian_built": "_unit_surface_laplacian_matrix" in self.__dict__,
             "surface_operators": len(self._surface_operator_cache),
-            "surface_max_size": self._surface_cache_size,
+            "surface_max_size": self._surface_operator_cache.max_size,
             "remap_operators": self._remapper.cache_info(),
             "shared_remap_matrices": self._remapper.shared_cache_info(),
         }
@@ -161,15 +159,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         key = self._surface_cache_key(name, grid, *parts)
         if key is None:
             return build()
-        cache = self._surface_operator_cache
-        if key in cache:
-            cache.move_to_end(key)
-            return cache[key]
-        operator = build()
-        cache[key] = operator
-        if len(cache) > self._surface_cache_size:
-            cache.popitem(last=False)
-        return operator
+        return self._surface_operator_cache.get_or_create(key, build)
 
     def scalar_evaluation_array(self, grid, derivative=None):
         """Materialize the canonical CS scalar evaluation operator."""
@@ -401,40 +391,44 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             synthesis, gauges, sqrt_weights=sqrt_weights, input_shape=(2, n), output_shape=(2, n)
         )
 
-    def _sparse_laplacian_matrix(self, r=1.0):
-        """Return the cached sparse discrete scalar Laplacian."""
-        key = float(r)
-        if key not in self._laplacian_matrix_cache:
-            derivatives = self._native_derivatives
-            term_theta = (
-                derivatives["inv_sin_theta"]
-                @ derivatives["theta"]
-                @ derivatives["sin_theta"]
-                @ derivatives["theta"]
-            )
-            term_phi = (
-                derivatives["inv_sin2_theta"]
-                @ derivatives["phi_unscaled"]
-                @ derivatives["phi_unscaled"]
-            )
-            self._laplacian_matrix_cache[key] = ((term_theta + term_phi) / (r**2)).tocsr()
-        return self._laplacian_matrix_cache[key]
+    @cached_property
+    def _unit_surface_laplacian_matrix(self):
+        """Return the sparse scalar Laplacian on the unit sphere."""
+        derivatives = self._native_derivatives
+        term_theta = (
+            derivatives["inv_sin_theta"]
+            @ derivatives["theta"]
+            @ derivatives["sin_theta"]
+            @ derivatives["theta"]
+        )
+        term_phi = (
+            derivatives["inv_sin2_theta"]
+            @ derivatives["phi_unscaled"]
+            @ derivatives["phi_unscaled"]
+        )
+        return (term_theta + term_phi).tocsr()
 
     def surface_laplacian_operator(self, r=1.0):
         """Return the native sparse scalar Laplacian operator."""
-        return as_linear_map(
-            self._sparse_laplacian_matrix(r),
+        r = float(r)
+        unit_laplacian = as_linear_map(
+            self._unit_surface_laplacian_matrix,
             input_shape=(self.index_length,),
             output_shape=(self.index_length,),
         )
+        return unit_laplacian if r == 1.0 else (1.0 / r**2) * unit_laplacian
 
     def mean_free_surface_poisson_operator(self, r=1.0):
         """Return the mean-zero inverse of the discrete Laplacian."""
+        r = float(r)
+        laplacian = self._unit_surface_laplacian_matrix
+        if r != 1.0:
+            laplacian = (laplacian / r**2).tocsr()
         n = self.index_length
         normalized_mean = np.sqrt(n) * self.scalar_mean_weights
         gauge = sp.csr_matrix(normalized_mean.reshape(1, n))
         return sparse_constrained_least_squares_map(
-            self._sparse_laplacian_matrix(r), gauge, input_shape=(n,), output_shape=(n,)
+            laplacian, gauge, input_shape=(n,), output_shape=(n,)
         )
 
     def interpolate_vector(

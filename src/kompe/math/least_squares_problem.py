@@ -11,6 +11,7 @@ import numpy as np
 import scipy.sparse
 from scipy.sparse.linalg import LinearOperator
 
+from kompe.cache import BoundedCache
 from kompe.math.backend import get_array_module, synchronize_linalg_result, to_numpy
 from kompe.math.linear_map import LinearMap, as_linear_map, vstack_linear_maps
 
@@ -53,7 +54,7 @@ class LeastSquaresProblem:
         )
         self.solution_size = math.prod(self.solution_shape)
         self._dense_normal_equation_cache: dict[Any, tuple[Any, Any]] = {}
-        self._dense_normal_pinv_cache: dict[tuple[Any, float], Any] = {}
+        self._dense_normal_pinv_cache = BoundedCache(2)
         self.operator_cache = operator_cache
         self.cache_identity = cache_identity
         self.data_normal_matrix_builder = data_normal_matrix_builder
@@ -171,45 +172,41 @@ class LeastSquaresProblem:
         """Return cached pseudo-inverse of the dense normal matrix."""
         xp = get_array_module()
         key = (xp, float(tolerance))
-        if key not in self._dense_normal_pinv_cache:
 
-            def compute():
-                normal_matrix = self.dense_normal_matrix()
-                normal_pinv = synchronize_linalg_result(
-                    xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
-                )
-                # Repeated solves need the pseudo-inverse and the lazy
-                # data map, not a separate dense regularized system or
-                # normal matrix used to construct it. Keep a materialized
-                # data map because the following adjoint products reuse it.
-                self._dense_normal_equation_cache.clear()
-                regularized_system = self.system_operator
-                if regularized_system is not self.data_operator:
-                    regularized_system.clear_dense_cache()
-                self._data_normal_matrix_cache = None
-                return normal_pinv
+        def compute():
+            normal_matrix = self.dense_normal_matrix()
+            normal_pinv = synchronize_linalg_result(
+                xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
+            )
+            # Repeated solves need the pseudo-inverse and the lazy
+            # data map, not a separate dense regularized system or
+            # normal matrix used to construct it. Keep a materialized
+            # data map because the following adjoint products reuse it.
+            self._dense_normal_equation_cache.clear()
+            regularized_system = self.system_operator
+            if regularized_system is not self.data_operator:
+                regularized_system.clear_dense_cache()
+            self._data_normal_matrix_cache = None
+            return normal_pinv
 
+        def build():
             if self.operator_cache is None or self.cache_identity is None:
-                value = compute()
-            else:
+                return compute()
 
-                def build():
-                    return to_numpy(compute())
+            cached = self.operator_cache.get_or_create(
+                "least_squares_normal_pinv",
+                {
+                    "algorithm": "least_squares_normal_pinv",
+                    "version": _NORMAL_PINV_CACHE_VERSION,
+                    "problem": self.cache_identity,
+                    "backend": xp.__name__,
+                    "tolerance": float(tolerance),
+                },
+                lambda: to_numpy(compute()),
+            )
+            return xp.asarray(cached)
 
-                cached = self.operator_cache.get_or_create(
-                    "least_squares_normal_pinv",
-                    {
-                        "algorithm": "least_squares_normal_pinv",
-                        "version": _NORMAL_PINV_CACHE_VERSION,
-                        "problem": self.cache_identity,
-                        "backend": xp.__name__,
-                        "tolerance": float(tolerance),
-                    },
-                    build,
-                )
-                value = xp.asarray(cached)
-            self._dense_normal_pinv_cache[key] = value
-        return self._dense_normal_pinv_cache[key]
+        return self._dense_normal_pinv_cache.get_or_create(key, build)
 
     def dense_normal_matrix(self) -> Any:
         """Return the regularized normal matrix."""

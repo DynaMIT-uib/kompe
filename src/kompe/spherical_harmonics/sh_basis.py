@@ -1,12 +1,12 @@
 """Spherical Harmonic Basis Class."""
 
 import math
-from collections import OrderedDict
 
 import numpy as np
 from scipy.special import assoc_legendre_p_all
 
 from kompe.basis import BasisSubset, SurfaceDifferentialBasis, _owned_readonly_array
+from kompe.cache import BoundedCache
 from kompe.math import as_linear_map, diagonal_linear_map
 from kompe.math.backend import get_array_module, jax_enabled, to_numpy
 from kompe.spherical_harmonics.coefficients import schmidt_quasi_normalization_factors
@@ -70,8 +70,6 @@ class SHBasis(SurfaceDifferentialBasis):
         ``'internal'`` method.
     """
 
-    _grid_cache_size = 8
-
     def __init__(
         self,
         max_degree,
@@ -121,7 +119,7 @@ class SHBasis(SurfaceDifferentialBasis):
         self.mean_free = self.min_degree >= 1
         self.operator_cache = operator_cache
         self._related_basis_cache = {}
-        self._grid_cache = OrderedDict()
+        self._grid_cache = BoundedCache(8)
         self._init_coefficient_indices()
         self._init_normalization(schmidt_quasi_normalized)
 
@@ -155,7 +153,7 @@ class SHBasis(SurfaceDifferentialBasis):
             "legendre_values": sum(len(entry["legendre"]) for entry in entries),
             "arrays": sum(len(entry["arrays"]) for entry in entries),
             "operators": sum(len(entry["operators"]) for entry in entries),
-            "max_size": self._grid_cache_size,
+            "max_size": self._grid_cache.max_size,
         }
 
     def _init_coefficient_indices(self):
@@ -244,15 +242,9 @@ class SHBasis(SurfaceDifferentialBasis):
         key = self._grid_cache_key(grid)
         if key is None:
             return None
-        cache = self._grid_cache
-        if key in cache:
-            cache.move_to_end(key)
-            return cache[key]
-        entry = {"legendre": {}, "arrays": {}, "operators": {}}
-        cache[key] = entry
-        if len(cache) > self._grid_cache_size:
-            cache.popitem(last=False)
-        return entry
+        return self._grid_cache.get_or_create(
+            key, lambda: {"legendre": {}, "arrays": {}, "operators": {}}
+        )
 
     def _cached_grid_array(self, grid, key, build):
         """Return a cached grid array when the grid has a signature."""

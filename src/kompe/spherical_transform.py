@@ -4,13 +4,13 @@ This module contains the SphericalTransform class for converting between
 spherical-basis coefficients and grid values.
 """
 
-from collections import OrderedDict
 from functools import cached_property
 
 import numpy as np
 from scipy.linalg import cholesky
 
 from kompe.basis import SurfaceDifferentialBasis
+from kompe.cache import BoundedCache
 from kompe.grid import SphericalGrid
 from kompe.math import array_fingerprint
 from kompe.math.backend import get_array_module
@@ -211,7 +211,6 @@ class SphericalTransform:
     remapping operators.
     """
 
-    _analysis_transform_cache_size = 16
     _cached_attribute_names = (
         "scalar_synthesis_array",
         "scalar_synthesis_operator",
@@ -290,8 +289,8 @@ class SphericalTransform:
         self.tolerance = _normalize_tolerance(tolerance)
         self.use_persistent_evaluation_cache = bool(use_persistent_evaluation_cache)
 
-        self._analysis_transforms = OrderedDict()
-        self._basis_transforms = {}
+        self._analysis_transforms = BoundedCache(16)
+        self._basis_transforms = BoundedCache(8)
 
     def __repr__(self):
         """Summarize the bound basis, grid, and analysis policy."""
@@ -308,8 +307,9 @@ class SphericalTransform:
         if self.basis.coefficients_are_compatible_with(basis):
             return self
         cache_key = basis.signature
-        if cache_key not in self._basis_transforms:
-            self._basis_transforms[cache_key] = SphericalTransform(
+
+        def build():
+            return SphericalTransform(
                 basis,
                 self.grid,
                 sqrt_weights=self.sqrt_weights if self.explicit_sqrt_weights else None,
@@ -318,7 +318,8 @@ class SphericalTransform:
                 area_weighted=self.area_weighted,
                 use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
             )
-        return self._basis_transforms[cache_key]
+
+        return self._basis_transforms.get_or_create(cache_key, build)
 
     def clear_cache(self):
         """Discard arrays, operators, factorizations, and analysis transforms."""
@@ -335,8 +336,9 @@ class SphericalTransform:
             "scalar_factorization": "scalar_least_squares_problem" in self.__dict__,
             "helmholtz_factorization": "helmholtz_least_squares_problem" in self.__dict__,
             "analysis_transforms": len(self._analysis_transforms),
-            "analysis_transform_max_size": self._analysis_transform_cache_size,
+            "analysis_transform_max_size": self._analysis_transforms.max_size,
             "basis_transforms": len(self._basis_transforms),
+            "basis_transform_max_size": self._basis_transforms.max_size,
         }
 
     def _evaluate_basis_on_grid(self, derivative=None):
@@ -965,23 +967,21 @@ class SphericalTransform:
             tolerance,
             self.area_weighted,
         )
-        if cache_key in self._analysis_transforms:
-            self._analysis_transforms.move_to_end(cache_key)
-            return self._analysis_transforms[cache_key]
 
-        transform = SphericalTransform(
-            analysis_basis,
-            input_grid,
-            sqrt_weights=(None if sqrt_weights is None else _owned_explicit_weights(sqrt_weights)),
-            reg_lambda=reg_lambda,
-            tolerance=tolerance,
-            area_weighted=self.area_weighted,
-            use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
-        )
-        self._analysis_transforms[cache_key] = transform
-        if len(self._analysis_transforms) > self._analysis_transform_cache_size:
-            self._analysis_transforms.popitem(last=False)
-        return transform
+        def build():
+            return SphericalTransform(
+                analysis_basis,
+                input_grid,
+                sqrt_weights=(
+                    None if sqrt_weights is None else _owned_explicit_weights(sqrt_weights)
+                ),
+                reg_lambda=reg_lambda,
+                tolerance=tolerance,
+                area_weighted=self.area_weighted,
+                use_persistent_evaluation_cache=self.use_persistent_evaluation_cache,
+            )
+
+        return self._analysis_transforms.get_or_create(cache_key, build)
 
     def _grid_remap_operator(
         self, analysis_basis, method_name, input_grid, *, input_shape, output_shape
