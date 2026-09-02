@@ -55,6 +55,7 @@ class LeastSquaresProblem:
         self.solution_size = math.prod(self.solution_shape)
         self._dense_normal_equation_cache: dict[Any, tuple[Any, Any]] = {}
         self._dense_normal_pinv_cache = BoundedCache(2)
+        self._svd_cache = BoundedCache(2)
         self.operator_cache = operator_cache
         self.cache_identity = cache_identity
         self.data_normal_matrix_builder = data_normal_matrix_builder
@@ -120,6 +121,24 @@ class LeastSquaresProblem:
         return as_linear_map(w_val, output_shape=shape, input_shape=shape)
 
     @cached_property
+    def backend_operands(self) -> tuple[Any, ...]:
+        """Return active operands without assembling or balancing operators."""
+        operators = self.data_operators + self.weight_operators
+        operators += [
+            operator
+            for operator, strength in zip(
+                self.regularization_operators, self.regularization_strengths, strict=True
+            )
+            if strength > 0.0
+        ]
+        return tuple(
+            operand
+            for operator in operators
+            if operator is not None
+            for operand in operator.backend_operands
+        )
+
+    @cached_property
     def regularization_row_scales(self) -> list[float]:
         """Return row scales for the balanced regularization operators."""
         if not any(
@@ -165,10 +184,10 @@ class LeastSquaresProblem:
         """Materialize the regularized system on the requested backend."""
         return self.system_operator.to_matrix(backend=backend)
 
-    def dense_normal_equations(self) -> tuple[Any, Any, Any, Any]:
-        """Return dense system, adjoint, and normal matrix."""
-        system_matrix = self.system_matrix()
-        xp = get_array_module(system_matrix)
+    def dense_normal_equations(self, *, backend=None) -> tuple[Any, Any, Any, Any]:
+        """Return dense system, adjoint, and normal matrix on one backend."""
+        xp = get_array_module(*self.backend_operands, backend=backend)
+        system_matrix = self.system_matrix(backend=backend)
         if xp not in self._dense_normal_equation_cache:
             system_adjoint = system_matrix.T.conj()
             normal_matrix = system_adjoint @ system_matrix
@@ -177,13 +196,13 @@ class LeastSquaresProblem:
             system_adjoint, normal_matrix = self._dense_normal_equation_cache[xp]
         return xp, system_matrix, system_adjoint, normal_matrix
 
-    def dense_normal_pinv(self, tolerance: float) -> Any:
-        """Return cached pseudo-inverse of the dense normal matrix."""
-        xp = get_array_module()
+    def dense_normal_pinv(self, tolerance: float, *, backend=None) -> Any:
+        """Return the backend-specific cached normal-matrix pseudo-inverse."""
+        xp = get_array_module(*self.backend_operands, backend=backend)
         key = (xp, float(tolerance))
 
         def compute():
-            normal_matrix = self.dense_normal_matrix()
+            normal_matrix = self.dense_normal_matrix(backend=backend)
             normal_pinv = synchronize_linalg_result(
                 xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
             )
@@ -217,16 +236,21 @@ class LeastSquaresProblem:
 
         return self._dense_normal_pinv_cache.get_or_create(key, build)
 
-    def dense_normal_matrix(self) -> Any:
-        """Return the regularized normal matrix."""
-        if self.data_normal_matrix_builder is None:
-            return self.dense_normal_equations()[3]
+    def dense_normal_matrix(self, *, backend=None) -> Any:
+        """Return the regularized normal matrix on the requested backend.
 
+        A supplied data-normal builder is an explicit CPU construction
+        boundary; the completed matrix is transferred to this backend.
+        """
+        if self.data_normal_matrix_builder is None:
+            return self.dense_normal_equations(backend=backend)[3]
+
+        xp = get_array_module(*self.backend_operands, backend=backend)
         data_normal = self._custom_data_normal_matrix()
         regularization_terms = self._active_regularization_terms()
         self._data_normal_matrix_cache = None
         if not regularization_terms:
-            return get_array_module().asarray(data_normal)
+            return xp.asarray(data_normal)
 
         # The builder may return a shared or cached matrix. Regularization
         # belongs to this problem and must not alter the builder's data.
@@ -239,7 +263,7 @@ class LeastSquaresProblem:
                 continue
             matrix = np.asarray(regularization.to_matrix(backend="numpy"))
             normal += weight**2 * (matrix.T.conj() @ matrix)
-        return get_array_module().asarray(normal)
+        return xp.asarray(normal)
 
     def _custom_data_normal_matrix(self) -> np.ndarray:
         """Build and validate a supplied data-term normal matrix."""
@@ -256,10 +280,15 @@ class LeastSquaresProblem:
             self._data_normal_matrix_cache = matrix
         return self._data_normal_matrix_cache
 
-    @cached_property
-    def svd(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute the SVD of the dense system matrix."""
-        return np.linalg.svd(self.system_matrix(backend="numpy"), full_matrices=False)
+    def svd(self, *, backend=None) -> tuple[Any, Any, Any]:
+        """Return cached reduced SVD factors on the requested backend."""
+        xp = get_array_module(*self.backend_operands, backend=backend)
+
+        def factor():
+            matrix = self.system_matrix(backend=backend)
+            return synchronize_linalg_result(xp.linalg.svd(matrix, full_matrices=False))
+
+        return self._svd_cache.get_or_create(xp, factor)
 
     def assemble_rhs_block(
         self, b: Any | list[Any], *, include_regularization: bool = True
@@ -282,8 +311,9 @@ class LeastSquaresProblem:
         )
         system_operator = self.system_operator if include_regularization else self.data_operator
         dtype = system_operator.dtype
-        backend_operands = system_operator.backend_operands
-        xp = get_array_module(*(p[0] for p in valid_b), *backend_operands)
+        # Backend choice uses all active terms, but must not assemble a
+        # regularized system just to apply a previously cached inverse.
+        xp = get_array_module(*(p[0] for p in valid_b), *self.backend_operands)
 
         blocks = []
         for i, (b_col_block, _) in enumerate(processed):

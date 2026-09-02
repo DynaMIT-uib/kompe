@@ -401,6 +401,6 @@ class BasisSubset(SurfaceDifferentialBasis):
         target_mean_free = bool(mean_free)
         if self.mean_free == target_mean_free:
             return self
-        if hasattr(self.parent_basis, "with_mean_free"):
-            return self.parent_basis.with_mean_free(target_mean_free)
+        if target_mean_free in self._related_basis_cache:
+            return self._related_basis_cache[target_mean_free]
         raise NotImplementedError(f"{type(self).__name__} does not define mean-free variants.")

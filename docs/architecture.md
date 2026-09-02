@@ -97,6 +97,23 @@ default with `set_backend("jax")`. NumPy/SciPy remain the reference path;
 SciPy-only sparse formats may stay on that path when no equivalent JAX
 operation exists.
 
+Explicit backend resolution belongs in `math.backend.get_array_module`,
+shared by map materialization and factorization. Least-squares problems own
+their backend-specific SVD factors; solvers and spectral preconditioners
+reuse them. The preconditioner applies `V @ diag(weights) @ V*` with a direct
+kernel to avoid dispatch overhead. Its real spectral weights make the map
+self-adjoint, so forward and adjoint calls share that kernel.
+
+Normal-equation solvers use the same backend-selection policy as SVD.
+Backend selection reads the problem's operand metadata, not its assembled
+system: a persisted inverse must remain usable without rebuilding a normal
+matrix just to determine where a calculation should run.
+Removing zero regularization rows from a right-hand side does not remove
+the regularizer from that policy. Reusable normal-pseudo-inverse responses
+retain their prepared inverse and data adjoint as `LinearMap` objects. They
+reuse device copies without refactorization, even if later solves evict the
+problem's shared factor cache.
+
 ## Component frames
 
 Canonical surface vectors use `(theta, phi)`, equivalent to `(south, east)`.

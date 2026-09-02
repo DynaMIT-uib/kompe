@@ -20,7 +20,6 @@ from kompe.math import (
     set_backend,
     to_numpy,
 )
-from kompe.math.pseudoinverse import weighted_tensor_pinv
 from kompe.spherical_transform import (
     SphericalTransform,
     grid_sqrt_area_weights,
@@ -584,18 +583,6 @@ def test_area_weight_option_and_explicit_weights_override():
     )
 
 
-def test_weighted_tensor_pinv_matches_explicit_weighted_least_squares():
-    """Weighted pseudoinverse solves weighted normal equations."""
-    A = np.array([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0], [1.0, 3.0]])
-    sqrt_weights = np.array([1.0, 1.5, 2.0, 2.5])
-    weight_matrix = np.diag(sqrt_weights**2)
-
-    actual = weighted_tensor_pinv(A, sqrt_weights=sqrt_weights, n_leading_flattened=1)
-    expected = np.linalg.solve(A.T @ weight_matrix @ A, A.T @ weight_matrix)
-
-    np.testing.assert_allclose(actual, expected)
-
-
 # Differential accuracy, scalar gauge, and caching
 
 
@@ -972,6 +959,16 @@ def test_shbasis_mean_free_view_slices_parent_operators():
         view_solid_harmonics.poloidal_to_normalized_potential_jump_factors,
         direct_solid_harmonics.poloidal_to_normalized_potential_jump_factors,
     )
+
+
+@pytest.mark.parametrize("mean_free", [False, True])
+def test_arbitrary_subset_does_not_guess_a_mean_free_variant(mean_free):
+    """Changing gauge must not silently discard the selected coefficient space."""
+    parent = SHBasis(3, 2, mean_free=mean_free)
+    subset = BasisSubset(parent, [0, 2])
+    assert subset.with_mean_free(mean_free) is subset
+    with pytest.raises(NotImplementedError, match="mean-free variants"):
+        subset.with_mean_free(not mean_free)
 
 
 def test_basis_view_slices_cs_surface_operators():

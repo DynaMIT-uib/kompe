@@ -1,7 +1,4 @@
-"""Tensor operations module.
-
-Backend-aware tensor contraction and pseudoinverse helpers.
-"""
+"""Backend-aware pseudoinverses preserving coefficient and data axes."""
 
 from __future__ import annotations
 
@@ -33,16 +30,8 @@ def weighted_tensor_pinv(A, sqrt_weights=None, n_leading_flattened=2, rtol=1e-15
 
     xp = get_array_module(A, sqrt_weights)
     A_arr = xp.asarray(A)
-    weights = xp.asarray(sqrt_weights)
-
     first_dims = A_arr.shape[:n_leading_flattened]
     last_dims = A_arr.shape[n_leading_flattened:]
-    flat_first = math.prod(first_dims)
-    flat_last = math.prod(last_dims)
-
-    weights_flat = weights.reshape(flat_first)
-    A_flat = A_arr.reshape((flat_first, flat_last))
-    weighted_A = weights_flat.reshape((-1, 1)) * A_flat
-    weighted_pinv = xp.linalg.pinv(weighted_A, rtol=rtol)
-    weighted_pinv = synchronize_linalg_result(weighted_pinv)
-    return (weighted_pinv * weights_flat.reshape((1, -1))).reshape(last_dims + first_dims)
+    weights = xp.asarray(sqrt_weights).reshape(first_dims)
+    weighted_A = weights.reshape(first_dims + (1,) * len(last_dims)) * A_arr
+    return tensor_pinv(weighted_A, n_leading_flattened=n_leading_flattened, rtol=rtol) * weights

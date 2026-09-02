@@ -21,6 +21,21 @@ constructor weights. The constructor keywords `A` and `sqrt_weights` are
 unchanged. Use `len(problem.data_operators)` or
 `len(problem.regularization_operators)` instead of stored term counts.
 
+`LeastSquaresProblem.svd` is now a method: use `problem.svd()` or select
+`backend="numpy"` / `backend="jax"` explicitly. It retains one reduced
+factorization per backend rather than forcing all SVD work onto the CPU.
+
+Dense `LeastSquaresSolver` algorithms now reject unsupported keyword options
+such as `damp` and `maxiter`; these were previously ignored. LSMR also rejects
+nonzero `damp` with a right preconditioner, which previously changed the
+regularization coordinates. Put the penalty explicitly in the problem when
+preconditioning a regularized solve.
+
+`BasisSubset.with_mean_free()` only returns an explicitly registered related
+space. The SH full/mean-free pair continues to round-trip. An arbitrary
+subset cannot infer a different gauge and now raises `NotImplementedError`
+instead of silently returning a larger parent-derived coefficient space.
+
 `LinearMap.diagonal()` requires declared diagonal structure. It no longer
 materializes an unknown operator to test whether its off-diagonal entries
 happen to be zero. Use `diagonal_linear_map` when constructing a diagonal map.

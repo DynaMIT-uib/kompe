@@ -99,9 +99,40 @@ of maps, separate from the assembled weighted `data_operator` and regularized
 operator and an explicit nonzero regularizer; it never invents a unit scale or
 silently discards a positive strength.
 
+`problem.svd(backend=None)` returns the reduced `U, s, Vh` factors and caches
+them separately for NumPy and JAX. SVD solves and spectral preconditioners
+reuse these same factors; JAX solves do not round-trip through NumPy.
+
+The normal-equation helpers `dense_normal_equations`, `dense_normal_matrix`,
+and `dense_normal_pinv` likewise accept `backend=`. Dense solvers infer the
+execution backend from all active operators and the right-hand side, even
+when only the regularizer is a JAX array. Reusable response solvers keep
+separate materializations when subsequent right-hand sides select different
+backends without recomputing their prepared factorization. A custom
+data-normal-matrix builder remains an explicit CPU
+construction boundary; its completed result is transferred to the selected
+backend for factorization and application.
+
+`LeastSquaresSolver.solve(..., **options)` accepts options supported by its
+selected iterative algorithm. Dense algorithms (`svd`, `normal_solve`, and
+`normal_pinv`) reject extra options instead of silently ignoring them.
+LSMR supports `damp=sqrt(reg_lambda)` for coefficient-norm regularization
+without augmented rows. Nonzero damping cannot be combined with a right
+preconditioner: that would penalize the transformed coordinates instead.
+Represent the penalty explicitly in `LeastSquaresProblem` for such solves.
+Its `regularization_strengths` are relative and scale-balanced; an absolute
+penalty `lambda * ||L x||²` can instead be represented by an additional data
+operator `sqrt(lambda) * L` with right-hand side `None` (zero).
+
 NumPy/SciPy is the reference backend. JAX is optional and lazy. Select it with
 `kompe.math.set_backend("jax")`, a `backend_context("jax")`, or explicit JAX
 arrays. Kompe never changes JAX's global 64-bit setting.
+`get_array_module(*arrays, backend=None)` uses an explicit backend when given,
+otherwise JAX operands take precedence over the configured default. For
+example, `get_array_module(values, backend="numpy")` selects NumPy without
+changing the global setting; converting the values remains explicit.
+`get_backend(*arrays)` reports the corresponding `"numpy"` or `"jax"` name;
+with no operands, `get_backend()` reports the configured default.
 
 ## Cache lifecycle
 

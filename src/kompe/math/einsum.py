@@ -96,15 +96,6 @@ def _remap_subscript(subscript: str, label_map: dict[str, str], used_labels: set
     return "".join(remapped)
 
 
-def _remap_component_subscripts(
-    component_subscripts: Sequence[str], label_map: dict[str, str], used_labels: set[str]
-) -> tuple[str, ...]:
-    """Remap all component tensor subscripts for one einsum map."""
-    return tuple(
-        _remap_subscript(subscript, label_map, used_labels) for subscript in component_subscripts
-    )
-
-
 def _remap_einsum_components(
     einsum_map: _EinsumMap, output_labels: str, input_labels: str, used_labels: set[str]
 ) -> tuple[str, ...]:
@@ -113,7 +104,9 @@ def _remap_einsum_components(
     output_old, input_old = _dense_axis_labels(einsum_map)
     label_map = dict(zip(output_old, output_labels, strict=True))
     label_map.update(zip(input_old, input_labels, strict=True))
-    return _remap_component_subscripts(component_subscripts, label_map, used_labels)
+    return tuple(
+        _remap_subscript(subscript, label_map, used_labels) for subscript in component_subscripts
+    )
 
 
 def compose_einsum_maps(left: _EinsumMap, right: _EinsumMap) -> _EinsumMap:

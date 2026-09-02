@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 from scipy.sparse.linalg import lsmr as scipy_lsmr
 
-from kompe.math import LinearMap, as_linear_map, get_array_module, jax_enabled, set_backend
+from kompe.math import (
+    LinearMap,
+    as_linear_map,
+    backend_context,
+    get_array_module,
+    jax_enabled,
+    set_backend,
+)
 from kompe.math.least_squares_problem import LeastSquaresProblem
 from kompe.math.least_squares_solver import (
     LEAST_SQUARES_SOLVER_ENV,
@@ -371,8 +378,8 @@ def test_normal_pinv_discards_only_derived_regularized_matrix():
 
     xp = get_array_module()
     assert regularized_system is not problem.data_operator
-    assert regularized_system._cached_dense(xp) is None
-    assert problem.data_operator._cached_dense(xp) is not None
+    assert xp not in regularized_system._dense_cache
+    assert xp in problem.data_operator._dense_cache
 
 
 def test_least_squares_requires_at_least_one_rhs_term():
@@ -451,6 +458,281 @@ def test_normal_pinv_solve_reuses_cached_pseudo_inverse(monkeypatch):
     np.testing.assert_allclose(second, normal_pinv @ (A_H @ rhs_second))
     assert len(problem._dense_normal_pinv_cache) == 1
     assert calls == (0 if jax_enabled() else 1)
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_svd_solves_and_preconditioners_share_factorization(backend, monkeypatch):
+    """One SVD serves repeated solves and both spectral preconditioners."""
+    matrix = np.diag([3j, 0.0, 2.0])
+    rhs = np.array([1.0 + 1j, 2.0 - 1j, 0.5j])
+    expected = np.linalg.pinv(matrix, rtol=1e-12) @ rhs
+    with backend_context(backend):
+        xp = get_array_module()
+        original_svd = xp.linalg.svd
+        calls = []
+
+        def svd(*args, **kwargs):
+            calls.append(args[0])
+            return original_svd(*args, **kwargs)
+
+        monkeypatch.setattr(xp.linalg, "svd", svd)
+        problem = LeastSquaresProblem(A=xp.asarray(matrix), solution_shape=3, data_shapes=3)
+        solver = LeastSquaresSolver("svd", tolerance=1e-12)
+        with np.errstate(divide="raise", invalid="raise"):
+            for scale in (1.0, 2.0):
+                result = solver.solve(problem, xp.asarray(scale * rhs))
+                assert isinstance(result, xp.ndarray)
+                np.testing.assert_allclose(result, scale * expected, atol=1e-12)
+            for algorithm, power in (("lsmr", 1), ("cgls", 2)):
+                preconditioner = LeastSquaresSolver(
+                    algorithm, tolerance=1e-12, preconditioner="pinv"
+                ).build_preconditioner(problem)
+                block = preconditioner.matmat(xp.eye(3))
+                assert isinstance(block, xp.ndarray)
+                np.testing.assert_allclose(
+                    block, np.diag(np.array([1 / 3, 0, 1 / 2]) ** power), atol=1e-12
+                )
+        assert len(calls) == 1
+
+
+@pytest.mark.requires_jax
+def test_svd_cache_keeps_separate_numpy_and_jax_factors(monkeypatch):
+    """Changing execution backend never reuses factors on the wrong device."""
+    import jax.numpy as jnp
+
+    problem = LeastSquaresProblem(A=np.diag([1.0, 2.0]), solution_shape=2, data_shapes=2)
+    calls = []
+    for xp in (np, jnp):
+        original_svd = xp.linalg.svd
+
+        def svd(*args, _svd=original_svd, _xp=xp, **kwargs):
+            calls.append(_xp)
+            return _svd(*args, **kwargs)
+
+        monkeypatch.setattr(xp.linalg, "svd", svd)
+
+    for configured in ("jax", "numpy"):
+        with backend_context(configured):
+            for requested, xp in (("numpy", np), ("jax", jnp)):
+                factors = problem.svd(backend=requested)
+                assert all(isinstance(value, xp.ndarray) for value in factors)
+                assert problem.svd(backend=requested) is factors
+    assert calls == [np, jnp]
+
+
+@pytest.mark.requires_jax
+@pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd"])
+@pytest.mark.parametrize("jax_source", ["configured", "operator", "rhs", "regularizer"])
+def test_dense_solve_stays_on_jax(solver_name, jax_source, monkeypatch):
+    """Every dense solve honors JAX data, operators, and backend settings."""
+    import jax.numpy as jnp
+
+    import kompe.math.least_squares_problem as problem_module
+    import kompe.math.least_squares_solver as solver_module
+
+    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
+    rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
+    expected = np.linalg.lstsq(matrix, rhs, rcond=None)[0]
+    if jax_source == "regularizer":
+        expected /= 1.5  # L = A, with relative strength 0.5.
+
+    def reject_numpy(*_args, **_kwargs):
+        pytest.fail("JAX solve must not transfer to or factorize with NumPy")
+
+    monkeypatch.setattr(np.linalg, "svd", reject_numpy)
+    monkeypatch.setattr(np.linalg, "solve", reject_numpy)
+    monkeypatch.setattr(np.linalg, "pinv", reject_numpy)
+    monkeypatch.setattr(problem_module, "to_numpy", reject_numpy)
+    monkeypatch.setattr(solver_module, "to_numpy", reject_numpy)
+    with backend_context("jax" if jax_source == "configured" else "numpy"):
+        problem = LeastSquaresProblem(
+            A=jnp.asarray(matrix) if jax_source == "operator" else matrix,
+            solution_shape=2,
+            data_shapes=3,
+            regularization_operators=jnp.asarray(matrix) if jax_source == "regularizer" else None,
+            regularization_strengths=0.5 if jax_source == "regularizer" else None,
+        )
+        result = LeastSquaresSolver(solver_name, tolerance=1e-12).solve(
+            problem, jnp.asarray(rhs) if jax_source == "rhs" else rhs
+        )
+    assert isinstance(result, jnp.ndarray)
+    np.testing.assert_allclose(result, expected, atol=1e-12)
+
+
+@pytest.mark.requires_jax
+def test_normal_response_reuses_prepared_factors_across_backends(monkeypatch):
+    """Changing RHS backend reuses the prepared inverse, not another solve."""
+    import jax.numpy as jnp
+
+    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
+    rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
+    expected = np.linalg.lstsq(matrix, rhs, rcond=None)[0]
+    calls = []
+    for xp in (np, jnp):
+        original_pinv = xp.linalg.pinv
+
+        def pinv(*args, _pinv=original_pinv, _xp=xp, **kwargs):
+            calls.append(_xp)
+            return _pinv(*args, **kwargs)
+
+        monkeypatch.setattr(xp.linalg, "pinv", pinv)
+
+    with backend_context("numpy"):
+        problem = LeastSquaresProblem(A=matrix, solution_shape=2, data_shapes=3)
+        response = LeastSquaresSolver("normal_pinv", tolerance=1e-12).build_response_solver(
+            problem
+        )
+        assert calls == [np]  # Preparation still warms the ordinary path.
+        for xp in (np, jnp, jnp, np):
+            result = response(xp.asarray(rhs))
+            assert isinstance(result, xp.ndarray)
+            np.testing.assert_allclose(result, expected, atol=1e-12)
+    assert calls == [np]
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_prepared_response_retains_factors_after_problem_cache_eviction(backend, monkeypatch):
+    """Prepared responses own their factors beyond the shared cache lifetime."""
+    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
+    rhs = np.array([1.0, 3.0, 0.5])
+    expected = np.linalg.lstsq(matrix, rhs, rcond=None)[0]
+    with backend_context("numpy"):
+        problem = LeastSquaresProblem(A=matrix, solution_shape=2, data_shapes=3)
+        response = LeastSquaresSolver("normal_pinv").build_response_solver(problem)
+
+    problem._dense_normal_pinv_cache.clear()
+
+    def reject_refactorization(*_args, **_kwargs):
+        pytest.fail("A prepared response must retain its factorization")
+
+    monkeypatch.setattr(problem, "dense_normal_pinv", reject_refactorization)
+    with backend_context(backend):
+        xp = get_array_module()
+        result = response(xp.asarray(rhs))
+        assert isinstance(result, xp.ndarray)
+    np.testing.assert_allclose(result, expected, atol=1e-12)
+
+
+@pytest.mark.requires_jax
+@pytest.mark.parametrize("custom_builder", [False, True])
+def test_normal_matrices_and_factors_respect_explicit_backend(custom_builder):
+    """Explicit NumPy/JAX requests also govern custom-builder results."""
+    import jax.numpy as jnp
+
+    matrix = np.array([[2.0 + 1j, 0.0], [0.0, 3.0 - 1j], [1.0, -1j]])
+    data_normal = matrix.T.conj() @ matrix
+    expected = data_normal + 0.1 * np.median(np.diag(data_normal).real) * np.eye(2)
+    problem = LeastSquaresProblem(
+        A=jnp.asarray(matrix),
+        solution_shape=2,
+        data_shapes=3,
+        regularization_operators=jnp.eye(2),
+        regularization_strengths=0.1,
+        data_normal_matrix_builder=(lambda: data_normal) if custom_builder else None,
+    )
+    for configured in ("jax", "numpy"):
+        with backend_context(configured):
+            for requested, xp in (("numpy", np), ("jax", jnp)):
+                selected_xp, system, adjoint, normal = problem.dense_normal_equations(
+                    backend=requested
+                )
+                assert selected_xp is xp
+                assert all(isinstance(array, xp.ndarray) for array in (system, adjoint, normal))
+                np.testing.assert_allclose(normal, expected, atol=1e-12)
+                built_normal = problem.dense_normal_matrix(backend=requested)
+                inverse = problem.dense_normal_pinv(1e-12, backend=requested)
+                assert isinstance(built_normal, xp.ndarray)
+                assert isinstance(inverse, xp.ndarray)
+                np.testing.assert_allclose(built_normal, expected, atol=1e-12)
+                np.testing.assert_allclose(
+                    inverse, np.linalg.pinv(expected, hermitian=True), atol=1e-12
+                )
+                assert problem.dense_normal_pinv(1e-12, backend=requested) is inverse
+    np.testing.assert_array_equal(data_normal, matrix.T.conj() @ matrix)
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_cached_inverse_backend_selection_does_not_build_normal_matrix(backend):
+    """A persisted inverse is sufficient even with a custom regularized fit."""
+    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
+    rhs = np.array([1.0, 3.0, 0.5])
+    normal = matrix.T @ matrix
+    normal += 0.1 * np.median(np.diag(normal)) * np.eye(2)
+    inverse = np.linalg.pinv(normal, hermitian=True)
+
+    class PrecomputedCache:
+        def get_or_create(self, category, identity, builder):
+            assert category == "least_squares_normal_pinv"
+            assert identity["backend"] == ("numpy" if backend == "numpy" else "jax.numpy")
+            return inverse
+
+    def reject_build():
+        pytest.fail("A cache hit must not build or balance the normal matrix")
+
+    with backend_context("numpy"):
+        xp = get_array_module(backend=backend)
+        problem = LeastSquaresProblem(
+            A=matrix,
+            solution_shape=2,
+            data_shapes=3,
+            regularization_operators=xp.eye(2),
+            regularization_strengths=0.1,
+            operator_cache=PrecomputedCache(),
+            cache_identity="precomputed",
+            data_normal_matrix_builder=reject_build,
+        )
+        solver = LeastSquaresSolver("normal_pinv")
+        for solve in (
+            lambda values: solver.solve(problem, values),
+            solver.build_response_solver(problem),
+        ):
+            result = solve(rhs)
+            assert isinstance(result, xp.ndarray)
+            np.testing.assert_allclose(result, inverse @ (matrix.T @ rhs), atol=1e-12)
+        assert "regularization_row_scales" not in problem.__dict__
+        assert "system_operator" not in problem.__dict__
+
+
+@pytest.mark.requires_jax
+@pytest.mark.parametrize("jax_source", ["operator", "regularizer"])
+def test_normal_response_prepares_only_the_operand_backend(jax_source):
+    """Preparing a JAX-backed response must not also build CPU matrices."""
+    import jax.numpy as jnp
+
+    matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
+    with backend_context("numpy"):
+        problem = LeastSquaresProblem(
+            A=jnp.asarray(matrix) if jax_source == "operator" else matrix,
+            solution_shape=2,
+            data_shapes=3,
+            regularization_operators=jnp.asarray(matrix) if jax_source == "regularizer" else None,
+            regularization_strengths=0.5 if jax_source == "regularizer" else None,
+        )
+        response = LeastSquaresSolver("normal_pinv").build_response_solver(problem)
+        assert np not in problem.data_operator._dense_cache
+        assert isinstance(problem.data_operator._dense_cache[jnp], jnp.ndarray)
+        assert isinstance(response(np.ones(3)), jnp.ndarray)
+
+
+@pytest.mark.requires_jax
+def test_numpy_spectral_preconditioner_accepts_jax_operands():
+    """Preconditioner application follows its operands after NumPy construction."""
+    import jax.numpy as jnp
+
+    with backend_context("numpy"):
+        problem = LeastSquaresProblem(A=np.diag([2.0, 4.0]), solution_shape=2, data_shapes=2)
+        preconditioner = LeastSquaresSolver("lsmr", preconditioner="pinv").build_preconditioner(
+            problem
+        )
+        for method, operand in (
+            ("matvec", jnp.ones(2)),
+            ("rmatvec", jnp.ones(2)),
+            ("matmat", jnp.eye(2)),
+            ("rmatmat", jnp.eye(2)),
+        ):
+            result = getattr(preconditioner, method)(operand)
+            assert isinstance(result, jnp.ndarray)
+            np.testing.assert_allclose(result, np.diag([0.5, 0.25]) @ np.asarray(operand))
 
 
 # Dense JAX solves
@@ -813,6 +1095,44 @@ def test_dense_solvers_reject_explicit_preconditioners(solver_name, entrypoint):
             solver.solve(problem, np.ones(2), preconditioner=preconditioner)
         else:
             solver.build_response_solver(problem, preconditioner=preconditioner)
+
+
+@pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd"])
+@pytest.mark.parametrize("option, value", [("damp", 1.0), ("maxiter", 20)])
+def test_dense_solvers_reject_unsupported_options(solver_name, option, value):
+    """Changing algorithms must not silently discard solver options."""
+    problem = LeastSquaresProblem(A=np.eye(2), solution_shape=2, data_shapes=2)
+
+    with pytest.raises(TypeError, match=f"unexpected keyword argument '{option}'"):
+        LeastSquaresSolver(solver_name).solve(problem, np.ones(2), **{option: value})
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_lsmr_damping_does_not_change_meaning_with_preconditioning(backend):
+    """Damping cannot silently move its penalty to transformed coordinates."""
+    with backend_context(backend):
+        xp = get_array_module()
+        identity = xp.eye(2)
+        rhs = xp.ones(2)
+        problem = LeastSquaresProblem(A=identity, solution_shape=2, data_shapes=2)
+        preconditioner = as_linear_map(xp.asarray([2.0, 3.0]))
+        solver = LeastSquaresSolver("lsmr", tolerance=1e-12)
+
+        with pytest.raises(ValueError, match="damp.*right preconditioner"):
+            solver.solve(problem, rhs, damp=1.0, preconditioner=preconditioner)
+
+        np.testing.assert_allclose(
+            solver.solve(problem, rhs, damp=0.0, preconditioner=preconditioner), rhs
+        )
+        np.testing.assert_allclose(solver.solve(problem, rhs, damp=1.0), 0.5 * rhs)
+
+        # An explicit penalty stays in the original coefficient coordinates.
+        regularized = LeastSquaresProblem(
+            A=[identity, identity], solution_shape=2, data_shapes=[2, 2]
+        )
+        np.testing.assert_allclose(
+            solver.solve(regularized, [rhs, None], preconditioner=preconditioner), 0.5 * rhs
+        )
 
 
 @pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd"])

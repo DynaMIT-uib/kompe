@@ -68,8 +68,14 @@ def jax_enabled() -> bool:
     return bool(_USE_JAX and JAX_AVAILABLE)
 
 
-def get_backend() -> str:
-    """Return the active array backend name."""
+def get_backend(*arrays: Any) -> str:
+    """Return the operand-implied or configured backend name.
+
+    With no operands, report the configured backend without importing
+    JAX. Otherwise, follow ``get_array_module(*arrays)``.
+    """
+    if arrays:
+        return "numpy" if get_array_module(*arrays) is _np else "jax"
     return "jax" if jax_enabled() else "numpy"
 
 
@@ -119,11 +125,21 @@ def backend_context(backend: str | bool | None):
             os.environ["KOMPE_USE_JAX"] = previous_env
 
 
-def get_array_module(*arrays: Any) -> types.ModuleType:
-    """Return the active array module.
+def get_array_module(*arrays: Any, backend: str | None = None) -> types.ModuleType:
+    """Return the requested, operand-implied, or configured array module.
 
-    Explicit JAX inputs take precedence over the global backend setting.
+    An explicit ``backend`` takes precedence over operands. Otherwise,
+    JAX inputs take precedence over the global backend setting.
     """
+    if backend is not None:
+        if not isinstance(backend, str):
+            raise TypeError("backend must be None, 'numpy', or 'jax'.")
+        normalized = backend.strip().lower()
+        if normalized == "numpy":
+            return _np
+        if normalized == "jax":
+            return _load_jax()
+        raise ValueError(f"Unknown array backend {backend!r}. Use None, 'numpy', or 'jax'.")
     if arrays:
         for array in arrays:
             if _is_jax_array(array):

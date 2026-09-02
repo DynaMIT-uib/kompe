@@ -946,7 +946,7 @@ def test_mean_free_sh_helmholtz_analysis_uses_full_rank_factorization(area_weigh
     actual = transform.analyze_helmholtz(values)
     expected = reference.analyze_helmholtz(values, solver="normal_pinv")
 
-    assert operator._cached_dense(np) is None
+    assert np not in operator._dense_cache
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
 
     if jax_enabled():
@@ -1045,7 +1045,7 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
     expected = reference_transform.analyze_helmholtz(values, solver="normal_pinv")
     expected = basis.project_helmholtz_mean_free(expected)
 
-    assert operator._cached_dense(np) is None
+    assert np not in operator._dense_cache
     assert "helmholtz_least_squares_problem" not in transform.__dict__
     np.testing.assert_allclose(actual, expected, rtol=2e-11, atol=2e-11)
     np.testing.assert_allclose(api_actual, actual)

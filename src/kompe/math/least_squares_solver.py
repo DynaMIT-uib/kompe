@@ -15,6 +15,7 @@ from scipy.sparse.linalg import LinearOperator, cg, lsmr, splu
 from kompe.math.backend import (
     block_until_ready,
     get_array_module,
+    get_backend,
     synchronize_linalg_result,
     to_numpy,
 )
@@ -26,6 +27,16 @@ ITERATION_SAFETY_FACTOR: Final = 10
 LEAST_SQUARES_SOLVER_ENV: Final = "KOMPE_LEAST_SQUARES_SOLVER"
 LSMR_TOLERANCE_STOP_CODES: Final = frozenset({0, 1, 2})
 PreconditionerInput = LinearOperator | LinearMap | None
+
+
+def _inverse_singular_values(singular_values, tolerance):
+    """Invert retained singular values and leave the numerical nullspace zero."""
+    xp = get_array_module(singular_values)
+    cutoff = tolerance * (singular_values[0] if singular_values.size else 0.0)
+    retained = singular_values > cutoff
+    # Excluded zeros must not be divided by, even in JAX's unselected branch.
+    denominator = xp.where(retained, singular_values, 1.0)
+    return xp.where(retained, 1.0 / denominator, 0.0)
 
 
 def _squared_objective_weights(sqrt_weights, size):
@@ -330,8 +341,23 @@ class LeastSquaresSolver:
         preconditioner: PreconditionerInput = None,
         **kwargs,
     ) -> Any:
-        """Solve least-squares problem for given right-hand side(s)."""
+        """Solve least squares with algorithm-specific keyword options.
+
+        Nonzero LSMR ``damp`` cannot be combined with a right preconditioner,
+        which would change the regularization coordinates. Express that
+        regularization in ``problem`` instead.
+        """
         preconditioner_map = self._prepare_preconditioner(problem, preconditioner)
+        if (
+            self.solver == "lsmr"
+            and preconditioner_map is not None
+            and kwargs.get("damp", 0.0) != 0.0
+        ):
+            raise ValueError(
+                "Nonzero LSMR damp cannot be combined with a right preconditioner: "
+                "it would penalize preconditioned coordinates. "
+                "Specify regularization in LeastSquaresProblem instead."
+            )
         rhs_block, rhs_shape, num_rhs = problem.assemble_rhs_block(
             rhs, include_regularization=self.solver != "normal_pinv"
         )
@@ -380,30 +406,28 @@ class LeastSquaresSolver:
         return solve_response
 
     def _solve_svd(
-        self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args, **_kwargs
+        self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args
     ) -> np.ndarray:
-        xp = get_array_module(rhs_block)
-        u, s, vt = problem.svd
-        rhs_np = to_numpy(rhs_block)
-        cutoff = self.tolerance * (s[0] if s.size > 0 else 0)
-        safe_s = np.where(s > cutoff, s, 1.0)
-        s_inv = np.where(s > cutoff, 1.0 / safe_s, np.zeros_like(s))
-        solution = vt.T.conj() @ (s_inv[:, None] * (u.T.conj() @ rhs_np))
-        return xp.asarray(solution)
+        u, s, vt = problem.svd(backend=get_backend(rhs_block))
+        s_inv = _inverse_singular_values(s, self.tolerance)
+        return vt.T.conj() @ (s_inv[:, None] * (u.T.conj() @ rhs_block))
 
     def _solve_normal_solve(
-        self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args, **_kwargs
+        self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args
     ) -> np.ndarray:
         """Solve the normal equations with a direct dense solve."""
-        xp, normal_matrix, normal_rhs = self._dense_normal_equations(problem, rhs_block)
+        xp, _, system_adjoint, normal_matrix = problem.dense_normal_equations(
+            backend=get_backend(rhs_block)
+        )
+        normal_rhs = system_adjoint @ block_until_ready(rhs_block)
         return synchronize_linalg_result(xp.linalg.solve(normal_matrix, normal_rhs))
 
     def _solve_normal_pinv(
-        self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args, **_kwargs
+        self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args
     ) -> np.ndarray:
         """Solve through the pseudo-inverse of the normal equations."""
         normal_rhs = problem.data_operator.rmatmat(rhs_block)
-        normal_pinv = problem.dense_normal_pinv(self.tolerance)
+        normal_pinv = problem.dense_normal_pinv(self.tolerance, backend=get_backend(normal_rhs))
         # Finish this dependent backend matmul before callers assemble
         # NumPy/SciPy blocks.
         return block_until_ready(normal_pinv @ normal_rhs)
@@ -412,26 +436,21 @@ class LeastSquaresSolver:
         self, problem: LeastSquaresProblem
     ) -> Callable[[np.ndarray | list[np.ndarray]], Any]:
         """Build a dense normal-pinv solver for repeated response blocks."""
-        normal_pinv = problem.dense_normal_pinv(self.tolerance)
-        data_operator = problem.data_operator
-        xp = get_array_module(normal_pinv, *data_operator.backend_operands)
-        data_matrix = xp.asarray(data_operator.to_matrix())
-        data_adjoint = xp.swapaxes(xp.conjugate(data_matrix), -2, -1)
+        # Retain the prepared factorization independently of cache eviction.
+        # LinearMap reuses its device copies when later RHS backends differ.
+        normal_pinv = as_linear_map(problem.dense_normal_pinv(self.tolerance))
+        data_adjoint = problem.data_operator.adjoint()
+        data_adjoint.to_matrix(backend=get_backend(*normal_pinv.backend_operands))
 
         def solve_response(rhs: np.ndarray | list[np.ndarray]) -> Any:
             rhs_block, rhs_shape, _ = problem.assemble_rhs_block(rhs, include_regularization=False)
-            solution_block = normal_pinv @ (data_adjoint @ rhs_block)
+            backend = get_backend(rhs_block)
+            solution_block = normal_pinv.to_matrix(backend=backend) @ (
+                data_adjoint.to_matrix(backend=backend) @ rhs_block
+            )
             return block_until_ready(solution_block.reshape(problem.solution_shape + rhs_shape))
 
         return solve_response
-
-    def _dense_normal_equations(
-        self, problem: LeastSquaresProblem, rhs_block: np.ndarray
-    ) -> tuple[Any, Any, Any]:
-        """Return dense normal-equation matrix and RHS."""
-        xp, _, system_matrix_adjoint, normal_matrix = problem.dense_normal_equations()
-        rhs = block_until_ready(xp.asarray(rhs_block))
-        return xp, normal_matrix, system_matrix_adjoint @ rhs
 
     def _solve_lsmr(
         self,
@@ -614,68 +633,36 @@ class LeastSquaresSolver:
         self, problem: LeastSquaresProblem, *, squared: bool
     ) -> LinearMap:
         """Build a spectral pseudo-inverse preconditioner."""
-        vt, s_pinv, s_pinv_sq = self._get_pinv_components(problem, self.tolerance)
-        weights = s_pinv_sq if squared else s_pinv
-        return self._build_spectral_preconditioner(
-            problem.solution_size, vt, weights, problem.solution_shape
-        )
+        _, s, vt = problem.svd()
+        s_pinv = _inverse_singular_values(s, self.tolerance)
+        weights = s_pinv**2 if squared else s_pinv
 
-    def _build_spectral_preconditioner(
-        self, size: int, vt: Any, weights: Any, solution_shape: tuple[int, ...]
-    ) -> LinearMap:
-        """Build a backend-aware spectral preconditioner."""
-        xp = get_array_module(vt, weights)
-        vt_arr = xp.asarray(vt)
-        weights_arr = xp.asarray(weights)
+        def matvec(values):
+            xp = get_array_module(values, vt, weights)
+            vectors = xp.asarray(vt)
+            values = xp.asarray(values).reshape(problem.solution_size)
+            return vectors.T.conj() @ (xp.asarray(weights) * (vectors @ values))
 
-        def matvec(x_flat):
-            x = xp.asarray(x_flat).reshape(size)
-            return vt_arr.T.conj() @ (weights_arr * (vt_arr @ x))
+        def matmat(values):
+            xp = get_array_module(values, vt, weights)
+            vectors = xp.asarray(vt)
+            values = xp.asarray(values).reshape(problem.solution_size, -1)
+            return vectors.T.conj() @ (xp.asarray(weights)[:, None] * (vectors @ values))
 
-        def rmatvec(x_flat):
-            x = xp.asarray(x_flat).reshape(size)
-            return vt_arr.T.conj() @ (xp.conjugate(weights_arr) * (vt_arr @ x))
-
-        def matmat(block):
-            x = xp.asarray(block).reshape(size, -1)
-            return vt_arr.T.conj() @ (weights_arr.reshape(-1, 1) * (vt_arr @ x))
-
-        def rmatmat(block):
-            x = xp.asarray(block).reshape(size, -1)
-            return vt_arr.T.conj() @ (xp.conjugate(weights_arr).reshape(-1, 1) * (vt_arr @ x))
-
-        dtype = np.result_type(vt_arr.dtype, weights_arr.dtype)
+        # Real spectral weights make V diag(weights) V* self-adjoint.
+        # Keep this direct kernel: composing three maps adds measurable
+        # dispatch overhead to each NumPy preconditioner application.
         return LinearMap(
-            shape=(size, size),
-            dtype=dtype,
+            shape=(problem.solution_size, problem.solution_size),
+            dtype=np.result_type(vt.dtype, weights.dtype),
             matvec=matvec,
-            rmatvec=rmatvec,
+            rmatvec=matvec,
             matmat=matmat,
-            rmatmat=rmatmat,
-            backend_operands=(vt_arr, weights_arr),
-            output_shape=solution_shape,
-            input_shape=solution_shape,
+            rmatmat=matmat,
+            backend_operands=(vt, weights),
+            input_shape=problem.solution_shape,
+            output_shape=problem.solution_shape,
         )
-
-    def _get_pinv_components(
-        self, problem: LeastSquaresProblem, tol: float
-    ) -> tuple[Any, Any, Any]:
-        """Return SVD factors for preconditioners."""
-        xp = get_array_module()
-        if xp is np:
-            _, s, vt = problem.svd
-            s_pinv = np.zeros_like(s)
-            cutoff = tol * (s[0] if s.size > 0 else 0)
-            s_pinv[s > cutoff] = 1.0 / s[s > cutoff]
-        else:
-            system_matrix = block_until_ready(problem.system_matrix())
-            _, s, vt = synchronize_linalg_result(xp.linalg.svd(system_matrix, full_matrices=False))
-            cutoff = tol * (s[0] if s.size > 0 else 0)
-            safe_s = xp.where(s > cutoff, s, 1.0)
-            s_pinv = xp.where(s > cutoff, 1.0 / safe_s, xp.zeros_like(s))
-            s_pinv = block_until_ready(s_pinv)
-
-        return vt, s_pinv, s_pinv**2
 
 
 def get_default_least_squares_solver(default: str = "normal_pinv") -> str:

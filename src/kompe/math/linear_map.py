@@ -13,7 +13,6 @@ import scipy.sparse
 from scipy.sparse.linalg import LinearOperator as ScipyLinearOperator
 
 from kompe.math.backend import (
-    JAX_AVAILABLE,
     block_until_ready,
     get_array_module,
     readonly_numpy_array,
@@ -23,25 +22,6 @@ from kompe.math.backend import (
 MatrixShape: TypeAlias = tuple[int, int]
 VectorizedMapFunc: TypeAlias = Callable[[Any], Any]
 ArrayBackend: TypeAlias = Literal["numpy", "jax"]
-
-
-def _array_module_for_backend(backend: ArrayBackend | None = None) -> Any:
-    """Return the requested array module for explicit values."""
-    if backend is None:
-        return None
-    if not isinstance(backend, str):
-        raise TypeError("backend must be None, 'numpy', or 'jax'.")
-
-    normalized = backend.strip().lower()
-    if normalized == "numpy":
-        return np
-    if normalized == "jax":
-        if not JAX_AVAILABLE:
-            raise RuntimeError("JAX is not installed; cannot materialize on JAX.")
-        import jax.numpy as jnp
-
-        return jnp
-    raise ValueError(f"Unknown array backend {backend!r}. Use None, 'numpy', or 'jax'.")
 
 
 @dataclass(frozen=True, init=False)
@@ -122,14 +102,6 @@ class LinearMap:
         """Return the array module implied by operands and this map."""
         return get_array_module(*operands, *self._backend_operands)
 
-    def _cached_dense(self, xp: Any) -> Any | None:
-        """Return cached dense materialization for ``xp`` if present."""
-        return self._dense_cache.get(xp)
-
-    def _store_dense(self, xp: Any, dense: Any) -> None:
-        """Store dense materialization for ``xp``."""
-        self._dense_cache[xp] = dense
-
     def clear_dense_cache(self) -> None:
         """Discard derived dense materializations of this map."""
         self._dense_cache.clear()
@@ -142,7 +114,7 @@ class LinearMap:
     def matvec(self, x: Any) -> Any:
         """Apply this map to one flattened vector."""
         xp = self.array_module(x)
-        dense = self._cached_dense(xp)
+        dense = self._dense_cache.get(xp)
         if dense is not None and self._diagonal_array_func is None:
             x_arr = xp.asarray(x).reshape(self.shape[1])
             return dense @ x_arr
@@ -151,7 +123,7 @@ class LinearMap:
     def rmatvec(self, y: Any) -> Any:
         """Apply the adjoint map to one flattened vector."""
         xp = self.array_module(y)
-        dense = self._cached_dense(xp)
+        dense = self._dense_cache.get(xp)
         if dense is not None and self._diagonal_array_func is None:
             y_arr = xp.asarray(y).reshape(self.shape[0])
             return xp.swapaxes(xp.conjugate(dense), -2, -1) @ y_arr
@@ -160,7 +132,7 @@ class LinearMap:
     def matmat(self, x_block: Any) -> Any:
         """Apply this map to a block of column vectors."""
         xp = self.array_module(x_block)
-        dense = self._cached_dense(xp)
+        dense = self._dense_cache.get(xp)
         if dense is not None and self._diagonal_array_func is None:
             x_arr = xp.asarray(x_block)
             if x_arr.ndim == 1:
@@ -177,7 +149,7 @@ class LinearMap:
     def rmatmat(self, y_block: Any) -> Any:
         """Apply the adjoint map to a block of column vectors."""
         xp = self.array_module(y_block)
-        dense = self._cached_dense(xp)
+        dense = self._dense_cache.get(xp)
         if dense is not None and self._diagonal_array_func is None:
             y_arr = xp.asarray(y_block)
             adjoint = xp.swapaxes(xp.conjugate(dense), -2, -1)
@@ -195,13 +167,13 @@ class LinearMap:
     def _dense_array(self, xp: Any = None) -> Any:
         """Materialize this map as a dense 2-D matrix on ``xp``."""
         xp = self.array_module() if xp is None else xp
-        cached = self._cached_dense(xp)
+        cached = self._dense_cache.get(xp)
         if cached is not None:
             return cached
 
         if self._dense_array_func is not None:
             dense = self._dense_array_func(xp)
-            self._store_dense(xp, dense)
+            self._dense_cache[xp] = dense
             return dense
 
         eye_dtype = np.result_type(self.dtype, np.float64)
@@ -212,20 +184,18 @@ class LinearMap:
         else:
             input_identity = xp.eye(self.shape[1], dtype=eye_dtype)
             dense = self.matmat(input_identity)
-        dense = np.asarray(dense) if xp is np else xp.asarray(dense)
-        self._store_dense(xp, dense)
+        dense = xp.asarray(dense)
+        self._dense_cache[xp] = dense
         return dense
 
     def to_matrix(self, *, backend: ArrayBackend | None = None) -> Any:
         """Materialize this map as an explicit flat 2-D matrix."""
-        xp = _array_module_for_backend(backend)
+        xp = get_array_module(*self._backend_operands, backend=backend)
         return block_until_ready(self._dense_array(xp))
 
     def to_array(self, *, backend: ArrayBackend | None = None) -> Any:
         """Materialize this map with its shaped domain and codomain."""
-        xp = _array_module_for_backend(backend)
-        if xp is None:
-            xp = self.array_module()
+        xp = get_array_module(*self._backend_operands, backend=backend)
         dense = self._dense_array(xp)
         return block_until_ready(xp.reshape(dense, self.output_shape + self.input_shape))
 
@@ -260,7 +230,7 @@ class LinearMap:
 
         This never materializes a dense matrix to discover structure.
         """
-        xp = _array_module_for_backend(backend)
+        xp = get_array_module(*self._backend_operands, backend=backend)
         return block_until_ready(self._diagonal_array(xp))
 
     def _diagonal_array(self, xp: Any = None) -> Any:
@@ -279,7 +249,7 @@ class LinearMap:
             return np.asarray(self._normal_matrix_diag()).real
         if self._diagonal_array_func is not None:
             return np.abs(np.asarray(self.diagonal(backend="numpy"))) ** 2
-        if self._cached_dense(np) is not None or self._dense_array_func is not None:
+        if np in self._dense_cache or self._dense_array_func is not None:
             dense = np.asarray(self.to_matrix(backend="numpy"))
             return np.sum(np.abs(dense) ** 2, axis=0)
         return _normal_matrix_diag_from_matmat(self.shape, self.dtype, self.matmat)
