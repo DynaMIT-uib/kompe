@@ -5,6 +5,22 @@ import pytest
 
 from kompe import GlobalCSBasis, SECSBasis, SHBasis, SphericalGrid
 from kompe.coefficients import CoefficientSpace, FieldCoefficients
+from kompe.math import backend_context
+
+
+def test_field_coefficients_numpy_copy_contract():
+    """NumPy coercion distinguishes views, copies, and dtype changes."""
+    with backend_context("numpy"):
+        basis = SHBasis(2, 1)
+        field = FieldCoefficients(CoefficientSpace(basis), np.ones(basis.coefficient_count))
+    view = np.array(field, copy=False)
+    assert np.shares_memory(view, field.array)
+    assert not view.flags.writeable
+    copy = np.array(field, copy=True)
+    assert not np.shares_memory(copy, field.array)
+    copy[:] = 2.0
+    np.testing.assert_array_equal(field.array, 1.0)
+    assert np.asarray(field, dtype=np.float32).dtype == np.float32
 
 
 def test_field_coefficients_applies_scalar_mean_free_projection():

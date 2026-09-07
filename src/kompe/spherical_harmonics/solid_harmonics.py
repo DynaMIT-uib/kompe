@@ -54,11 +54,13 @@ class SolidHarmonicOperators:
 
     def regular_reference_shift_factors(self, start, end):
         """Shift regular coefficients to a new reference radius."""
-        return get_array_module().asarray((start / end) ** (1 - self.basis.n))
+        xp = get_array_module(start, end)
+        return (xp.asarray(start) / xp.asarray(end)) ** (1 - xp.asarray(self.basis.n))
 
     def irregular_reference_shift_factors(self, start, end):
         """Shift irregular coefficients to a new reference radius."""
-        return get_array_module().asarray((start / end) ** (self.basis.n + 2))
+        xp = get_array_module(start, end)
+        return (xp.asarray(start) / xp.asarray(end)) ** (xp.asarray(self.basis.n) + 2)
 
     @property
     def poloidal_to_regular_potential_factors(self):

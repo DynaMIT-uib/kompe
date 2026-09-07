@@ -88,13 +88,24 @@ are explicit projections within one coefficient space.
 `as_linear_map` to wrap dense or sparse arrays and the named constructors for
 diagonal, identity, pointwise, stacked, or indexed maps. Least-squares helpers
 consume `LinearMap` without requiring dense materialization.
+Call `operator(values)` for shaped application: values have
+`operator.input_shape + batch_shape`, and the result has
+`operator.output_shape + batch_shape`. Domain axes come first; arbitrary
+trailing batch axes are retained and use one block application. `@`, `matvec`,
+and `matmat` keep their flat linear-algebra semantics. For example, a Helmholtz
+synthesis map accepts `(2, n_coefficients, n_times)` and returns
+`(2, n_points, n_times)`. Maps have identity-based equality and hashing, like
+functions, and can be passed directly to `jax.jit`.
+`matmat` and `rmatmat` accept a 2-D column block or a single 1-D vector,
+returning the same rank regardless of materialization. Empty column blocks
+and empty domains or codomains need no action callbacks.
 Custom matrix-free maps use the ordinary constructor keywords `matvec`,
 `rmatvec`, and optional `matmat`, `rmatmat`, `dense_array`, or `diagonal`
 functions; implementation storage remains private.
 `to_matrix()` returns the flat 2-D representation; `to_array()` returns the
 same values with shaped domain and codomain axes. Both cache the dense
 representation instead of repeating its construction.
-New compositions reuse contractions already materialized on the active
+New compositions and scalar multiples reuse contractions already materialized on the active
 backend instead of expanding their original tensor factors again. Existing
 compositions retain the representation with which they were constructed.
 Known diagonal and identity maps remain vector-backed even when a full matrix
@@ -104,7 +115,20 @@ known. It does not materialize a matrix or transfer it to the CPU to discover
 structure. Declare diagonal maps with `diagonal_linear_map(values)`; use
 `xp.diag(map.to_matrix())` for the diagonal of a general dense matrix.
 
-`LeastSquaresProblem` exposes `data_operators` and `weight_operators` as lists
+`LeastSquaresProblem(A)` takes its solution and data shapes from `A`'s maps;
+several data maps must share one `input_shape`, but may have different
+`output_shape`s. Raw matrices retain their ordinary flat row/column axes.
+Label scientific axes once with
+`as_linear_map(array, input_shape=..., output_shape=...)` before constructing
+the problem. There are no separate shape arguments on `LeastSquaresProblem`.
+No operator is evaluated or materialized to determine these shapes.
+
+SH Helmholtz arrays, basis operators, and transform operators share one dense
+materialization. Until an array is requested, the operator retains its
+structured action. Dense synthesis assembles the Helmholtz blocks directly,
+without multiplying an identity matrix.
+
+The problem exposes `data_operators` and `weight_operators` as lists
 of maps, separate from the assembled weighted `data_operator` and regularized
 `system_operator`. Relative regularization requires a nonzero weighted data
 operator and an explicit nonzero regularizer; it never invents a unit scale or
@@ -152,6 +176,11 @@ with no operands, `get_backend()` reports the configured default.
 remap matrices and per-basis target-grid caches are bounded. Long-running
 applications can clear them at known lifecycle boundaries without changing
 numerical results.
+
+`SphericalTransform.cache_info()` reports `cached_attributes`,
+`scalar_problem_cached`, and `helmholtz_problem_cached`. These describe
+cached Python values and problem definitions, not dense materializations or
+completed factorizations.
 
 Each concrete basis defines `coefficient_space_signature` from its mathematical
 layout and normalization. `signature` additionally identifies evaluation

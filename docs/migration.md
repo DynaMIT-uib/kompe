@@ -15,6 +15,12 @@
 
 ## Kompe operator names
 
+`LeastSquaresProblem` now takes shapes only from its data operators; remove
+`solution_shape=` and `data_shapes=`. Raw matrices need no replacement arguments.
+For scientific axes, construct
+`A = as_linear_map(array, input_shape=..., output_shape=...)`, then use
+`LeastSquaresProblem(A, ...)`. Options after `A` are keyword-only.
+
 `LeastSquaresProblem.A` is now `data_operators`; its former `sqrt_weights`
 attribute is `weight_operators`, because it stores maps rather than the raw
 constructor weights. The constructor keywords `A` and `sqrt_weights` are
@@ -35,6 +41,28 @@ preconditioning a regularized solve.
 space. The SH full/mean-free pair continues to round-trip. An arbitrary
 subset cannot infer a different gauge and now raises `NotImplementedError`
 instead of silently returning a larger parent-derived coefficient space.
+
+`LinearMap` is callable: `operator(values)` preserves its declared domain,
+codomain, and trailing batch axes. Use this instead of manually flattening
+fields for `matvec` and reshaping the result. The flat `@` interface is unchanged.
+`matmat` and `rmatmat` now consistently return a 1-D vector for 1-D input;
+use `(n, 1)` input for a one-column block. Blocks must be 2-D with the expected
+row count; use `operator(values)` for scientific arrays with additional axes.
+Scalar and Helmholtz synthesis now retain trailing batch axes, matching the
+outputs of `analyze_scalar` and `analyze_helmholtz`.
+
+`cholesky_least_squares_map(synthesis, normal_factor, sqrt_weights=...)`
+infers the analysis axes by reversing the synthesis map's axes. It no longer
+accepts redundant `input_shape` or `output_shape` arguments. Label the
+synthesis operator once with `as_linear_map` when needed. The dense
+full-rank convenience factory uses this same forward/adjoint implementation.
+
+`SphericalTransform.cache_info()` uses `cached_attributes` and
+`scalar_problem_cached`/`helmholtz_problem_cached` in place of
+`materialized_values` and `scalar_factorization`/`helmholtz_factorization`.
+Constructing a problem is not itself a factorization.
+`analyze_helmholtz_samples` now returns `(batch, 2, n_coefficients)`, rather than
+flattening the two potentials into `(batch, 2 * n_coefficients)`.
 
 `LinearMap.diagonal()` requires declared diagonal structure. It no longer
 materializes an unknown operator to test whether its off-diagonal entries

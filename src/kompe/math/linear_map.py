@@ -24,13 +24,15 @@ VectorizedMapFunc: TypeAlias = Callable[[Any], Any]
 ArrayBackend: TypeAlias = Literal["numpy", "jax"]
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True, init=False, eq=False)
 class LinearMap:
-    """Backend-agnostic linear map with flattened matrix operations.
+    """Backend-agnostic linear map between shaped scientific arrays.
 
     Construct a matrix-free map from its forward and adjoint actions. Optional
     block, dense, diagonal, and normal-matrix functions preserve useful
-    structure without changing the ordinary ``map @ values`` interface.
+    structure. ``map(values)`` retains domain/codomain and trailing batch
+    axes. ``map @ values``, ``matvec``, and ``matmat`` use flat linear algebra;
+    ``map @ other_map`` composes maps.
     """
 
     shape: MatrixShape
@@ -111,6 +113,25 @@ class LinearMap:
         """Whether this map has an exact diagonal representation."""
         return self._diagonal_array_func is not None
 
+    def __call__(self, values: Any) -> Any:
+        """Map ``input_shape + batch_shape`` to ``output_shape + batch_shape``.
+
+        Domain axes come first; trailing axes index independent fields.
+        Batches use the block action without materializing the map.
+        """
+        xp = self.array_module(values)
+        values = xp.asarray(values)
+        input_ndim = len(self.input_shape)
+        if values.shape[:input_ndim] != self.input_shape:
+            raise ValueError(
+                f"Values must start with input_shape {self.input_shape}; got {values.shape}."
+            )
+        batch_shape = values.shape[input_ndim:]
+        if not batch_shape:
+            return self.matvec(values.reshape(self.shape[1])).reshape(self.output_shape)
+        block = values.reshape(self.shape[1], math.prod(batch_shape))
+        return self.matmat(block).reshape(self.output_shape + batch_shape)
+
     def matvec(self, x: Any) -> Any:
         """Apply this map to one flattened vector."""
         xp = self.array_module(x)
@@ -130,37 +151,43 @@ class LinearMap:
         return self._rmatvec(y)
 
     def matmat(self, x_block: Any) -> Any:
-        """Apply this map to a block of column vectors."""
+        """Apply to columns, or retain a single vector's one-dimensional shape."""
         xp = self.array_module(x_block)
-        dense = self._dense_cache.get(xp)
-        if dense is not None and self._diagonal_array_func is None:
-            x_arr = xp.asarray(x_block)
-            if x_arr.ndim == 1:
-                return dense @ x_arr.reshape(self.shape[1])
-            return dense @ x_arr.reshape(self.shape[1], -1)
-        if self._matmat is not None:
-            return self._matmat(x_block)
-        x_arr = xp.asarray(x_block)
+        x_arr = _dense_array_candidate(x_block)
         if x_arr.ndim == 1:
             return self.matvec(x_arr)
+        if x_arr.ndim != 2 or x_arr.shape[0] != self.shape[1]:
+            raise ValueError(f"Column blocks must have shape ({self.shape[1]}, n_columns).")
+        if 0 in self.shape or x_arr.shape[1] == 0:
+            return xp.zeros(
+                (self.shape[0], x_arr.shape[1]), dtype=xp.result_type(self.dtype, x_arr.dtype)
+            )
+        dense = self._dense_cache.get(xp)
+        if dense is not None and self._diagonal_array_func is None:
+            return dense @ xp.asarray(x_arr)
+        if self._matmat is not None:
+            return self._matmat(x_arr)
         outputs = [self.matvec(x_arr[:, i]) for i in range(x_arr.shape[1])]
         return xp.stack(outputs, axis=1)
 
     def rmatmat(self, y_block: Any) -> Any:
-        """Apply the adjoint map to a block of column vectors."""
+        """Apply the adjoint to columns, or retain a single vector's shape."""
         xp = self.array_module(y_block)
-        dense = self._dense_cache.get(xp)
-        if dense is not None and self._diagonal_array_func is None:
-            y_arr = xp.asarray(y_block)
-            adjoint = xp.swapaxes(xp.conjugate(dense), -2, -1)
-            if y_arr.ndim == 1:
-                return adjoint @ y_arr.reshape(self.shape[0])
-            return adjoint @ y_arr.reshape(self.shape[0], -1)
-        if self._rmatmat is not None:
-            return self._rmatmat(y_block)
-        y_arr = xp.asarray(y_block)
+        y_arr = _dense_array_candidate(y_block)
         if y_arr.ndim == 1:
             return self.rmatvec(y_arr)
+        if y_arr.ndim != 2 or y_arr.shape[0] != self.shape[0]:
+            raise ValueError(f"Column blocks must have shape ({self.shape[0]}, n_columns).")
+        if 0 in self.shape or y_arr.shape[1] == 0:
+            return xp.zeros(
+                (self.shape[1], y_arr.shape[1]), dtype=xp.result_type(self.dtype, y_arr.dtype)
+            )
+        dense = self._dense_cache.get(xp)
+        if dense is not None and self._diagonal_array_func is None:
+            adjoint = xp.swapaxes(xp.conjugate(dense), -2, -1)
+            return adjoint @ xp.asarray(y_arr)
+        if self._rmatmat is not None:
+            return self._rmatmat(y_arr)
         outputs = [self.rmatvec(y_arr[:, i]) for i in range(y_arr.shape[1])]
         return xp.stack(outputs, axis=1)
 
@@ -506,6 +533,14 @@ class LinearMap:
         if not np.isscalar(other):
             return NotImplemented
         scalar = other
+        if not self.is_diagonal:
+            dense = self._dense_cache.get(self.array_module())
+            if dense is None:
+                dense = self._dense_tensor
+            if dense is not None:
+                return as_linear_map(
+                    dense * scalar, input_shape=self.input_shape, output_shape=self.output_shape
+                )
         if (
             self._einsum_map is not None
             and self._einsum_map.output_shape == self.output_shape
@@ -514,14 +549,6 @@ class LinearMap:
             from kompe.math.einsum import scale_einsum_map
 
             return scale_einsum_map(self._einsum_map, scalar).to_linear_map()
-
-        scaled_dense_tensor = None
-        if (
-            self._dense_tensor is not None
-            and tuple(getattr(self._dense_tensor, "shape", ()))
-            == self.output_shape + self.input_shape
-        ):
-            scaled_dense_tensor = self._dense_tensor * scalar
 
         def matvec(x: Any) -> Any:
             return self.matvec(x) * scalar
@@ -544,7 +571,7 @@ class LinearMap:
         def diagonal_array(xp: Any) -> Any:
             return self._diagonal_array(xp) * scalar
 
-        scaled_map = LinearMap(
+        return LinearMap(
             shape=self.shape,
             dtype=np.result_type(self.dtype, scalar),
             matvec=matvec,
@@ -558,8 +585,6 @@ class LinearMap:
             output_shape=self.output_shape,
             input_shape=self.input_shape,
         )
-        object.__setattr__(scaled_map, "_dense_tensor", scaled_dense_tensor)
-        return scaled_map
 
     def __rmul__(self, other: Any) -> LinearMap:
         """Scale this linear map."""
@@ -972,18 +997,13 @@ def take_linear_map(
 
     def matmat(block: Any) -> Any:
         xp = get_array_module(block)
-        values = xp.asarray(block)
-        if values.ndim == 1:
-            return matvec(values)
-        values = values.reshape(input_shape + (-1,))
+        values = xp.asarray(block).reshape(input_shape + (-1,))
         selected = values[_indexer(xp)]
         return selected.reshape(output_size, values.shape[-1])
 
     def rmatmat(block: Any) -> Any:
         xp = get_array_module(block)
         values = xp.asarray(block)
-        if values.ndim == 1:
-            return rmatvec(values)
         values = values.reshape(output_shape + (values.shape[-1],))
         result = xp.zeros(input_shape + (values.shape[-1],), dtype=values.dtype)
         indexer = _indexer(xp)
@@ -1064,20 +1084,6 @@ def _zero_row_linear_map(input_shape: tuple[int, ...]) -> LinearMap:
         xp = get_array_module(vec)
         return xp.zeros((input_size,), dtype=xp.asarray(vec).dtype)
 
-    def matmat(block: Any) -> Any:
-        xp = get_array_module(block)
-        block_arr = xp.asarray(block).reshape(input_size, -1)
-        return xp.zeros((0, block_arr.shape[1]), dtype=block_arr.dtype)
-
-    def rmatmat(block: Any) -> Any:
-        xp = get_array_module(block)
-        block_arr = xp.asarray(block)
-        num_rhs = 1 if block_arr.ndim == 1 else block_arr.shape[1]
-        return xp.zeros((input_size, num_rhs), dtype=block_arr.dtype)
-
-    def dense_array(xp: Any) -> Any:
-        return xp.zeros((0, input_size))
-
     def normal_matrix_diag() -> np.ndarray:
         return np.zeros(input_size)
 
@@ -1086,9 +1092,6 @@ def _zero_row_linear_map(input_shape: tuple[int, ...]) -> LinearMap:
         dtype=np.float64,
         matvec=matvec,
         rmatvec=rmatvec,
-        matmat=matmat,
-        rmatmat=rmatmat,
-        dense_array=dense_array,
         normal_matrix_diag=normal_matrix_diag,
         output_shape=(0,),
         input_shape=input_shape,

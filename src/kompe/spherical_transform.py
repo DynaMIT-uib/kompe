@@ -11,6 +11,7 @@ from scipy.linalg import cholesky
 
 from kompe.basis import SurfaceDifferentialBasis
 from kompe.cache import BoundedCache
+from kompe.coefficients import FieldCoefficients
 from kompe.grid import SphericalGrid
 from kompe.math import array_fingerprint
 from kompe.math.backend import get_array_module, readonly_numpy_array
@@ -321,11 +322,11 @@ class SphericalTransform:
 
     def cache_info(self):
         """Return local transform-cache occupancy and configuration."""
-        materialized = sum(name in self.__dict__ for name in self._cached_attribute_names)
+        cached_attributes = sum(name in self.__dict__ for name in self._cached_attribute_names)
         return {
-            "materialized_values": materialized,
-            "scalar_factorization": "scalar_least_squares_problem" in self.__dict__,
-            "helmholtz_factorization": "helmholtz_least_squares_problem" in self.__dict__,
+            "cached_attributes": cached_attributes,
+            "scalar_problem_cached": "scalar_least_squares_problem" in self.__dict__,
+            "helmholtz_problem_cached": "helmholtz_least_squares_problem" in self.__dict__,
             "analysis_transforms": len(self._analysis_transforms),
             "analysis_transform_max_size": self._analysis_transforms.max_size,
             "basis_transforms": len(self._basis_transforms),
@@ -455,14 +456,7 @@ class SphericalTransform:
     @cached_property
     def helmholtz_synthesis_array(self):
         """Array evaluating horizontal vector field expansions."""
-        gradient = self.__dict__.get("surface_gradient_array")
-        rotated_gradient = self.__dict__.get("rhat_cross_gradient_array")
-        if gradient is None and rotated_gradient is None:
-            return self.basis.helmholtz_synthesis_array(self.grid)
-        gradient = self.surface_gradient_array
-        rotated_gradient = self.rhat_cross_gradient_array
-        xp = get_array_module(gradient, rotated_gradient)
-        return xp.stack([-xp.asarray(gradient), xp.asarray(rotated_gradient)], axis=2)
+        return self.helmholtz_synthesis_operator.to_array()
 
     @cached_property
     def helmholtz_synthesis_operator(self):
@@ -531,8 +525,6 @@ class SphericalTransform:
                 self.helmholtz_synthesis_operator,
                 factor,
                 sqrt_weights=self.helmholtz_sqrt_weights,
-                input_shape=(2, self.grid.size),
-                output_shape=(2, self.basis.coefficient_count),
             )
         except np.linalg.LinAlgError:
             return None
@@ -555,8 +547,6 @@ class SphericalTransform:
             synthesis,
             factor,
             sqrt_weights=self.helmholtz_sqrt_weights,
-            input_shape=(2, self.grid.size),
-            output_shape=(self.basis.coefficient_count,),
         )
 
     @cached_property
@@ -590,8 +580,6 @@ class SphericalTransform:
         """Least squares problem for scalar fields."""
         return LeastSquaresProblem(
             A=self.scalar_synthesis_operator,
-            solution_shape=self.basis.coefficient_count,
-            data_shapes=self.grid.size,
             sqrt_weights=self.sqrt_weights,
             regularization_strengths=self.reg_lambda,
             regularization_operators=self.scalar_regularization_operator,
@@ -605,8 +593,6 @@ class SphericalTransform:
         """Least squares problem for horizontal vector fields."""
         return LeastSquaresProblem(
             A=self.helmholtz_synthesis_operator,
-            solution_shape=(2, self.basis.coefficient_count),
-            data_shapes=(2, self.grid.size),
             sqrt_weights=self.helmholtz_sqrt_weights,
             regularization_strengths=self.reg_lambda,
             regularization_operators=self.helmholtz_regularization_operator,
@@ -624,14 +610,23 @@ class SphericalTransform:
         )
 
     def synthesize_scalar(self, coeffs, derivative=None):
-        """Synthesize scalar coefficients on the transform grid."""
+        """Synthesize scalar values or derivatives, retaining batch axes."""
         coeff_array = self._coefficient_array(coeffs)
-        return self._coefficients_to_grid(coeff_array, derivative=derivative)
+        if derivative is None:
+            operator = self.scalar_synthesis_operator
+        elif derivative == "theta":
+            operator = self.theta_derivative_operator
+        elif derivative == "phi":
+            operator = self.phi_derivative_operator
+        else:
+            raise ValueError("derivative must be None, 'theta', or 'phi'.")
+        return operator(coeff_array)
 
     def synthesize_helmholtz(self, coeffs):
-        """Synthesize Helmholtz coefficients on the transform grid."""
+        """Synthesize tangential values, retaining trailing batch axes."""
         coeff_array = self._coefficient_array(coeffs, helmholtz=True)
-        return self._coefficients_to_grid(coeff_array, helmholtz=True)
+        operator = self.helmholtz_synthesis_operator
+        return operator(coeff_array)
 
     def analyze_scalar(self, grid_values, solver=None):
         """Analyze scalar values, returning ``(n_coeffs, *batch_shape)``.
@@ -659,16 +654,9 @@ class SphericalTransform:
         if solver is None and self.reg_lambda is None:
             operator = self._optimized_helmholtz_analysis_operator
             if operator is not None:
-                return self._apply_helmholtz_analysis_operator(operator, grid_values)
+                values, batch_shape = as_rhs_block(grid_values, (2, self.grid.size))
+                return operator(values.reshape(operator.input_shape + batch_shape))
         return self._solve_least_squares(self.helmholtz_least_squares_problem, grid_values, solver)
-
-    def _apply_helmholtz_analysis_operator(self, operator, grid_values):
-        """Apply an analysis operator with standard RHS shapes."""
-        values, batch_shape = as_rhs_block(grid_values, (2, self.grid.size))
-        output_shape = (2, self.basis.coefficient_count)
-        if not batch_shape:
-            return operator.matvec(values).reshape(output_shape)
-        return operator.matmat(values).reshape(output_shape + batch_shape)
 
     def apply_scalar_regularization(self, coeffs):
         """Apply scalar degree regularization to coefficients."""
@@ -676,7 +664,7 @@ class SphericalTransform:
         if operator is None:
             raise RuntimeError("Scalar regularization requires reg_lambda to be configured.")
         coeff_array = self._coefficient_array(coeffs)
-        return operator.matvec(coeff_array)
+        return operator(coeff_array)
 
     def apply_helmholtz_regularization(self, coeffs):
         """Apply Helmholtz degree regularization to coefficients."""
@@ -684,7 +672,7 @@ class SphericalTransform:
         if operator is None:
             raise RuntimeError("Helmholtz regularization requires reg_lambda to be configured.")
         coeff_array = self._coefficient_array(coeffs, helmholtz=True)
-        return operator.matvec(coeff_array.reshape(-1)).reshape(coeff_array.shape)
+        return operator(coeff_array)
 
     def analyze_scalar_samples(
         self,
@@ -723,7 +711,7 @@ class SphericalTransform:
         reg_lambda=None,
         tolerance=1e-15,
     ):
-        """Analyze tangential samples into this transform's coefficient space.
+        """Analyze tangential samples into ``(batch, 2, n_coeffs)`` arrays.
 
         ``analysis_basis`` selects the direct-analysis or grid-remapping route
         used for the input samples. Returned coefficients always belong to
@@ -823,7 +811,7 @@ class SphericalTransform:
         else:
             coeffs = analysis_transform.analyze_scalar(grid_values)
         xp = get_array_module(coeffs)
-        return xp.moveaxis(coeffs, -1, 0).reshape(sample_rows.shape[0], -1)
+        return xp.moveaxis(coeffs, -1, 0)
 
     def _scalar_synthesis_is_identity(self):
         """Return whether scalar analysis is a no-op."""
@@ -834,32 +822,26 @@ class SphericalTransform:
         )
 
     def _coefficient_array(self, coeffs, *, helmholtz=False):
-        """Return validated coefficient values."""
-        values = getattr(coeffs, "array", coeffs)
+        """Unwrap coefficient fields and normalize flat single-field inputs."""
+        if isinstance(coeffs, FieldCoefficients):
+            space = coeffs.field_space
+            representation = "helmholtz" if helmholtz else "scalar"
+            if space.representation != representation or (
+                space.basis is not self.basis
+                and not space.basis.coefficients_are_compatible_with(self.basis)
+            ):
+                raise ValueError(
+                    f"Expected {representation} coefficients in a coefficient-compatible basis."
+                )
+            # The value object already owns, shapes, and gauges its array.
+            return coeffs.array
         shape = (2, self.basis.coefficient_count) if helmholtz else (self.basis.coefficient_count,)
         expected_size = int(np.prod(shape))
-        xp = get_array_module(values)
-        array = xp.asarray(values)
-        if int(array.size) != expected_size:
-            field_type = "Helmholtz" if helmholtz else "scalar"
-            raise ValueError(
-                f"{field_type} coefficients have length {int(array.size)}, "
-                f"expected {expected_size}."
-            )
-        return array.reshape(shape)
-
-    def _coefficients_to_grid(self, coeffs, derivative=None, helmholtz=False):
-        """Transform basis coefficients to grid values."""
-        if derivative == "theta":
-            operator = self.theta_derivative_operator
-        elif derivative == "phi":
-            operator = self.phi_derivative_operator
-        elif helmholtz:
-            operator = self.helmholtz_synthesis_operator
-        else:
-            operator = self.scalar_synthesis_operator
-
-        return operator.matvec(coeffs).reshape(operator.output_shape)
+        xp = get_array_module(coeffs)
+        array = xp.asarray(coeffs)
+        if array.shape[: len(shape)] != shape and array.size == expected_size:
+            return array.reshape(shape)
+        return array
 
     @staticmethod
     def as_scalar_sample_rows(values, input_grid):

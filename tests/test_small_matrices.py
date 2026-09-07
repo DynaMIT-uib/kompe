@@ -7,14 +7,15 @@ from kompe.math import backend_context, determinant_3x3, get_array_module, inver
 
 
 @pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
-def test_batched_small_matrix_formulas_match_dense_linalg(backend):
+@pytest.mark.parametrize("batch_shape", [(), (5,), (2, 4), (0,)])
+def test_batched_small_matrix_formulas_match_dense_linalg(backend, batch_shape):
     """General nonsymmetric matrices retain the selected array backend."""
-    matrices = np.random.default_rng(4).normal(size=(5, 3, 3)) + 4.0 * np.eye(3)
+    matrices = np.random.default_rng(4).normal(size=batch_shape + (3, 3)) + 4.0 * np.eye(3)
     with backend_context(backend):
         xp = get_array_module()
         determinants = determinant_3x3(xp.asarray(matrices))
         inverses = inverse_3x3(xp.asarray(matrices))
-        assert isinstance(determinants, xp.ndarray)
+        assert determinants.shape == batch_shape
         assert isinstance(inverses, xp.ndarray)
     np.testing.assert_allclose(determinants, np.linalg.det(matrices), rtol=1e-13)
     np.testing.assert_allclose(inverses, np.linalg.inv(matrices), rtol=1e-13, atol=1e-14)

@@ -61,13 +61,16 @@ class LeastSquaresProblem:
     square root of that strength times the balancing factor. The same rule is
     applied term by term when several data or regularization operators are
     provided.
+
+    Shapes come from the data operators' declared input and output shapes.
+    All data operators must share one input shape. Use ``as_linear_map``
+    to label the scientific axes of raw arrays before building the problem.
     """
 
     def __init__(
         self,
         A: OperatorInputList,
-        solution_shape: int | tuple[int, ...],
-        data_shapes: Any | list[Any],
+        *,
         sqrt_weights: Any | list[Any] | None = None,
         regularization_strengths: NumericInputList | None = None,
         regularization_operators: OperatorInputList | None = None,
@@ -75,10 +78,6 @@ class LeastSquaresProblem:
         cache_identity: Any | None = None,
         data_normal_matrix_builder: Callable[[], Any] | None = None,
     ):
-        self.solution_shape = (
-            (solution_shape,) if isinstance(solution_shape, int) else tuple(solution_shape)
-        )
-        self.solution_size = math.prod(self.solution_shape)
         self._dense_normal_equation_cache: dict[Any, tuple[Any, Any]] = {}
         self._dense_normal_pinv_cache = BoundedCache(2)
         self._svd_cache = BoundedCache(2)
@@ -87,18 +86,22 @@ class LeastSquaresProblem:
         self.data_normal_matrix_builder = data_normal_matrix_builder
         self._data_normal_matrix_cache = None
 
-        self._process_data_terms(A, data_shapes, sqrt_weights)
+        self._process_data_terms(A, sqrt_weights)
         self._process_regularization_terms(regularization_operators, regularization_strengths)
 
-    def _process_data_terms(self, A_in, data_shapes_in, sqrt_weights_in):
+    def _process_data_terms(self, A_in, sqrt_weights_in):
         A_list = self._prepare_input_list(A_in, "A")
         if not A_list:
             raise ValueError("At least one data operator is required.")
-        self.data_shapes = self._normalize_data_shapes(data_shapes_in, len(A_list))
-        self.data_operators = [
-            as_linear_map(op, output_shape=self.data_shapes[i], input_shape=self.solution_shape)
-            for i, op in enumerate(A_list)
-        ]
+        self.data_operators = [as_linear_map(op) for op in A_list]
+        self.solution_shape = self.data_operators[0].input_shape
+        if any(op.input_shape != self.solution_shape for op in self.data_operators):
+            raise ValueError(
+                "Data operators must share input_shape; "
+                "use as_linear_map to label their axes explicitly."
+            )
+        self.solution_size = math.prod(self.solution_shape)
+        self.data_shapes = [op.output_shape for op in self.data_operators]
         sqrt_weights_list = self._prepare_input_list(
             sqrt_weights_in, "sqrt_weights", count=len(A_list)
         )
@@ -416,14 +419,3 @@ class LeastSquaresProblem:
         if count is not None and len(lst) != count:
             raise ValueError(f"Input '{name}' has {len(lst)} items, but expected {count}.")
         return lst
-
-    def _normalize_data_shapes(
-        self, data_shapes: Any, expected_count: int
-    ) -> list[tuple[int, ...]]:
-        if not isinstance(data_shapes, list):
-            data_shapes = [data_shapes]
-        if len(data_shapes) == 1 and expected_count > 1:
-            data_shapes = data_shapes * expected_count
-        if len(data_shapes) != expected_count:
-            raise ValueError("Number of data_shapes does not match number of A operators.")
-        return [(s,) if isinstance(s, int) else tuple(s) for s in data_shapes]

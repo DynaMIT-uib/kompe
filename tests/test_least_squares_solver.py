@@ -26,6 +26,155 @@ from kompe.math.least_squares_solver import (
 # Problem definition and regularization
 
 
+@pytest.mark.parametrize("kind", ["dense", "sparse", "diagonal", "matrix_free", "composed"])
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd", "lsmr", "cgls"])
+def test_shaped_problem_works_with_all_operator_representations(kind, materialized, solver_name):
+    """Shapes are independent of backend and numerical representation."""
+    from scipy.sparse import csr_matrix
+
+    from kompe.math import diagonal_linear_map
+
+    xp = get_array_module()
+    diagonal = xp.arange(1.0, 5.0)
+    matrix = xp.diag(diagonal)
+    if kind == "matrix_free":
+        operator = LinearMap(
+            shape=(4, 4),
+            dtype=matrix.dtype,
+            matvec=lambda x: matrix @ x,
+            rmatvec=lambda x: matrix.T @ x,
+            matmat=lambda x: matrix @ x,
+            rmatmat=lambda x: matrix.T @ x,
+            backend_operands=(matrix,),
+            input_shape=(2, 2),
+            output_shape=(4,),
+        )
+    else:
+        values = (
+            csr_matrix(np.asarray(matrix))
+            if kind == "sparse"
+            else diagonal
+            if kind == "diagonal"
+            else matrix
+        )
+        operator = as_linear_map(values, input_shape=(2, 2), output_shape=(4,))
+        if kind == "composed":
+            operator = diagonal_linear_map(xp.ones(4)) @ operator
+    if materialized:
+        operator.to_matrix()
+    problem = LeastSquaresProblem(operator)
+    assert problem.data_operators[0] is operator
+    assert bool(operator._dense_cache) == materialized
+    coefficients = xp.arange(1.0, 25.0).reshape(2, 2, 3, 2)
+    result = LeastSquaresSolver(solver=solver_name, tolerance=1e-13).solve(
+        problem, operator(coefficients)
+    )
+    assert result.shape == coefficients.shape
+    np.testing.assert_allclose(result, coefficients, rtol=1e-11, atol=1e-11)
+    if solver_name in {"lsmr", "cgls"} and not materialized:
+        assert not operator._dense_cache
+
+
+@pytest.mark.parametrize("sparse", [False, True])
+def test_problem_defaults_to_matrix_axes(sparse):
+    """Raw matrices retain their row and column dimensions."""
+    from scipy.sparse import csr_matrix
+
+    matrix = np.arange(12.0).reshape(4, 3)
+    problem = LeastSquaresProblem(csr_matrix(matrix) if sparse else matrix)
+
+    assert problem.solution_shape == (3,)
+    assert problem.data_shapes == [(4,)]
+    np.testing.assert_array_equal(problem.data_operators[0].to_matrix(), matrix)
+
+
+def test_problem_reads_map_shapes_without_evaluating_operators():
+    """Shape metadata requires neither application nor materialization."""
+
+    def unexpected_evaluation(*args):
+        pytest.fail("Problem construction must not evaluate the operator.")
+
+    operators = [
+        LinearMap(
+            shape=(size, 4),
+            dtype=float,
+            input_shape=(2, 2),
+            output_shape=shape,
+            matvec=unexpected_evaluation,
+            rmatvec=unexpected_evaluation,
+            dense_array=unexpected_evaluation,
+        )
+        for size, shape in [(6, (2, 3)), (4, (4,))]
+    ]
+    problem = LeastSquaresProblem(operators)
+
+    assert problem.solution_shape == (2, 2)
+    assert problem.solution_size == 4
+    assert problem.data_shapes == [(2, 3), (4,)]
+    assert all(
+        actual is original
+        for actual, original in zip(problem.data_operators, operators, strict=True)
+    )
+
+
+@pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd", "lsmr", "cgls"])
+def test_inferred_problem_shapes_preserve_batched_solutions(solver_name):
+    """Different data axes can constrain one shaped coefficient field."""
+    xp = get_array_module()
+    matrix = xp.asarray(np.vstack([np.eye(4), np.ones((2, 4))]))
+    operators = [
+        as_linear_map(matrix, input_shape=(2, 2), output_shape=(2, 3)),
+        as_linear_map(xp.eye(4), input_shape=(2, 2)),
+    ]
+    coefficients = xp.arange(24.0).reshape(2, 2, 3, 2)
+    rhs = [operator(coefficients) for operator in operators]
+    problem = LeastSquaresProblem(operators)
+
+    result = LeastSquaresSolver(solver=solver_name, tolerance=1e-13).solve(problem, rhs)
+
+    assert result.shape == coefficients.shape
+    np.testing.assert_allclose(result, coefficients, rtol=1e-11, atol=1e-11)
+
+
+def test_problem_requires_a_shared_coefficient_shape():
+    """Equal sizes alone do not make distinct field axes equivalent."""
+    operators = [
+        as_linear_map(np.eye(4), input_shape=(2, 2)),
+        as_linear_map(np.eye(4)),
+    ]
+    with pytest.raises(ValueError, match="must share input_shape"):
+        LeastSquaresProblem(operators)
+
+    problem = LeastSquaresProblem([as_linear_map(op, input_shape=(2, 2)) for op in operators])
+    assert all(operator.input_shape == (2, 2) for operator in problem.data_operators)
+
+
+@pytest.mark.parametrize("data_shapes", [None, (20,)])
+def test_problem_can_label_raw_tensor_axes(data_shapes):
+    """Explicit input axes determine the tensor's domain boundary."""
+    array = np.arange(120.0).reshape(4, 5, 2, 3)
+    problem = LeastSquaresProblem(
+        as_linear_map(array, input_shape=(2, 3), output_shape=data_shapes)
+    )
+
+    assert problem.solution_shape == (2, 3)
+    assert problem.data_shapes == [(4, 5) if data_shapes is None else data_shapes]
+    np.testing.assert_array_equal(problem.data_operators[0].to_matrix(), array.reshape(20, 6))
+
+
+def test_problem_retains_scalar_coefficient_shape():
+    """An empty shape means one scalar, not a missing shape."""
+    operator = as_linear_map(np.array([[2.0], [3.0]]), input_shape=())
+    problem = LeastSquaresProblem(operator)
+
+    result = LeastSquaresSolver(solver="normal_solve").solve(problem, np.array([4.0, 6.0]))
+
+    assert problem.solution_shape == ()
+    assert result.shape == ()
+    np.testing.assert_allclose(result, 2.0)
+
+
 def test_default_solver_reads_only_the_canonical_environment(monkeypatch):
     """Consumer-specific environment names do not affect Kompe."""
     monkeypatch.delenv(LEAST_SQUARES_SOLVER_ENV, raising=False)
@@ -38,17 +187,13 @@ def test_default_solver_reads_only_the_canonical_environment(monkeypatch):
 
 def test_unregularized_problem_skips_normal_diagonal_scaling():
     """No-reg problems skip a potentially expensive normal diagonal."""
-    problem = LeastSquaresProblem(A=np.eye(2), solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=np.eye(2))
 
     assert problem.regularization_row_scales == []
     assert "data_operator" not in problem.__dict__
 
     zero_weight_problem = LeastSquaresProblem(
-        A=np.eye(2),
-        solution_shape=2,
-        data_shapes=2,
-        regularization_operators=np.eye(2),
-        regularization_strengths=0.0,
+        A=np.eye(2), regularization_operators=np.eye(2), regularization_strengths=0.0
     )
     assert zero_weight_problem.regularization_row_scales == [0.0]
     assert "data_operator" not in zero_weight_problem.__dict__
@@ -64,8 +209,6 @@ def test_positive_regularization_is_never_silently_discarded(
     """Every positive requested regularization term remains in the objective."""
     problem = LeastSquaresProblem(
         A=np.eye(2),
-        solution_shape=2,
-        data_shapes=2,
         regularization_operators=regularization_matrix,
         regularization_strengths=regularization_weight,
     )
@@ -79,11 +222,7 @@ def test_positive_regularization_is_never_silently_discarded(
 def test_positive_strength_on_zero_regularization_operator_is_explicit():
     """A requested no-op regularizer should not look as though it was applied."""
     problem = LeastSquaresProblem(
-        A=np.eye(2),
-        solution_shape=2,
-        data_shapes=2,
-        regularization_operators=np.zeros((2, 2)),
-        regularization_strengths=1.0,
+        A=np.eye(2), regularization_operators=np.zeros((2, 2)), regularization_strengths=1.0
     )
 
     with pytest.raises(ValueError, match="is zero but has positive strength"):
@@ -95,9 +234,7 @@ def test_positive_strength_on_zero_regularization_operator_is_explicit():
 
 def test_problem_exposes_operators_with_their_mathematical_roles():
     """Stored weighting maps are operators, not raw sqrt-weight values."""
-    problem = LeastSquaresProblem(
-        A=np.eye(2), solution_shape=2, data_shapes=2, sqrt_weights=np.array([2.0, 3.0])
-    )
+    problem = LeastSquaresProblem(A=np.eye(2), sqrt_weights=np.array([2.0, 3.0]))
     assert isinstance(problem.data_operators[0], LinearMap)
     assert problem.weight_operators[0].is_diagonal
     np.testing.assert_array_equal(problem.weight_operators[0].diagonal(), [2.0, 3.0])
@@ -107,18 +244,14 @@ def test_problem_exposes_operators_with_their_mathematical_roles():
 def test_least_squares_requires_a_data_operator():
     """An empty objective is rejected at construction."""
     with pytest.raises(ValueError, match="At least one data operator"):
-        LeastSquaresProblem(A=[], solution_shape=2, data_shapes=[])
+        LeastSquaresProblem(A=[])
 
 
 def test_positive_strength_requires_a_regularization_operator():
     """A missing regularizer must not silently disable its strength."""
     with pytest.raises(ValueError, match="missing but has positive strength"):
         LeastSquaresProblem(
-            A=np.eye(2),
-            solution_shape=2,
-            data_shapes=2,
-            regularization_operators=[None],
-            regularization_strengths=1.0,
+            A=np.eye(2), regularization_operators=[None], regularization_strengths=1.0
         )
 
 
@@ -127,8 +260,6 @@ def test_relative_regularization_requires_a_nonzero_data_scale(zero_weights):
     """Relative strengths cannot be normalized to an arbitrary unit scale."""
     problem = LeastSquaresProblem(
         A=np.eye(2) if zero_weights else np.zeros((2, 2)),
-        solution_shape=2,
-        data_shapes=2,
         sqrt_weights=np.zeros(2) if zero_weights else None,
         regularization_operators=np.eye(2),
         regularization_strengths=1.0,
@@ -202,6 +333,61 @@ def test_sparse_constrained_least_squares_map_matches_kkt_and_adjoint(complex_da
         compiled_adjoint = jax.jit(operator.rmatvec)(jnp.asarray(coefficient_probe))
         np.testing.assert_allclose(compiled, expected, rtol=1e-13, atol=1e-13)
         np.testing.assert_allclose(compiled_adjoint, expected_adjoint, rtol=1e-13, atol=1e-13)
+
+
+@pytest.mark.parametrize("kind", ["dense", "sparse", "matrix_free"])
+@pytest.mark.parametrize("materialized", [False, True])
+def test_cholesky_analysis_inherits_axes_and_preserves_structured_action(kind, materialized):
+    """Analysis reverses synthesis axes without needing a dense representation."""
+    from scipy.sparse import csr_matrix
+
+    from kompe.math import cholesky_least_squares_map
+
+    xp = get_array_module()
+    rng = np.random.default_rng(72)
+    matrix = rng.normal(size=(6, 4)) + 1j * rng.normal(size=(6, 4))
+    weights = np.linspace(0.5, 1.5, 6)
+    factor = np.linalg.cholesky(matrix.T.conj() @ (weights[:, None] ** 2 * matrix))
+    if kind == "matrix_free":
+        values = xp.asarray(matrix)
+        synthesis = LinearMap(
+            shape=matrix.shape,
+            dtype=matrix.dtype,
+            input_shape=(2, 2),
+            output_shape=(2, 3),
+            matvec=lambda x: values @ x,
+            rmatvec=lambda y: values.T.conj() @ y,
+            backend_operands=(values,),
+        )
+    else:
+        synthesis = as_linear_map(
+            csr_matrix(matrix) if kind == "sparse" else xp.asarray(matrix),
+            input_shape=(2, 2),
+            output_shape=(2, 3),
+        )
+    if materialized:
+        synthesis.to_matrix()
+    analysis = cholesky_least_squares_map(synthesis, factor, sqrt_weights=weights)
+    assert analysis.input_shape == (2, 3)
+    assert analysis.output_shape == (2, 2)
+    assert bool(synthesis._dense_cache) == materialized
+    rhs = xp.asarray(rng.normal(size=(2, 3, 2, 3)) + 1j * rng.normal(size=(2, 3, 2, 3)))
+    expected_matrix = np.linalg.solve(
+        matrix.T.conj() @ (weights[:, None] ** 2 * matrix),
+        matrix.T.conj() * weights**2,
+    )
+    expected = (expected_matrix @ np.asarray(rhs).reshape(6, 6)).reshape(2, 2, 2, 3)
+    result = analysis(rhs)
+    np.testing.assert_allclose(result, expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        analysis.adjoint()(result),
+        (expected_matrix.T.conj() @ expected.reshape(4, 6)).reshape(rhs.shape),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert bool(synthesis._dense_cache) == materialized
+    analysis.to_matrix()
+    np.testing.assert_allclose(analysis(rhs), expected, rtol=1e-12, atol=1e-12)
 
 
 def test_dense_full_rank_least_squares_map_matches_weighted_lstsq_and_adjoint():
@@ -284,7 +470,7 @@ def test_normal_pinv_solves_block_rhs():
     """Normal-equation pseudo-inverse supports reusable RHS maps."""
     A = np.array([[1.0, 1.0], [2.0, 2.0], [0.0, 0.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=3)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
 
     solution = solver.solve(problem, rhs)
@@ -298,7 +484,7 @@ def test_normal_pinv_uses_normal_equation_cutoff():
     """Normal pseudo-inverse applies cutoff after forming A* A."""
     A = np.diag([1.0, 1e-8])
     rhs = np.array([1.0, 1e-8])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
 
     solution = solver.solve(problem, rhs)
@@ -310,7 +496,7 @@ def test_normal_pinv_keeps_modes_above_normal_equation_cutoff():
     """Normal pseudo-inverse keeps modes above the A* A cutoff."""
     A = np.diag([1.0, 1e-6])
     rhs = np.array([1.0, 1e-6])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
 
     solution = solver.solve(problem, rhs)
@@ -322,7 +508,7 @@ def test_normal_pinv_does_not_use_direct_solve(monkeypatch):
     """Normal pseudo-inverse also used for full-rank systems."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=3)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
 
     def fail_solve(*args, **kwargs):
@@ -341,7 +527,7 @@ def test_normal_pinv_response_solver_reuses_factorization(monkeypatch):
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
     rhs_first = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
     rhs_second = np.array([[0.0, 4.0], [2.5, -1.0], [1.5, 3.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=3)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
     solve_response = solver.prepare(problem)
 
@@ -358,7 +544,7 @@ def test_normal_pinv_response_solver_reuses_factorization(monkeypatch):
 
 def test_unregularized_system_reuses_data_operator():
     """Without regularization there is one canonical system map."""
-    problem = LeastSquaresProblem(A=np.eye(3), solution_shape=3, data_shapes=3)
+    problem = LeastSquaresProblem(A=np.eye(3))
 
     assert problem.system_operator is problem.data_operator
 
@@ -366,11 +552,7 @@ def test_unregularized_system_reuses_data_operator():
 def test_normal_pinv_discards_only_derived_regularized_matrix():
     """Keep the data matrix used by repeated solves, not its augmented copy."""
     problem = LeastSquaresProblem(
-        A=np.eye(3),
-        solution_shape=3,
-        data_shapes=3,
-        regularization_operators=np.eye(3),
-        regularization_strengths=0.1,
+        A=np.eye(3), regularization_operators=np.eye(3), regularization_strengths=0.1
     )
     regularized_system = problem.system_operator
 
@@ -384,7 +566,7 @@ def test_normal_pinv_discards_only_derived_regularized_matrix():
 
 def test_least_squares_requires_at_least_one_rhs_term():
     """A missing right-hand side is an input error, not an implicit zero solve."""
-    problem = LeastSquaresProblem(A=np.eye(2), solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=np.eye(2))
 
     with pytest.raises(ValueError, match="At least one right-hand-side"):
         LeastSquaresSolver(solver="normal_pinv").solve(problem, None)
@@ -396,7 +578,7 @@ def test_least_squares_requires_at_least_one_rhs_term():
 
 def test_least_squares_rejects_ambiguous_rhs_layout():
     """Equal element counts do not make an unrelated array shape meaningful."""
-    problem = LeastSquaresProblem(A=np.eye(6), solution_shape=6, data_shapes=(2, 3))
+    problem = LeastSquaresProblem(as_linear_map(np.eye(6), output_shape=(2, 3)))
 
     with pytest.raises(ValueError, match="incompatible with data_shape"):
         LeastSquaresSolver(solver="normal_pinv").solve(problem, np.ones((3, 4)))
@@ -421,7 +603,7 @@ def test_normal_pinv_response_solver_uses_explicit_data_adjoint():
         rmatmat=rmatmat,
         dense_array=lambda xp: xp.asarray(matrix),
     )
-    problem = LeastSquaresProblem(A=operator, solution_shape=2, data_shapes=3)
+    problem = LeastSquaresProblem(A=operator)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
     solve_response = solver.prepare(problem)
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
@@ -437,7 +619,7 @@ def test_normal_pinv_solve_reuses_cached_pseudo_inverse(monkeypatch):
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
     rhs_first = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
     rhs_second = np.array([[0.0, 4.0], [2.5, -1.0], [1.5, 3.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=3)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
     calls = 0
     original_pinv = np.linalg.pinv
@@ -476,7 +658,7 @@ def test_svd_solves_and_preconditioners_share_factorization(backend, monkeypatch
             return original_svd(*args, **kwargs)
 
         monkeypatch.setattr(xp.linalg, "svd", svd)
-        problem = LeastSquaresProblem(A=xp.asarray(matrix), solution_shape=3, data_shapes=3)
+        problem = LeastSquaresProblem(A=xp.asarray(matrix))
         solver = LeastSquaresSolver("svd", tolerance=1e-12)
         with np.errstate(divide="raise", invalid="raise"):
             for scale in (1.0, 2.0):
@@ -500,7 +682,7 @@ def test_svd_cache_keeps_separate_numpy_and_jax_factors(monkeypatch):
     """Changing execution backend never reuses factors on the wrong device."""
     import jax.numpy as jnp
 
-    problem = LeastSquaresProblem(A=np.diag([1.0, 2.0]), solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=np.diag([1.0, 2.0]))
     calls = []
     for xp in (np, jnp):
         original_svd = xp.linalg.svd
@@ -547,8 +729,6 @@ def test_dense_solve_stays_on_jax(solver_name, jax_source, monkeypatch):
     with backend_context("jax" if jax_source == "configured" else "numpy"):
         problem = LeastSquaresProblem(
             A=jnp.asarray(matrix) if jax_source == "operator" else matrix,
-            solution_shape=2,
-            data_shapes=3,
             regularization_operators=jnp.asarray(matrix) if jax_source == "regularizer" else None,
             regularization_strengths=0.5 if jax_source == "regularizer" else None,
         )
@@ -578,7 +758,7 @@ def test_normal_response_reuses_prepared_factors_across_backends(monkeypatch):
         monkeypatch.setattr(xp.linalg, "pinv", pinv)
 
     with backend_context("numpy"):
-        problem = LeastSquaresProblem(A=matrix, solution_shape=2, data_shapes=3)
+        problem = LeastSquaresProblem(A=matrix)
         response = LeastSquaresSolver("normal_pinv", tolerance=1e-12).prepare(problem)
         assert calls == [np]  # Preparation still warms the ordinary path.
         for xp in (np, jnp, jnp, np):
@@ -595,7 +775,7 @@ def test_prepared_response_retains_factors_after_problem_cache_eviction(backend,
     rhs = np.array([1.0, 3.0, 0.5])
     expected = np.linalg.lstsq(matrix, rhs, rcond=None)[0]
     with backend_context("numpy"):
-        problem = LeastSquaresProblem(A=matrix, solution_shape=2, data_shapes=3)
+        problem = LeastSquaresProblem(A=matrix)
         response = LeastSquaresSolver("normal_pinv").prepare(problem)
 
     problem._dense_normal_pinv_cache.clear()
@@ -622,8 +802,6 @@ def test_normal_matrices_and_factors_respect_explicit_backend(custom_builder):
     expected = data_normal + 0.1 * np.median(np.diag(data_normal).real) * np.eye(2)
     problem = LeastSquaresProblem(
         A=jnp.asarray(matrix),
-        solution_shape=2,
-        data_shapes=3,
         regularization_operators=jnp.eye(2),
         regularization_strengths=0.1,
         data_normal_matrix_builder=(lambda: data_normal) if custom_builder else None,
@@ -671,8 +849,6 @@ def test_cached_inverse_backend_selection_does_not_build_normal_matrix(backend):
         xp = get_array_module(backend=backend)
         problem = LeastSquaresProblem(
             A=matrix,
-            solution_shape=2,
-            data_shapes=3,
             regularization_operators=xp.eye(2),
             regularization_strengths=0.1,
             operator_cache=PrecomputedCache(),
@@ -701,8 +877,6 @@ def test_normal_response_prepares_only_the_operand_backend(jax_source):
     with backend_context("numpy"):
         problem = LeastSquaresProblem(
             A=jnp.asarray(matrix) if jax_source == "operator" else matrix,
-            solution_shape=2,
-            data_shapes=3,
             regularization_operators=jnp.asarray(matrix) if jax_source == "regularizer" else None,
             regularization_strengths=0.5 if jax_source == "regularizer" else None,
         )
@@ -718,7 +892,7 @@ def test_numpy_spectral_preconditioner_accepts_jax_operands():
     import jax.numpy as jnp
 
     with backend_context("numpy"):
-        problem = LeastSquaresProblem(A=np.diag([2.0, 4.0]), solution_shape=2, data_shapes=2)
+        problem = LeastSquaresProblem(A=np.diag([2.0, 4.0]))
         preconditioner = LeastSquaresSolver("lsmr", preconditioner="pinv").build_preconditioner(
             problem
         )
@@ -743,7 +917,7 @@ def test_dense_solvers_preserve_jax_output_when_backend_enabled(solver_name):
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0], [1.5, 0.0]])
     expected = np.linalg.lstsq(A, rhs, rcond=None)[0]
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=4)
+    problem = LeastSquaresProblem(A=A)
     previous_backend = jax_enabled()
 
     try:
@@ -766,11 +940,7 @@ def test_uncached_normal_pinv_stays_on_jax(monkeypatch):
     """An in-memory JAX factorization does not cross through NumPy."""
     import kompe.math.least_squares_problem as problem_module
 
-    problem = LeastSquaresProblem(
-        A=np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]]),
-        solution_shape=2,
-        data_shapes=3,
-    )
+    problem = LeastSquaresProblem(A=np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]]))
     previous_backend = jax_enabled()
 
     def reject_host_transfer(_array):
@@ -792,7 +962,7 @@ def test_svd_solver_preserves_jax_output_when_backend_enabled():
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0], [1.5, 0.0]])
     expected = np.linalg.lstsq(A, rhs, rcond=None)[0]
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=4)
+    problem = LeastSquaresProblem(A=A)
     previous_backend = jax_enabled()
 
     try:
@@ -821,7 +991,7 @@ def test_least_squares_problem_follows_jax_operator_context_when_numpy_active():
 
     try:
         set_backend("numpy")
-        problem = LeastSquaresProblem(A=jnp.asarray(A), solution_shape=2, data_shapes=3)
+        problem = LeastSquaresProblem(A=jnp.asarray(A))
         rhs_block, _, _ = problem.assemble_rhs_block(rhs)
         system_block = problem.system_operator.matmat(np.eye(2))
     finally:
@@ -837,7 +1007,7 @@ def test_normal_pinv_matches_numpy_hermitian_reference_when_jax_enabled():
     """JAX normal-pinv matches the hermitian reference."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0], [1.5, 0.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=4)
+    problem = LeastSquaresProblem(A=A)
     previous_backend = jax_enabled()
 
     try:
@@ -860,7 +1030,7 @@ def test_iterative_solver_solves_block_rhs_with_base_preconditioner(solver_name)
     """Iterative block RHS solves reuse the base preconditioner."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
     rhs = np.array([[1.0, 2.0, -1.0], [3.0, 1.0, 0.5], [0.5, -2.0, 4.0], [1.5, 0.0, 2.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=4)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver=solver_name, tolerance=1e-12, preconditioner="jacobi")
     preconditioner = solver.build_preconditioner(problem)
 
@@ -876,7 +1046,7 @@ def test_iterative_solvers_do_not_materialize_dense_system(monkeypatch, solver_n
     """Iterative solves stay matrix-free for no dense preconditioner."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0], [1.5, 0.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=4)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver=solver_name, tolerance=1e-12)
 
     def fail_dense_assembly():
@@ -897,7 +1067,7 @@ def test_iterative_jacobi_preconditioner_does_not_materialize_dense_system(
     """Jacobi-preconditioned iterative solves stay matrix-free."""
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0], [1.5, 0.0]])
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=4)
+    problem = LeastSquaresProblem(A=A)
     solver = LeastSquaresSolver(solver=solver_name, tolerance=1e-12, preconditioner="jacobi")
 
     def fail_dense_assembly():
@@ -924,7 +1094,7 @@ def test_iterative_solvers_preserve_jax_output_when_backend_enabled(
     A = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0], [1.0, 2.0]])
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0], [1.5, 0.0]])
     expected = np.linalg.lstsq(A, rhs, rcond=None)[0]
-    problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=4)
+    problem = LeastSquaresProblem(A=A)
     previous_backend = jax_enabled()
 
     try:
@@ -947,7 +1117,7 @@ def test_jax_lsmr_solves_underdetermined_block_rhs():
     A = np.array([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, -1.0]])
     rhs = np.array([[1.0, 2.0], [0.5, -1.0], [2.0, 0.0]])
     expected = np.linalg.lstsq(A, rhs, rcond=None)[0]
-    problem = LeastSquaresProblem(A=A, solution_shape=4, data_shapes=3)
+    problem = LeastSquaresProblem(A=A)
     previous_backend = jax_enabled()
 
     try:
@@ -1041,11 +1211,7 @@ def test_regularization_strengths_must_be_finite_non_negative_scalars(weight):
     """Invalid regularization weights fail before system assembly."""
     with pytest.raises(ValueError, match="finite non-negative scalar"):
         LeastSquaresProblem(
-            A=np.eye(2),
-            solution_shape=2,
-            data_shapes=2,
-            regularization_operators=np.eye(2),
-            regularization_strengths=weight,
+            A=np.eye(2), regularization_operators=np.eye(2), regularization_strengths=weight
         )
 
 
@@ -1054,8 +1220,6 @@ def test_regularization_does_not_mutate_a_custom_data_normal_matrix():
     data_normal = np.eye(2)
     problem = LeastSquaresProblem(
         A=np.eye(2),
-        solution_shape=2,
-        data_shapes=2,
         regularization_operators=np.eye(2),
         regularization_strengths=1.0,
         data_normal_matrix_builder=lambda: data_normal,
@@ -1084,7 +1248,7 @@ def test_solver_tolerance_must_be_scalar_numeric_data():
 @pytest.mark.parametrize("entrypoint", ["solve", "prepare"])
 def test_dense_solvers_reject_explicit_preconditioners(solver_name, entrypoint):
     """Dense solvers reject explicitly supplied preconditioners."""
-    problem = LeastSquaresProblem(A=np.eye(2), solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=np.eye(2))
     solver = LeastSquaresSolver(solver=solver_name)
     preconditioner = as_linear_map(np.eye(2))
 
@@ -1099,7 +1263,7 @@ def test_dense_solvers_reject_explicit_preconditioners(solver_name, entrypoint):
 @pytest.mark.parametrize("option, value", [("damp", 1.0), ("maxiter", 20)])
 def test_dense_solvers_reject_unsupported_options(solver_name, option, value):
     """Changing algorithms must not silently discard solver options."""
-    problem = LeastSquaresProblem(A=np.eye(2), solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=np.eye(2))
 
     with pytest.raises(TypeError, match=f"unexpected keyword argument '{option}'"):
         LeastSquaresSolver(solver_name).solve(problem, np.ones(2), **{option: value})
@@ -1112,7 +1276,7 @@ def test_lsmr_damping_does_not_change_meaning_with_preconditioning(backend):
         xp = get_array_module()
         identity = xp.eye(2)
         rhs = xp.ones(2)
-        problem = LeastSquaresProblem(A=identity, solution_shape=2, data_shapes=2)
+        problem = LeastSquaresProblem(A=identity)
         preconditioner = as_linear_map(xp.asarray([2.0, 3.0]))
         solver = LeastSquaresSolver("lsmr", tolerance=1e-12)
 
@@ -1125,9 +1289,7 @@ def test_lsmr_damping_does_not_change_meaning_with_preconditioning(backend):
         np.testing.assert_allclose(solver.solve(problem, rhs, damp=1.0), 0.5 * rhs)
 
         # An explicit penalty stays in the original coefficient coordinates.
-        regularized = LeastSquaresProblem(
-            A=[identity, identity], solution_shape=2, data_shapes=[2, 2]
-        )
+        regularized = LeastSquaresProblem(A=[identity, identity])
         np.testing.assert_allclose(
             solver.solve(regularized, [rhs, None], preconditioner=preconditioner), 0.5 * rhs
         )
@@ -1136,7 +1298,7 @@ def test_lsmr_damping_does_not_change_meaning_with_preconditioning(backend):
 @pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd"])
 def test_dense_solvers_do_not_build_configured_preconditioners(solver_name):
     """A requested preconditioner is never silently ignored."""
-    problem = LeastSquaresProblem(A=np.eye(2), solution_shape=2, data_shapes=2)
+    problem = LeastSquaresProblem(A=np.eye(2))
     solver = LeastSquaresSolver(solver=solver_name, preconditioner="jacobi")
 
     with pytest.raises(ValueError, match="does not accept a preconditioner"):

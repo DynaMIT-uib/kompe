@@ -151,9 +151,11 @@ class FieldCoefficients:
         """Return coefficients as a flat operator-compatible vector."""
         return self.array.reshape(-1)
 
-    def __array__(self, dtype=None):
+    def __array__(self, dtype=None, copy=None):
         """Return coefficients for NumPy coercion."""
-        return np.asarray(self.array, dtype=dtype)
+        if copy is None:
+            return np.asarray(self.array, dtype=dtype)
+        return np.array(self.array, dtype=dtype, copy=copy)
 
 
 __all__ = ["CoefficientSpace", "FieldCoefficients"]

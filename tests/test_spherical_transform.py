@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 
 import kompe.spherical_transform as spherical_transform_module
-from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
+from kompe import (
+    CoefficientSpace,
+    FieldCoefficients,
+    GlobalCSBasis,
+    SHBasis,
+    SphericalGrid,
+    SphericalTransform,
+)
 from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
 from kompe.math import (
     backend_context,
@@ -15,6 +22,95 @@ from kompe.math import (
     to_numpy,
 )
 from kompe.math.least_squares_solver import dense_full_rank_least_squares_map
+
+
+@pytest.mark.parametrize("array_first", [False, True])
+def test_sh_helmholtz_array_and_operator_share_materialization(array_first, monkeypatch):
+    """Array inspection and operator application share one dense result."""
+    from kompe.basis import SurfaceDifferentialBasis
+
+    basis = SHBasis(3, 2)
+    grid = SphericalGrid(lat=[30.0, 45.0, 60.0], lon=[0.0, 45.0, 90.0])
+    transform = SphericalTransform(basis, grid)
+    operator = basis.helmholtz_synthesis_operator(grid)
+    assert not operator._dense_cache
+    expected = SurfaceDifferentialBasis.helmholtz_synthesis_array(basis, grid)
+    if array_first:
+        array = basis.helmholtz_synthesis_array(grid)
+        matrix = operator.to_matrix()
+    else:
+        matrix = operator.to_matrix()
+        array = basis.helmholtz_synthesis_array(grid)
+
+    def unexpected_rebuild(*args, **kwargs):
+        pytest.fail("The existing Helmholtz materialization must be reused.")
+
+    monkeypatch.setattr(SurfaceDifferentialBasis, "helmholtz_synthesis_array", unexpected_rebuild)
+    assert operator.to_matrix() is matrix
+    assert basis.helmholtz_synthesis_array(grid) is array
+    np.testing.assert_allclose(array, expected)
+    np.testing.assert_allclose(transform.helmholtz_synthesis_array, expected)
+    if get_array_module() is np:
+        assert np.shares_memory(array, matrix)
+        assert np.shares_memory(transform.helmholtz_synthesis_array, matrix)
+
+
+@pytest.mark.parametrize("representation", ["scalar", "helmholtz"])
+def test_synthesis_checks_coefficient_identity_not_only_length(representation):
+    """Equal counts do not make different harmonic modes compatible."""
+    source_basis = SHBasis(1, 1)
+    target_basis = SHBasis(3, 0)
+    assert source_basis.coefficient_count == target_basis.coefficient_count
+    space = CoefficientSpace(source_basis, representation=representation)
+    field = FieldCoefficients(space, np.ones(space.shape))
+    grid = SphericalGrid(lat=[30.0, 60.0], lon=[0.0, 90.0])
+    target = SphericalTransform(target_basis, grid)
+    synthesize = (
+        target.synthesize_scalar if representation == "scalar" else target.synthesize_helmholtz
+    )
+    with pytest.raises(ValueError, match="coefficient-compatible"):
+        synthesize(field)
+
+    # Separate but mathematically identical bases remain composable.
+    target = SphericalTransform(SHBasis(1, 1), grid)
+    synthesize = (
+        target.synthesize_scalar if representation == "scalar" else target.synthesize_helmholtz
+    )
+    np.testing.assert_allclose(synthesize(field), synthesize(field.array))
+
+
+@pytest.mark.parametrize("representation", ["scalar", "helmholtz"])
+def test_synthesis_and_analysis_share_trailing_batch_axes(representation):
+    """The output of batched analysis can be synthesized directly."""
+    xp = get_array_module()
+    basis = SHBasis(3, 2, mean_free=True)
+    transform = SphericalTransform(basis, _regular_grid())
+    coefficient_shape = (
+        (basis.coefficient_count,) if representation == "scalar" else (2, basis.coefficient_count)
+    )
+    rng = np.random.default_rng(14)
+    coefficients = xp.asarray(rng.normal(size=coefficient_shape + (2, 3)))
+    synthesize = getattr(transform, f"synthesize_{representation}")
+    analyze = getattr(transform, f"analyze_{representation}")
+
+    values = synthesize(coefficients)
+
+    expected = np.stack(
+        [synthesize(coefficients[..., i, j]) for i in range(2) for j in range(3)], axis=-1
+    ).reshape(values.shape)
+    np.testing.assert_allclose(values, expected, atol=1e-12)
+    recovered = analyze(values)
+    assert recovered.shape == coefficients.shape
+    np.testing.assert_allclose(recovered, coefficients, atol=1e-10)
+    np.testing.assert_allclose(synthesize(recovered), values, atol=1e-10)
+
+
+def test_scalar_synthesis_rejects_unknown_derivative():
+    """An unsupported derivative must not evaluate the undifferentiated field."""
+    basis = SHBasis(2, 1)
+    transform = SphericalTransform(basis, SphericalGrid(lat=[30.0], lon=[0.0]))
+    with pytest.raises(ValueError, match="derivative"):
+        transform.synthesize_scalar(np.ones(basis.coefficient_count), derivative="radial")
 
 
 def _regular_grid():
@@ -34,11 +130,11 @@ def test_transform_cache_controls_rebuild_equivalent_analysis():
     values = np.linspace(-1.0, 1.0, transform.grid.size)
     expected = transform.analyze_scalar(values)
 
-    assert transform.cache_info()["scalar_factorization"]
-    assert transform.cache_info()["materialized_values"] > 0
+    assert transform.cache_info()["scalar_problem_cached"]
+    assert transform.cache_info()["cached_attributes"] > 0
     transform.clear_cache()
-    assert not transform.cache_info()["scalar_factorization"]
-    assert transform.cache_info()["materialized_values"] == 0
+    assert not transform.cache_info()["scalar_problem_cached"]
+    assert transform.cache_info()["cached_attributes"] == 0
     np.testing.assert_allclose(transform.analyze_scalar(values), expected)
 
 
@@ -435,7 +531,7 @@ def test_spherical_transform_analyzes_tangential_grid_values():
     actual = transform.analyze_helmholtz_samples(values, input_grid=grid, analysis_basis=basis)
     direct = transform.analyze_helmholtz(values)
 
-    np.testing.assert_allclose(actual[0], expected.reshape(-1), atol=1e-10)
+    np.testing.assert_allclose(actual[0], expected, atol=1e-10)
     np.testing.assert_allclose(direct, expected, atol=1e-10)
     assert "helmholtz_analysis_operator" not in transform.__dict__
 
@@ -462,7 +558,7 @@ def test_spherical_transform_batches_direct_analysis():
     )
 
     np.testing.assert_allclose(scalar_actual, scalar_coeffs, atol=1e-10)
-    np.testing.assert_allclose(vector_actual, vector_coeffs.reshape(2, -1), atol=1e-10)
+    np.testing.assert_allclose(vector_actual, vector_coeffs, atol=1e-10)
 
 
 def test_spherical_transform_least_squares_use_operator_properties():
@@ -704,7 +800,7 @@ def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
     )
 
     assert calls == 1
-    assert projected_1.shape == (2, 2 * basis.coefficient_count)
+    assert projected_1.shape == (2, 2, basis.coefficient_count)
     np.testing.assert_allclose(projected_2, projected_1)
 
 

@@ -30,6 +30,228 @@ from kompe.math.linear_map import (
 # Core maps and shaped operations
 
 
+@pytest.mark.parametrize("kind", ["dense", "sparse", "diagonal", "matrix_free", "composed"])
+@pytest.mark.parametrize("materialized", [False, True])
+@pytest.mark.parametrize("columns", [None, 0, 3])
+def test_block_action_shapes_do_not_depend_on_representation(kind, materialized, columns):
+    """Vectors stay vectors; empty and ordinary blocks retain their columns."""
+    xp = get_array_module()
+    matrix = xp.asarray([[1, 2j, 3], [0, 4, -1j], [2, 1, 5]])
+    if kind == "diagonal":
+        matrix = xp.diag(xp.diag(matrix))
+        operator = diagonal_linear_map(xp.diag(matrix))
+    elif kind == "matrix_free":
+        operator = LinearMap(
+            shape=matrix.shape,
+            dtype=matrix.dtype,
+            matvec=lambda x: matrix @ x,
+            rmatvec=lambda y: matrix.T.conj() @ y,
+            backend_operands=(matrix,),
+        )
+    else:
+        operator = as_linear_map(csr_matrix(np.asarray(matrix)) if kind == "sparse" else matrix)
+        if kind == "composed":
+            operator = diagonal_linear_map(xp.ones(3)) @ operator
+    if materialized:
+        operator.to_matrix()
+
+    shape = (3,) if columns is None else (3, columns)
+    values = xp.arange(np.prod(shape), dtype=float).reshape(shape) * (1.0 + 0.5j)
+    forward = operator.matmat(values)
+    adjoint = operator.rmatmat(values)
+    assert forward.shape == adjoint.shape == shape
+    np.testing.assert_allclose(forward, matrix @ values)
+    np.testing.assert_allclose(adjoint, matrix.T.conj() @ values)
+    assert bool(operator._dense_cache) == materialized
+
+
+@pytest.mark.parametrize("shape", [(0, 3), (3, 0), (0, 0)])
+def test_empty_operator_blocks_and_materialization_need_no_actions(shape):
+    """Empty domains and codomains have exact, inexpensive zero actions."""
+    xp = get_array_module()
+
+    def unexpected_action(values):
+        pytest.fail("An empty operator block does not need an action callback.")
+
+    operator = LinearMap(
+        shape=shape,
+        dtype=float,
+        matvec=unexpected_action,
+        rmatvec=unexpected_action,
+        matmat=unexpected_action,
+        rmatmat=unexpected_action,
+    )
+    for columns in (0, 2):
+        forward = operator.matmat(xp.empty((shape[1], columns), dtype=complex))
+        adjoint = operator.rmatmat(xp.empty((shape[0], columns), dtype=complex))
+        assert forward.shape == (shape[0], columns)
+        assert adjoint.shape == (shape[1], columns)
+        assert xp.iscomplexobj(forward) and xp.iscomplexobj(adjoint)
+        np.testing.assert_array_equal(forward, np.zeros(forward.shape))
+        np.testing.assert_array_equal(adjoint, np.zeros(adjoint.shape))
+    np.testing.assert_array_equal(operator.to_matrix(), np.empty(shape))
+
+
+@pytest.mark.parametrize("shape", [(), (2, 3), (3, 2, 1)])
+def test_block_actions_reject_non_column_layouts(shape):
+    """Scientific and batch axes belong in the shaped callable interface."""
+    operator = as_linear_map(np.eye(3))
+    for apply in (operator.matmat, operator.rmatmat):
+        with pytest.raises(ValueError, match="Column blocks must have shape"):
+            apply(np.ones(shape))
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+def test_scaled_dense_map_owns_one_scaled_array(materialized):
+    """Scaling keeps one dense value for action and materialization."""
+    xp = get_array_module()
+    original = as_linear_map(xp.arange(12.0).reshape(3, 4))
+    if materialized:
+        original.to_matrix()
+    original = as_linear_map(original, input_shape=(2, 2), output_shape=(3, 1))
+    scaled = (2.0 - 0.5j) * original
+    matrix = scaled.to_matrix()
+
+    assert matrix is scaled.backend_operands[0]
+    assert scaled.to_matrix() is matrix
+    if xp is np:
+        assert np.shares_memory(scaled._dense_tensor, matrix)
+    np.testing.assert_allclose(scaled(xp.ones((2, 2))), (matrix @ xp.ones(4)).reshape(3, 1))
+    np.testing.assert_allclose(
+        scaled.adjoint()(xp.ones((3, 1))), (matrix.T.conj() @ xp.ones(3)).reshape(2, 2)
+    )
+
+
+def test_scaling_materialized_contraction_does_not_revisit_factors(monkeypatch):
+    """A paid-for contraction remains the representation after scaling."""
+    xp = get_array_module()
+    operator = einsum_linear_map(
+        component_tensors=[xp.arange(6.0).reshape(3, 2), xp.arange(8.0).reshape(2, 4)],
+        einsum_string_dense="ik,kj->ij",
+        einsum_string_matvec="ik,kj,j->i",
+        einsum_string_rmatvec="i,ik,kj->j",
+        input_shape=(4,),
+        output_shape=(3,),
+    )
+    matrix = operator.to_matrix()
+
+    def unexpected_contraction(*args, **kwargs):
+        pytest.fail("Scaling must reuse the existing dense contraction.")
+
+    monkeypatch.setattr(type(operator._einsum_map), "matvec", unexpected_contraction)
+    scaled = 3.0 * operator
+    assert scaled._einsum_map is None
+    np.testing.assert_allclose(scaled(xp.ones(4)), 3.0 * (matrix @ xp.ones(4)))
+
+
+def test_scaling_materialized_diagonal_stays_vector_backed():
+    """Inspecting a diagonal matrix never makes scaling use it."""
+    xp = get_array_module()
+    original = diagonal_linear_map(xp.arange(1.0, 5.0), input_shape=(2, 2), output_shape=(2, 2))
+    original.to_matrix()
+    scaled = -2.0 * original
+    assert scaled.is_diagonal
+    assert not scaled._dense_cache
+    np.testing.assert_allclose(scaled(xp.ones((2, 2))), -2.0 * xp.arange(1.0, 5.0).reshape(2, 2))
+
+
+@pytest.mark.parametrize("batch_shape", [(), (4,), (2, 3), (0,)])
+def test_callable_map_preserves_component_and_batch_axes(batch_shape):
+    """Shaped application and its adjoint retain scientific axes."""
+    xp = get_array_module()
+    matrix = np.arange(24.0).reshape(6, 4) / 10
+    linear_map = as_linear_map(matrix, input_shape=(2, 2), output_shape=(3, 2))
+    n_fields = int(np.prod(batch_shape))
+    values = xp.asarray(np.arange(4 * n_fields, dtype=float).reshape((2, 2) + batch_shape))
+
+    result = linear_map(values)
+
+    assert isinstance(result, xp.ndarray)
+    assert result.shape == (3, 2) + batch_shape
+    expected = matrix @ np.asarray(values).reshape(4, n_fields)
+    np.testing.assert_allclose(result, expected.reshape(result.shape))
+    adjoint_result = linear_map.adjoint()(result)
+    assert adjoint_result.shape == values.shape
+    np.testing.assert_allclose(adjoint_result, (matrix.T @ expected).reshape(values.shape))
+
+
+def test_callable_map_uses_block_action_without_materializing():
+    """A whole batch uses one matmat, without a dense conversion."""
+    xp = get_array_module()
+    matrix = xp.arange(12.0).reshape(3, 4)
+    calls = []
+
+    def matvec(values):
+        calls.append("matvec")
+        return matrix @ values
+
+    def matmat(values):
+        calls.append("matmat")
+        return matrix @ values
+
+    linear_map = LinearMap(
+        shape=(3, 4),
+        dtype=float,
+        input_shape=(2, 2),
+        output_shape=(3,),
+        matvec=matvec,
+        rmatvec=lambda values: matrix.T @ values,
+        matmat=matmat,
+    )
+    linear_map(xp.ones((2, 2)))
+    linear_map(xp.ones((2, 2, 5, 7)))
+    assert calls == ["matvec", "matmat"]
+    assert not linear_map._dense_cache
+
+
+def test_callable_map_empty_batch_needs_no_vector_action():
+    """An empty selection needs neither vector calls nor materialization."""
+    xp = get_array_module()
+
+    def no_vectors(values):
+        raise AssertionError("There are no fields to evaluate.")
+
+    linear_map = LinearMap(
+        shape=(3, 4), dtype=float, matvec=no_vectors, rmatvec=no_vectors, input_shape=(2, 2)
+    )
+    result = linear_map(xp.empty((2, 2, 0)))
+    assert result.shape == (3, 0)
+    assert isinstance(result, xp.ndarray)
+    assert not linear_map._dense_cache
+
+
+def test_callable_map_has_an_explicit_domain_shape():
+    """Shaped application does not guess component or batch axes."""
+    linear_map = as_linear_map(np.eye(4), input_shape=(2, 2))
+    with pytest.raises(ValueError, match="input_shape"):
+        linear_map(np.ones(4))
+    # Flat linear algebra retains its separate, established contract.
+    np.testing.assert_allclose(linear_map @ np.ones(4), np.ones(4))
+
+
+def test_callable_map_accepts_scalar_domains():
+    """An empty domain shape represents scalars, not length-one fields."""
+    linear_map = as_linear_map(np.array([[2.0], [3.0]]), input_shape=())
+    np.testing.assert_allclose(linear_map(4.0), [8.0, 12.0])
+    np.testing.assert_allclose(linear_map(np.array([4.0, 5.0])), [[8.0, 10.0], [12.0, 15.0]])
+
+
+@pytest.mark.requires_jax
+def test_callable_map_supports_jit_and_differentiation():
+    """A shaped map can be compiled and differentiated directly."""
+    import jax
+    import jax.numpy as jnp
+
+    with backend_context("numpy"):
+        matrix = np.arange(12.0).reshape(3, 4)
+        linear_map = as_linear_map(matrix, input_shape=(2, 2))
+        values = jnp.ones((2, 2))
+        result = jax.jit(linear_map)(values)
+        assert isinstance(result, jax.Array)
+        np.testing.assert_allclose(result, matrix @ np.ones(4))
+        np.testing.assert_allclose(jax.jacfwd(linear_map)(values), matrix.reshape(3, 2, 2))
+
+
 def test_dense_linear_map_matches_matrix_operations():
     """Dense maps match matrix operations."""
     matrix = np.array([[1.0, 2.0], [3.0, 5.0], [7.0, 11.0]])
@@ -130,7 +352,7 @@ def test_vstack_linear_maps_empty_stack_has_stable_adjoint_shapes():
     np.testing.assert_allclose(stacked.rmatvec(np.zeros(0)), np.zeros(2))
     np.testing.assert_allclose(stacked.matmat(np.ones((2, 3))), np.zeros((0, 3)))
     np.testing.assert_allclose(stacked.rmatmat(np.zeros((0, 3))), np.zeros((2, 3)))
-    np.testing.assert_allclose(stacked.rmatmat(np.zeros(0)), np.zeros((2, 1)))
+    np.testing.assert_allclose(stacked.rmatmat(np.zeros(0)), np.zeros(2))
 
 
 def test_linear_map_shape_metadata_is_validated_and_relabelable():
@@ -1584,7 +1806,7 @@ def test_least_squares_accepts_linear_map_and_sparse_inputs():
     expected = np.linalg.lstsq(A, rhs, rcond=None)[0]
 
     for operator in [as_linear_map(A), csr_matrix(A)]:
-        problem = LeastSquaresProblem(A=operator, solution_shape=2, data_shapes=3)
+        problem = LeastSquaresProblem(A=operator)
         solver = LeastSquaresSolver(solver="lsmr", tolerance=1e-12)
         solution = solver.solve(problem, rhs, maxiter=200)
         np.testing.assert_allclose(solution, expected, rtol=1e-10, atol=1e-10)

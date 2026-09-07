@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from kompe.math import as_linear_map, diagonal_linear_map, take_linear_map
+from kompe.math import LinearMap, as_linear_map, diagonal_linear_map, take_linear_map
 from kompe.math.backend import get_array_module, readonly_numpy_array
 
 
@@ -162,10 +162,11 @@ class SurfaceDifferentialBasis(ScalarBasis):
         Coefficients are ordered as curl-free then divergence-free
         potentials. Components are ordered as theta then phi. The field
         convention is ``-grad(phi) + rhat x grad(psi)``.
+        Array axes are ``(component, *sample_axes, potential, coefficient)``.
         """
         gradient = self.surface_gradient_array(grid)
         rhat_cross_gradient = _backend_stack([-gradient[1], gradient[0]])
-        return _backend_stack([-gradient, rhat_cross_gradient], axis=2)
+        return _backend_stack([-gradient, rhat_cross_gradient], axis=-2)
 
     def helmholtz_synthesis_operator(self, grid):
         """Return the Helmholtz-potential-to-vector operator."""
@@ -176,7 +177,24 @@ class SurfaceDifferentialBasis(ScalarBasis):
             self.rhat_cross_gradient_operator(grid)
             @ self.helmholtz_divergence_free_potential_operator()
         )
-        return -curl_free + divergence_free
+        action = -curl_free + divergence_free
+        # Dense synthesis is direct block assembly, not application to
+        # an identity matrix. Keep the ordinary action structured.
+        return LinearMap(
+            shape=action.shape,
+            dtype=action.dtype,
+            matvec=action.matvec,
+            rmatvec=action.rmatvec,
+            matmat=action.matmat,
+            rmatmat=action.rmatmat,
+            dense_array=lambda xp: xp.asarray(
+                SurfaceDifferentialBasis.helmholtz_synthesis_array(self, grid)
+            ).reshape(action.shape),
+            normal_matrix_diag=action.normal_matrix_diag,
+            backend_operands=action.backend_operands,
+            input_shape=action.input_shape,
+            output_shape=action.output_shape,
+        )
 
     def helmholtz_curl_free_potential_operator(self):
         """Return the Helmholtz-to-curl-free-potential operator."""

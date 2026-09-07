@@ -118,52 +118,23 @@ def dense_full_rank_least_squares_map(
     data = np.asarray(data_matrix)
     if data.ndim != 2:
         raise ValueError(f"data_matrix must be two-dimensional; got shape {data.shape}.")
-    data_size, solution_size = data.shape
-    if data_size < solution_size:
+    if data.shape[0] < data.shape[1]:
         raise ValueError("data_matrix must have at least as many rows as columns.")
-    objective_weights = _squared_objective_weights(sqrt_weights, data_size)
-    data_adjoint = data.T if np.isrealobj(data) else data.T.conjugate()
     if normal_factor is None:
-        factor = dense_full_rank_least_squares_factor(data, sqrt_weights=sqrt_weights)
-    else:
-        factor = np.asarray(normal_factor)
-        expected_shape = (solution_size, solution_size)
-        if factor.shape != expected_shape:
-            raise ValueError(
-                f"normal_factor must have shape {expected_shape}; got {factor.shape}."
-            )
-
-    def solve_coefficients(grid_values):
-        array_module = get_array_module(grid_values)
-        values = _reshape_columns(grid_values, data_size, array_module=array_module)
-        weighted_values = _scale_rows(values, objective_weights, array_module=array_module)
-        rhs = array_module.asarray(data_adjoint) @ weighted_values
-        return _solve_cholesky_factor(factor, rhs, array_module)
-
-    def solve_adjoint(coefficients):
-        array_module = get_array_module(coefficients)
-        values = _reshape_columns(coefficients, solution_size, array_module=array_module)
-        analyzed = array_module.asarray(data) @ _solve_cholesky_factor(
-            factor, values, array_module
-        )
-        return _scale_rows(analyzed, objective_weights, array_module=array_module)
-
-    return LinearMap(
-        shape=(solution_size, data_size),
-        dtype=np.result_type(data.dtype, objective_weights.dtype),
-        matvec=lambda values: solve_coefficients(values).reshape(-1),
-        rmatvec=lambda values: solve_adjoint(values).reshape(-1),
-        matmat=solve_coefficients,
-        rmatmat=solve_adjoint,
-        input_shape=input_shape,
-        output_shape=output_shape,
+        normal_factor = dense_full_rank_least_squares_factor(data, sqrt_weights=sqrt_weights)
+    return cholesky_least_squares_map(
+        as_linear_map(data, input_shape=output_shape, output_shape=input_shape),
+        normal_factor,
+        sqrt_weights=sqrt_weights,
     )
 
 
-def cholesky_least_squares_map(
-    data_operator, normal_factor, *, sqrt_weights=None, input_shape=None, output_shape=None
-) -> LinearMap:
-    """Return analysis from an operator and normal factor."""
+def cholesky_least_squares_map(data_operator, normal_factor, *, sqrt_weights=None) -> LinearMap:
+    """Return analysis from a synthesis operator and lower normal factor.
+
+    The analysis domain and codomain are the synthesis operator's
+    output and input shapes. Reading these axes does not materialize it.
+    """
     data = as_linear_map(data_operator)
     data_size, solution_size = data.shape
     factor = np.asarray(normal_factor)
@@ -193,8 +164,8 @@ def cholesky_least_squares_map(
         matmat=solve_coefficients,
         rmatmat=solve_adjoint,
         backend_operands=(*data.backend_operands, factor),
-        input_shape=input_shape,
-        output_shape=output_shape,
+        input_shape=data.output_shape,
+        output_shape=data.input_shape,
     )
 
 
@@ -461,39 +432,18 @@ class LeastSquaresSolver:
         **kwargs,
     ) -> np.ndarray:
         xp = get_array_module(rhs_block)
-        if xp is not np:
-            return self._solve_lsmr_jax(problem, rhs_block, num_rhs, preconditioner, **kwargs)
-
         system_map = problem.system_operator
         solve_map, recover_solution = self._preconditioned_system(system_map, preconditioner)
         lsmr_options = self._lsmr_options(system_map, kwargs)
-        linear_operator = solve_map.as_linear_operator()
-        rhs_np = to_numpy(rhs_block)
+        if xp is np:
+            solve = lsmr
+            solve_map = solve_map.as_linear_operator()
+        else:
+            from kompe.math.jax_lsmr import lsmr as solve
+
         columns = []
         for column in range(num_rhs):
-            solution_y, stop_code, *_ = lsmr(linear_operator, rhs_np[:, column], **lsmr_options)
-            self._warn_if_lsmr_not_converged(stop_code, column)
-            columns.append(recover_solution(solution_y))
-        return np.column_stack(columns)
-
-    def _solve_lsmr_jax(
-        self,
-        problem: LeastSquaresProblem,
-        rhs_block: Any,
-        num_rhs: int,
-        preconditioner: LinearMap | None,
-        **kwargs,
-    ) -> Any:
-        """Solve rectangular least squares with internal JAX LSMR."""
-        from kompe.math.jax_lsmr import lsmr as jax_lsmr
-
-        xp = get_array_module(rhs_block)
-        system_map = problem.system_operator
-        solve_map, recover_solution = self._preconditioned_system(system_map, preconditioner)
-        lsmr_options = self._lsmr_options(system_map, kwargs)
-        columns = []
-        for column in range(num_rhs):
-            solution_y, stop_code, *_ = jax_lsmr(solve_map, rhs_block[:, column], **lsmr_options)
+            solution_y, stop_code, *_ = solve(solve_map, rhs_block[:, column], **lsmr_options)
             self._warn_if_lsmr_not_converged(stop_code, column)
             columns.append(recover_solution(solution_y))
         return xp.stack(columns, axis=1)

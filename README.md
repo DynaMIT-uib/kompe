@@ -34,6 +34,11 @@ curl-free and divergence-free potentials, not sampled vector components.
 The space's `shape` and `size` describe its array layout and flattened size;
 the underlying scalar basis exposes `coefficient_count`.
 
+Synthesis accepts either arrays or `FieldCoefficients`. When given the
+coefficient object, it checks basis compatibility and scalar/Helmholtz
+representation instead of treating equal array lengths as equivalent bases.
+Plain arrays intentionally leave that scientific identity with the caller.
+
 The package depends only on NumPy and SciPy. JAX support is
 optional and loaded only when requested; Kompe does not change JAX's global
 precision configuration. It never imports PynaMIT, Lompe, or secsy; those

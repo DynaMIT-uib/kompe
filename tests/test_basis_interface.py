@@ -14,6 +14,7 @@ from kompe import (
 )
 from kompe.basis import BasisSubset
 from kompe.math import (
+    get_array_module,
     get_backend,
     is_identity_linear_map,
     jax_enabled,
@@ -123,6 +124,37 @@ def test_basis_metadata_arrays_are_immutable_values():
 
 
 # Spherical sample-grid values
+
+
+@pytest.mark.parametrize("sample_shape", [(), (3,), (2, 3)])
+def test_helmholtz_materialization_preserves_sample_axes(sample_shape):
+    """Custom bases can retain grid axes without changing materialized action."""
+
+    class ShapedSHBasis(SHBasis):
+        def scalar_evaluation_array(self, grid, derivative=None):
+            values = super().scalar_evaluation_array(grid, derivative=derivative)
+            return values.reshape(grid.shape + (self.coefficient_count,))
+
+    xp = get_array_module()
+    basis = ShapedSHBasis(2, 2)
+    grid = SphericalGrid(
+        lat=np.full(sample_shape, 30.0),
+        lon=np.linspace(0.0, 180.0, int(np.prod(sample_shape))).reshape(sample_shape),
+    )
+    coefficients = xp.arange(4 * basis.coefficient_count, dtype=float).reshape(
+        2, basis.coefficient_count, 2
+    )
+    gradient = xp.asarray(basis.surface_gradient_array(grid))
+    grad_phi = xp.tensordot(gradient, coefficients[0], axes=(-1, 0))
+    grad_psi = xp.tensordot(gradient, coefficients[1], axes=(-1, 0))
+    expected = xp.stack((-grad_phi[0] - grad_psi[1], -grad_phi[1] + grad_psi[0]))
+
+    operator = basis.helmholtz_synthesis_operator(grid)
+    assert operator.output_shape == (2,) + sample_shape
+    np.testing.assert_allclose(operator(coefficients), expected, atol=1e-12)
+    array = operator.to_array()
+    assert array.shape == (2,) + sample_shape + (2, basis.coefficient_count)
+    np.testing.assert_allclose(operator(coefficients), expected, atol=1e-12)
 
 
 def test_grid_equality_tolerates_roundoff_without_weakening_cache_identity():
