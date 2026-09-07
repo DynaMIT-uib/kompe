@@ -24,7 +24,7 @@ from kompe.mesh import StructuredSurfaceMesh, spherical_triangle_solid_angle
 class GlobalCSMesh(StructuredSurfaceMesh):
     """Structured six-face cubed-sphere mesh for one grid resolution."""
 
-    cells_per_face: int
+    cells_per_edge: int
     xi: np.ndarray
     eta: np.ndarray
     face: np.ndarray
@@ -35,28 +35,28 @@ class GlobalCSMesh(StructuredSurfaceMesh):
     _cell_areas: np.ndarray
     projection: GlobalCSProjection
 
-    def __init__(self, cells_per_face):
+    def __init__(self, cells_per_edge):
         """Construct a unit-sphere mesh with a fixed face-edge resolution."""
-        if isinstance(cells_per_face, bool) or not isinstance(cells_per_face, (int, np.integer)):
-            raise TypeError("cells_per_face must be an integer")
-        if cells_per_face <= 0:
+        if isinstance(cells_per_edge, bool) or not isinstance(cells_per_edge, (int, np.integer)):
+            raise TypeError("cells_per_edge must be an integer")
+        if cells_per_edge <= 0:
             raise ValueError("Cubed sphere mesh dimension must be positive")
 
-        cells_per_face = int(cells_per_face)
+        cells_per_edge = int(cells_per_edge)
         # A mesh owns immutable host geometry. Device arrays belong to field
         # evaluation, not this one-time topology and cell-area construction.
         with backend_context("numpy"):
-            k, i, j = self._gridpoints(cells_per_face)
-            xi = face_coordinate(i[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
-            eta = face_coordinate(j[:, :-1, :-1] + 0.5, cells_per_face).reshape(-1)
+            k, i, j = self._gridpoints(cells_per_edge)
+            xi = face_coordinate(i[:, :-1, :-1] + 0.5, cells_per_edge).reshape(-1)
+            eta = face_coordinate(j[:, :-1, :-1] + 0.5, cells_per_edge).reshape(-1)
             face = k[:, :-1, :-1].reshape(-1)
             _, theta, phi = cube_to_spherical(xi, eta, face, degrees=True)
             cell_metric = metric_tensor(xi, eta)
             sqrt_detg = np.sqrt(determinant_3x3(cell_metric))
-            cell_areas = self._compute_cell_areas(cells_per_face)
+            cell_areas = self._compute_cell_areas(cells_per_edge)
 
         for name, value in (
-            ("cells_per_face", cells_per_face),
+            ("cells_per_edge", cells_per_edge),
             ("xi", xi),
             ("eta", eta),
             ("face", face),
@@ -87,17 +87,17 @@ class GlobalCSMesh(StructuredSurfaceMesh):
 
     def __repr__(self):
         """Summarize the global mesh without printing its arrays."""
-        return f"GlobalCSMesh(cells_per_face={self.cells_per_face}, size={self.size})"
+        return f"GlobalCSMesh(cells_per_edge={self.cells_per_edge}, size={self.size})"
 
     @property
     def signature(self):
         """Stable mesh identity for operators and caches."""
-        return ("GLOBAL_CS_MESH", int(self.cells_per_face))
+        return ("GLOBAL_CS_MESH", int(self.cells_per_edge))
 
     @property
     def shape(self):
         """Logical ``(face, eta, xi)`` cell shape."""
-        return (6, int(self.cells_per_face), int(self.cells_per_face))
+        return (6, int(self.cells_per_edge), int(self.cells_per_edge))
 
     @cached_property
     def cell_centers(self):
@@ -115,38 +115,38 @@ class GlobalCSMesh(StructuredSurfaceMesh):
 
     def face_coordinate(self, index):
         """Return xi/eta coordinate values for logical edge indices."""
-        return face_coordinate(index, self.cells_per_face)
+        return face_coordinate(index, self.cells_per_edge)
 
     def grid_line_indices(self, *, flat=False):
         """Return face, xi, and eta indices for all mesh grid lines."""
-        face, xi, eta = self._gridpoints(self.cells_per_face)
+        face, xi, eta = self._gridpoints(self.cells_per_edge)
         if flat:
             return face.reshape(-1), xi.reshape(-1), eta.reshape(-1)
         return face, xi, eta
 
     @staticmethod
-    def _gridpoints(cells_per_face):
+    def _gridpoints(cells_per_edge):
         """Return face and grid-line indices for a mesh resolution."""
         return np.meshgrid(
             np.arange(6),
-            np.arange(cells_per_face + 1),
-            np.arange(cells_per_face + 1),
+            np.arange(cells_per_edge + 1),
+            np.arange(cells_per_edge + 1),
             indexing="ij",
         )
 
     @classmethod
-    def _compute_cell_areas(cls, cells_per_face):
+    def _compute_cell_areas(cls, cells_per_edge):
         """Return exact spherical CS cell areas."""
-        k, i, j = cls._gridpoints(cells_per_face)
+        k, i, j = cls._gridpoints(cells_per_edge)
         face = k[:, :-1, :-1].reshape(-1)
         i0, i1 = i[:, :-1, :-1].reshape(-1), i[:, 1:, :-1].reshape(-1)
         j0, j1 = j[:, :-1, :-1].reshape(-1), j[:, :-1, 1:].reshape(-1)
 
         corners = [
-            (face_coordinate(i0, cells_per_face), face_coordinate(j0, cells_per_face)),
-            (face_coordinate(i1, cells_per_face), face_coordinate(j0, cells_per_face)),
-            (face_coordinate(i1, cells_per_face), face_coordinate(j1, cells_per_face)),
-            (face_coordinate(i0, cells_per_face), face_coordinate(j1, cells_per_face)),
+            (face_coordinate(i0, cells_per_edge), face_coordinate(j0, cells_per_edge)),
+            (face_coordinate(i1, cells_per_edge), face_coordinate(j0, cells_per_edge)),
+            (face_coordinate(i1, cells_per_edge), face_coordinate(j1, cells_per_edge)),
+            (face_coordinate(i0, cells_per_edge), face_coordinate(j1, cells_per_edge)),
         ]
         vectors = []
         for xi, eta in corners:

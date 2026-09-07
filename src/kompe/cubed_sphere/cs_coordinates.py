@@ -21,14 +21,14 @@ _FACE_TO_CARTESIAN = np.array(
 )
 
 
-def face_coordinate(index, cells_per_face):
+def face_coordinate(index, cells_per_edge):
     """Return xi/eta coordinate values for grid-line indices."""
-    if not isinstance(cells_per_face, (int, np.integer)):
-        raise TypeError("cells_per_face must be an integer")
-    if cells_per_face < 1:
-        raise ValueError("cells_per_face must be at least 1")
+    if not isinstance(cells_per_edge, (int, np.integer)):
+        raise TypeError("cells_per_edge must be an integer")
+    if cells_per_edge < 1:
+        raise ValueError("cells_per_edge must be at least 1")
     xp = get_array_module(index)
-    return -np.pi / 4 + xp.asarray(index) * np.pi / (2 * cells_per_face)
+    return -np.pi / 4 + xp.asarray(index) * np.pi / (2 * cells_per_edge)
 
 
 def metric_delta(xi, eta):

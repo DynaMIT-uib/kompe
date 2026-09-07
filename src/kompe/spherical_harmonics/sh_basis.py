@@ -120,7 +120,7 @@ class SHBasis(SurfaceDifferentialBasis):
 
         self.kind = "SH"
         self.index_names = ("n", "m")
-        self.index_length = self.cosine_degree.size + self.sine_degree.size
+        self.coefficient_count = self.cosine_degree.size + self.sine_degree.size
         self.index_arrays = (self.n, self.m)
         self.validate_metadata()
 
@@ -387,7 +387,7 @@ class SHBasis(SurfaceDifferentialBasis):
             ("scalar_evaluation", derivative),
             lambda: self._operator_from_array(
                 self.scalar_evaluation_array(grid, derivative=derivative),
-                input_shape=(self.index_length,),
+                input_shape=(self.coefficient_count,),
             ),
         )
 
@@ -412,7 +412,7 @@ class SHBasis(SurfaceDifferentialBasis):
             grid,
             "surface_gradient",
             lambda: self._operator_from_array(
-                self.surface_gradient_array(grid), input_shape=(self.index_length,)
+                self.surface_gradient_array(grid), input_shape=(self.coefficient_count,)
             ),
         )
 
@@ -436,7 +436,7 @@ class SHBasis(SurfaceDifferentialBasis):
             grid,
             "rhat_cross_gradient",
             lambda: self._operator_from_array(
-                self.rhat_cross_gradient_array(grid), input_shape=(self.index_length,)
+                self.rhat_cross_gradient_array(grid), input_shape=(self.coefficient_count,)
             ),
         )
 
@@ -580,6 +580,6 @@ class SHBasis(SurfaceDifferentialBasis):
         factors = get_array_module().asarray(-self.n * (self.n + 1) / r**2)
         return diagonal_linear_map(
             factors,
-            input_shape=(self.index_length,),
-            output_shape=(self.index_length,),
+            input_shape=(self.coefficient_count,),
+            output_shape=(self.coefficient_count,),
         )

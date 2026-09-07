@@ -53,7 +53,7 @@ def test_secs_is_scalar_synthesis_without_closed_surface_claims(secs_basis):
     assert not isinstance(secs_basis, SurfaceDifferentialBasis)
     assert isinstance(secs_basis, SECSBasis)
     assert secs_basis.kind == "SECS"
-    assert secs_basis.index_length == 3
+    assert secs_basis.coefficient_count == 3
     assert secs_basis.index_names == ("latitude", "longitude")
     with pytest.raises(NotImplementedError, match="surface-current synthesis"):
         secs_basis.scalar_evaluation_array(secs_basis.poles, derivative="theta")
@@ -70,7 +70,7 @@ def test_secs_accepts_regional_grid_for_poles_and_evaluation():
     basis = SECSBasis(poles=regional.cell_centers, current_type="curl_free")
     array = basis.scalar_evaluation_array(regional)
 
-    assert basis.index_length == regional.size
+    assert basis.coefficient_count == regional.size
     assert array.shape == (regional.size, regional.size)
 
 
@@ -136,7 +136,7 @@ def test_two_component_secs_helmholtz_operator_matches_array(secs_basis, evaluat
     operator = secs_basis.helmholtz_current_synthesis_operator(evaluation_grid)
     coefficients = np.array([[0.2, -0.5, 0.8], [1.0, 0.3, -0.4]])
 
-    assert array.shape == (2, evaluation_grid.size, 2, secs_basis.index_length)
+    assert array.shape == (2, evaluation_grid.size, 2, secs_basis.coefficient_count)
     np.testing.assert_allclose(
         operator @ coefficients.reshape(-1),
         np.tensordot(array, coefficients, axes=2).reshape(-1),

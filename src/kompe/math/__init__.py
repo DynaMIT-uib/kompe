@@ -32,7 +32,7 @@ from kompe.math.linear_map import (
     diagonal_linear_map,
     identity_linear_map,
     is_identity_linear_map,
-    pointwise_matrix_linear_map,
+    pointwise_component_map,
     take_linear_map,
     vstack_linear_maps,
 )
@@ -66,7 +66,7 @@ __all__ = [
     "inverse_3x3",
     "is_identity_linear_map",
     "jax_enabled",
-    "pointwise_matrix_linear_map",
+    "pointwise_component_map",
     "readonly_numpy_array",
     "set_backend",
     "sparse_constrained_least_squares_map",

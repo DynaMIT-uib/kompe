@@ -343,7 +343,7 @@ def test_normal_pinv_response_solver_reuses_factorization(monkeypatch):
     rhs_second = np.array([[0.0, 4.0], [2.5, -1.0], [1.5, 3.0]])
     problem = LeastSquaresProblem(A=A, solution_shape=2, data_shapes=3)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
-    solve_response = solver.build_response_solver(problem)
+    solve_response = solver.prepare(problem)
 
     def fail_dense_assembly():
         raise AssertionError("response solver should reuse cached dense factors")
@@ -389,7 +389,7 @@ def test_least_squares_requires_at_least_one_rhs_term():
     with pytest.raises(ValueError, match="At least one right-hand-side"):
         LeastSquaresSolver(solver="normal_pinv").solve(problem, None)
 
-    solve_response = LeastSquaresSolver(solver="normal_pinv").build_response_solver(problem)
+    solve_response = LeastSquaresSolver(solver="normal_pinv").prepare(problem)
     with pytest.raises(ValueError, match="At least one right-hand-side"):
         solve_response(None)
 
@@ -423,7 +423,7 @@ def test_normal_pinv_response_solver_uses_explicit_data_adjoint():
     )
     problem = LeastSquaresProblem(A=operator, solution_shape=2, data_shapes=3)
     solver = LeastSquaresSolver(solver="normal_pinv", tolerance=1e-13)
-    solve_response = solver.build_response_solver(problem)
+    solve_response = solver.prepare(problem)
     rhs = np.array([[1.0, 2.0], [3.0, 1.0], [0.5, -2.0]])
 
     expected = np.linalg.pinv(matrix) @ rhs
@@ -579,9 +579,7 @@ def test_normal_response_reuses_prepared_factors_across_backends(monkeypatch):
 
     with backend_context("numpy"):
         problem = LeastSquaresProblem(A=matrix, solution_shape=2, data_shapes=3)
-        response = LeastSquaresSolver("normal_pinv", tolerance=1e-12).build_response_solver(
-            problem
-        )
+        response = LeastSquaresSolver("normal_pinv", tolerance=1e-12).prepare(problem)
         assert calls == [np]  # Preparation still warms the ordinary path.
         for xp in (np, jnp, jnp, np):
             result = response(xp.asarray(rhs))
@@ -598,7 +596,7 @@ def test_prepared_response_retains_factors_after_problem_cache_eviction(backend,
     expected = np.linalg.lstsq(matrix, rhs, rcond=None)[0]
     with backend_context("numpy"):
         problem = LeastSquaresProblem(A=matrix, solution_shape=2, data_shapes=3)
-        response = LeastSquaresSolver("normal_pinv").build_response_solver(problem)
+        response = LeastSquaresSolver("normal_pinv").prepare(problem)
 
     problem._dense_normal_pinv_cache.clear()
 
@@ -684,7 +682,7 @@ def test_cached_inverse_backend_selection_does_not_build_normal_matrix(backend):
         solver = LeastSquaresSolver("normal_pinv")
         for solve in (
             lambda values: solver.solve(problem, values),
-            solver.build_response_solver(problem),
+            solver.prepare(problem),
         ):
             result = solve(rhs)
             assert isinstance(result, xp.ndarray)
@@ -708,7 +706,7 @@ def test_normal_response_prepares_only_the_operand_backend(jax_source):
             regularization_operators=jnp.asarray(matrix) if jax_source == "regularizer" else None,
             regularization_strengths=0.5 if jax_source == "regularizer" else None,
         )
-        response = LeastSquaresSolver("normal_pinv").build_response_solver(problem)
+        response = LeastSquaresSolver("normal_pinv").prepare(problem)
         assert np not in problem.data_operator._dense_cache
         assert isinstance(problem.data_operator._dense_cache[jnp], jnp.ndarray)
         assert isinstance(response(np.ones(3)), jnp.ndarray)
@@ -1083,7 +1081,7 @@ def test_solver_tolerance_must_be_scalar_numeric_data():
 
 
 @pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd"])
-@pytest.mark.parametrize("entrypoint", ["solve", "build_response_solver"])
+@pytest.mark.parametrize("entrypoint", ["solve", "prepare"])
 def test_dense_solvers_reject_explicit_preconditioners(solver_name, entrypoint):
     """Dense solvers reject explicitly supplied preconditioners."""
     problem = LeastSquaresProblem(A=np.eye(2), solution_shape=2, data_shapes=2)
@@ -1094,7 +1092,7 @@ def test_dense_solvers_reject_explicit_preconditioners(solver_name, entrypoint):
         if entrypoint == "solve":
             solver.solve(problem, np.ones(2), preconditioner=preconditioner)
         else:
-            solver.build_response_solver(problem, preconditioner=preconditioner)
+            solver.prepare(problem, preconditioner=preconditioner)
 
 
 @pytest.mark.parametrize("solver_name", ["normal_solve", "normal_pinv", "svd"])

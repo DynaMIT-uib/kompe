@@ -394,7 +394,7 @@ class SphericalTransform:
             return self.basis.scalar_evaluation_operator(self.grid)
         return as_linear_map(
             self.scalar_synthesis_array,
-            input_shape=(self.basis.index_length,),
+            input_shape=(self.basis.coefficient_count,),
             output_shape=(self.grid.size,),
         )
 
@@ -411,7 +411,7 @@ class SphericalTransform:
             return self.basis.scalar_evaluation_operator(self.grid, derivative="theta")
         return as_linear_map(
             self.theta_derivative_array,
-            input_shape=(self.basis.index_length,),
+            input_shape=(self.basis.coefficient_count,),
             output_shape=(self.grid.size,),
         )
 
@@ -428,7 +428,7 @@ class SphericalTransform:
             return self.basis.scalar_evaluation_operator(self.grid, derivative="phi")
         return as_linear_map(
             self.phi_derivative_array,
-            input_shape=(self.basis.index_length,),
+            input_shape=(self.basis.coefficient_count,),
             output_shape=(self.grid.size,),
         )
 
@@ -489,7 +489,7 @@ class SphericalTransform:
         return as_linear_map(
             analysis,
             input_shape=(2, self.grid.size),
-            output_shape=(2, self.basis.index_length),
+            output_shape=(2, self.basis.coefficient_count),
         )
 
     @cached_property
@@ -532,7 +532,7 @@ class SphericalTransform:
                 factor,
                 sqrt_weights=self.helmholtz_sqrt_weights,
                 input_shape=(2, self.grid.size),
-                output_shape=(2, self.basis.index_length),
+                output_shape=(2, self.basis.coefficient_count),
             )
         except np.linalg.LinAlgError:
             return None
@@ -540,7 +540,7 @@ class SphericalTransform:
     def rhat_cross_gradient_analysis_operator(self, *, coefficient_scale=None):
         """Factor analysis for one rotated-gradient potential."""
         if coefficient_scale is None:
-            coefficient_scale = np.ones(self.basis.index_length)
+            coefficient_scale = np.ones(self.basis.coefficient_count)
         scale = np.asarray(coefficient_scale)
         factor = _rhat_cross_gradient_normal_factor(
             self.theta_derivative_array,
@@ -556,7 +556,7 @@ class SphericalTransform:
             factor,
             sqrt_weights=self.helmholtz_sqrt_weights,
             input_shape=(2, self.grid.size),
-            output_shape=(self.basis.index_length,),
+            output_shape=(self.basis.coefficient_count,),
         )
 
     @cached_property
@@ -566,8 +566,8 @@ class SphericalTransform:
             return None
         return diagonal_linear_map(
             self.basis.scalar_smoothness_weights(),
-            input_shape=(self.basis.index_length,),
-            output_shape=(self.basis.index_length,),
+            input_shape=(self.basis.coefficient_count,),
+            output_shape=(self.basis.coefficient_count,),
         )
 
     @cached_property
@@ -577,12 +577,12 @@ class SphericalTransform:
             return None
         weights = np.broadcast_to(
             self.basis.helmholtz_smoothness_weights(),
-            (2, self.basis.index_length),
+            (2, self.basis.coefficient_count),
         )
         return diagonal_linear_map(
             weights.reshape(-1),
-            input_shape=(2, self.basis.index_length),
-            output_shape=(2, self.basis.index_length),
+            input_shape=(2, self.basis.coefficient_count),
+            output_shape=(2, self.basis.coefficient_count),
         )
 
     @cached_property
@@ -590,7 +590,7 @@ class SphericalTransform:
         """Least squares problem for scalar fields."""
         return LeastSquaresProblem(
             A=self.scalar_synthesis_operator,
-            solution_shape=self.basis.index_length,
+            solution_shape=self.basis.coefficient_count,
             data_shapes=self.grid.size,
             sqrt_weights=self.sqrt_weights,
             regularization_strengths=self.reg_lambda,
@@ -605,7 +605,7 @@ class SphericalTransform:
         """Least squares problem for horizontal vector fields."""
         return LeastSquaresProblem(
             A=self.helmholtz_synthesis_operator,
-            solution_shape=(2, self.basis.index_length),
+            solution_shape=(2, self.basis.coefficient_count),
             data_shapes=(2, self.grid.size),
             sqrt_weights=self.helmholtz_sqrt_weights,
             regularization_strengths=self.reg_lambda,
@@ -646,7 +646,7 @@ class SphericalTransform:
             and not self.explicit_sqrt_weights
         ):
             values, batch_shape = as_rhs_block(grid_values, (self.grid.size,))
-            return values.reshape((self.basis.index_length,) + batch_shape)
+            return values.reshape((self.basis.coefficient_count,) + batch_shape)
         return self._solve_least_squares(self.scalar_least_squares_problem, grid_values, solver)
 
     def analyze_helmholtz(self, grid_values, solver=None):
@@ -665,7 +665,7 @@ class SphericalTransform:
     def _apply_helmholtz_analysis_operator(self, operator, grid_values):
         """Apply an analysis operator with standard RHS shapes."""
         values, batch_shape = as_rhs_block(grid_values, (2, self.grid.size))
-        output_shape = (2, self.basis.index_length)
+        output_shape = (2, self.basis.coefficient_count)
         if not batch_shape:
             return operator.matvec(values).reshape(output_shape)
         return operator.matmat(values).reshape(output_shape + batch_shape)
@@ -829,14 +829,14 @@ class SphericalTransform:
         """Return whether scalar analysis is a no-op."""
         return is_identity_linear_map(
             self.scalar_synthesis_operator,
-            input_shape=(self.basis.index_length,),
+            input_shape=(self.basis.coefficient_count,),
             output_shape=(self.grid.size,),
         )
 
     def _coefficient_array(self, coeffs, *, helmholtz=False):
         """Return validated coefficient values."""
         values = getattr(coeffs, "array", coeffs)
-        shape = (2, self.basis.index_length) if helmholtz else (self.basis.index_length,)
+        shape = (2, self.basis.coefficient_count) if helmholtz else (self.basis.coefficient_count,)
         expected_size = int(np.prod(shape))
         xp = get_array_module(values)
         array = xp.asarray(values)

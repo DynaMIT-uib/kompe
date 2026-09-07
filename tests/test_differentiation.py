@@ -131,7 +131,7 @@ def test_csbasis_differentiates_low_degree_spherical_harmonics():
     D_phi = cs_basis.scalar_evaluation_array(grid, derivative="phi")
     laplacian = cs_basis.surface_laplacian_operator()
 
-    constant = np.ones(cs_basis.index_length)
+    constant = np.ones(cs_basis.coefficient_count)
     np.testing.assert_allclose(D_theta @ constant, 0.0, atol=1e-12)
     np.testing.assert_allclose(D_phi @ constant, 0.0, atol=1e-12)
     np.testing.assert_allclose(laplacian @ constant, 0.0, atol=1e-12)

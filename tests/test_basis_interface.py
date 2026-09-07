@@ -57,7 +57,7 @@ def test_concrete_bases_implement_basis_interface():
     assert not is_identity_linear_map(sh_basis.scalar_evaluation_operator(cs_basis.native_grid))
     assert sh_basis.kind == "SH"
     assert cs_basis.kind == "CS"
-    assert cs_basis.index_length == cs_basis.mesh.theta.size
+    assert cs_basis.coefficient_count == cs_basis.mesh.theta.size
     sh_basis.validate_metadata()
     cs_basis.validate_metadata()
 
@@ -69,7 +69,7 @@ def test_grids_are_separate_from_coefficient_bases():
     assert not isinstance(grid, ScalarBasis)
     assert isinstance(SHBasis(1, 1), ScalarBasis)
     assert not hasattr(grid, "index_names")
-    assert not hasattr(grid, "index_length")
+    assert not hasattr(grid, "coefficient_count")
     assert not hasattr(grid, "coefficient_space_signature")
     assert not hasattr(grid, "coefficients_are_compatible_with")
 
@@ -89,7 +89,7 @@ def test_solid_harmonics_are_separate_from_surface_bases():
 
 def test_public_basis_constructors_reject_invalid_resolution():
     """Basis primitives enforce their own representation invariants."""
-    with pytest.raises(TypeError, match="required positional argument"):
+    with pytest.raises(TypeError, match="cells_per_edge must be an integer"):
         GlobalCSBasis()
     with pytest.raises(ValueError, match="positive"):
         GlobalCSBasis(0)
@@ -265,21 +265,21 @@ def test_helmholtz_divergence_and_radial_curl_are_laplacian_maps(basis_kind):
     )
     divergence = to_numpy(basis.helmholtz_surface_divergence_operator().to_array())
     radial_curl = to_numpy(basis.helmholtz_radial_curl_operator().to_array())
-    identity = np.eye(basis.index_length)
+    identity = np.eye(basis.coefficient_count)
     zeros = np.zeros_like(laplacian)
 
-    assert laplacian.shape == (basis.index_length, basis.index_length)
-    assert curl_free_potential.shape == (basis.index_length, 2, basis.index_length)
-    assert divergence_free_potential.shape == (basis.index_length, 2, basis.index_length)
-    assert divergence.shape == (basis.index_length, 2, basis.index_length)
-    assert radial_curl.shape == (basis.index_length, 2, basis.index_length)
+    assert laplacian.shape == (basis.coefficient_count, basis.coefficient_count)
+    assert curl_free_potential.shape == (basis.coefficient_count, 2, basis.coefficient_count)
+    assert divergence_free_potential.shape == (basis.coefficient_count, 2, basis.coefficient_count)
+    assert divergence.shape == (basis.coefficient_count, 2, basis.coefficient_count)
+    assert radial_curl.shape == (basis.coefficient_count, 2, basis.coefficient_count)
     np.testing.assert_allclose(curl_free_potential, np.stack([identity, zeros], axis=1))
     np.testing.assert_allclose(divergence_free_potential, np.stack([zeros, identity], axis=1))
     np.testing.assert_allclose(divergence, np.stack([-laplacian, zeros], axis=1))
     np.testing.assert_allclose(radial_curl, np.stack([zeros, laplacian], axis=1))
 
     rng = np.random.default_rng(20260521)
-    coeffs = rng.standard_normal((2, basis.index_length))
+    coeffs = rng.standard_normal((2, basis.coefficient_count))
     expected_curl_free = coeffs[0]
     expected_divergence_free = coeffs[1]
     expected_divergence = np.tensordot(divergence, coeffs, axes=([1, 2], [0, 1]))
@@ -338,7 +338,7 @@ def test_csbasis_evaluates_with_finite_difference_derivatives():
     cs_basis = GlobalCSBasis(8)
     grid = type("GridLike", (), {"theta": cs_basis.mesh.theta, "phi": cs_basis.mesh.phi})()
 
-    constant = np.ones(cs_basis.index_length)
+    constant = np.ones(cs_basis.coefficient_count)
     cos_theta = np.cos(np.deg2rad(cs_basis.mesh.theta))
     expected_dtheta = -np.sin(np.deg2rad(cs_basis.mesh.theta))
 
@@ -397,7 +397,7 @@ def test_csbasis_vector_coordinate_transforms_round_trip():
     """CS vector transform arrays are mutually consistent."""
     cs_basis = GlobalCSBasis(16)
     xi, eta, block = cs_basis.mesh.xi, cs_basis.mesh.eta, cs_basis.mesh.face
-    identity = np.broadcast_to(np.eye(3), (cs_basis.index_length, 3, 3))
+    identity = np.broadcast_to(np.eye(3), (cs_basis.coefficient_count, 3, 3))
 
     pc = cs_basis.mesh.projection.cartesian_to_cube_vector_array(xi, eta, face=block)
     pc_inv = cs_basis.mesh.projection.cube_to_cartesian_vector_array(xi, eta, face=block)
@@ -453,7 +453,7 @@ def test_csbasis_non_native_helmholtz_uses_vector_interpolation():
     target = SphericalGrid(theta=theta, phi=phi)
 
     rng = np.random.default_rng(20260520)
-    coeffs = rng.standard_normal((2, cs_basis.index_length))
+    coeffs = rng.standard_normal((2, cs_basis.coefficient_count))
     native_helmholtz = cs_basis.helmholtz_synthesis_array(native)
     target_helmholtz = cs_basis.helmholtz_synthesis_array(target)
     native_vector = np.tensordot(native_helmholtz, coeffs, 2)
@@ -470,7 +470,7 @@ def test_csbasis_non_native_helmholtz_uses_vector_interpolation():
     )
     expected = np.stack([expected_theta, expected_phi])
 
-    assert target_helmholtz.shape == (2, target.size, 2, cs_basis.index_length)
+    assert target_helmholtz.shape == (2, target.size, 2, cs_basis.coefficient_count)
     np.testing.assert_allclose(actual, expected, atol=1e-10)
 
 
@@ -660,7 +660,7 @@ def test_csbasis_mean_free_projection_is_area_weighted_and_operator_preserving()
     """CS scalar gauges use an area-weighted mean-free projection."""
     cs_basis = GlobalCSBasis(8)
     rng = np.random.default_rng(20260520)
-    values = rng.standard_normal(cs_basis.index_length) + 3.0
+    values = rng.standard_normal(cs_basis.coefficient_count) + 3.0
     projected = cs_basis.project_scalar_mean_free(values)
 
     np.testing.assert_allclose(
@@ -737,7 +737,7 @@ def test_csbasis_cache_controls_do_not_change_numerical_results():
 def test_csbasis_reuses_one_unit_sphere_laplacian_at_all_radii():
     """Radius changes scale one sparse geometric Laplacian by 1/r²."""
     basis = GlobalCSBasis(4)
-    values = np.linspace(-1.0, 1.0, basis.index_length)
+    values = np.linspace(-1.0, 1.0, basis.coefficient_count)
 
     unit_values = basis.surface_laplacian_operator().matvec(values)
     unit_matrix = basis._unit_surface_laplacian_matrix
@@ -791,7 +791,7 @@ def test_csbasis_mean_free_projection_preserves_jax_arrays():
     try:
         set_backend("jax")
         cs_basis = GlobalCSBasis(4)
-        values = jnp.asarray(np.arange(cs_basis.index_length, dtype=float))
+        values = jnp.asarray(np.arange(cs_basis.coefficient_count, dtype=float))
 
         projected = cs_basis.project_scalar_mean_free(values)
 
@@ -818,7 +818,7 @@ def test_csbasis_surface_operators_preserve_jax_inputs():
             (),
             {"theta": jnp.asarray(cs_basis.mesh.theta), "phi": jnp.asarray(cs_basis.mesh.phi)},
         )()
-        values = jnp.asarray(np.arange(cs_basis.index_length, dtype=float))
+        values = jnp.asarray(np.arange(cs_basis.coefficient_count, dtype=float))
 
         G = cs_basis.scalar_evaluation_array(grid)
         laplacian_values = cs_basis.surface_laplacian_operator().matvec(values)
@@ -848,7 +848,7 @@ def test_csbasis_surface_operator_cache_is_backend_neutral():
         basis = GlobalCSBasis(4)
         grid = SphericalGrid(theta=basis.mesh.theta + 0.01, phi=basis.mesh.phi)
         operator = basis.scalar_evaluation_operator(grid)
-        values = np.arange(basis.index_length, dtype=float)
+        values = np.arange(basis.coefficient_count, dtype=float)
         numpy_result = operator.matvec(values)
 
         set_backend("jax")
@@ -880,7 +880,7 @@ def test_shbasis_surface_operators_preserve_jax_inputs():
                 "phi": jnp.asarray(np.array([0.0, 45.0])),
             },
         )()
-        values = jnp.asarray(np.arange(sh_basis.index_length, dtype=float))
+        values = jnp.asarray(np.arange(sh_basis.coefficient_count, dtype=float))
 
         G = sh_basis.scalar_evaluation_array(grid)
         grid_values = sh_basis.scalar_evaluation_operator(grid).matvec(values)
@@ -915,13 +915,13 @@ def test_shbasis_mean_free_option_matches_nmin_one_space():
     assert cached_mean_free.root_basis is full
     assert mean_free.omits_constant_mode()
     assert mean_free.min_degree == nmin_one.min_degree == 1
-    assert mean_free.index_length == nmin_one.index_length
+    assert mean_free.coefficient_count == nmin_one.coefficient_count
     assert cached_mean_free.omits_constant_mode()
     assert cached_mean_free.with_mean_free(False) is full
     assert full.with_mean_free(True) is cached_mean_free
     assert not non_mean_free.omits_constant_mode()
     assert non_mean_free.min_degree == 0
-    assert non_mean_free.index_length > mean_free.index_length
+    assert non_mean_free.coefficient_count > mean_free.coefficient_count
 
 
 def test_shbasis_mean_free_view_slices_parent_operators():
@@ -931,7 +931,7 @@ def test_shbasis_mean_free_view_slices_parent_operators():
     direct_mean_free = SHBasis(3, 2, mean_free=True)
     grid = type("GridLike", (), {"theta": np.array([30.0, 80.0]), "phi": np.array([0.0, 45.0])})()
 
-    assert view.index_length == direct_mean_free.index_length
+    assert view.coefficient_count == direct_mean_free.coefficient_count
     np.testing.assert_array_equal(view.index_arrays[0], direct_mean_free.index_arrays[0])
     np.testing.assert_array_equal(view.index_arrays[1], direct_mean_free.index_arrays[1])
     np.testing.assert_allclose(
@@ -974,13 +974,13 @@ def test_arbitrary_subset_does_not_guess_a_mean_free_variant(mean_free):
 def test_basis_view_slices_cs_surface_operators():
     """Generic basis subsets also slice CS coefficient-space operators."""
     cs_basis = GlobalCSBasis(8)
-    indices = np.arange(0, cs_basis.index_length, 2)
+    indices = np.arange(0, cs_basis.coefficient_count, 2)
     view = BasisSubset(cs_basis, indices, subset_name="even")
     grid = type("GridLike", (), {"theta": cs_basis.mesh.theta, "phi": cs_basis.mesh.phi})()
 
     assert isinstance(view, SurfaceDifferentialBasis)
     assert view.kind == "CS"
-    assert view.index_length == indices.size
+    assert view.coefficient_count == indices.size
     np.testing.assert_allclose(view.index_arrays[0], cs_basis.mesh.theta[indices])
     np.testing.assert_allclose(view.index_arrays[1], cs_basis.mesh.phi[indices])
     np.testing.assert_allclose(
@@ -1076,7 +1076,7 @@ def test_surface_operator_subclass_must_implement_evaluate_on_grid():
     class IncompleteSurfaceOperators(SurfaceDifferentialBasis):
         kind = "incomplete"
         index_names = ("i",)
-        index_length = 1
+        coefficient_count = 1
         index_arrays = ((0,),)
 
     with pytest.raises(TypeError):

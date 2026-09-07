@@ -392,7 +392,7 @@ class LeastSquaresSolver:
             return self._build_jacobi_preconditioner(problem, square_root=self.solver == "lsmr")
         return self._build_pinv_preconditioner(problem, squared=self.solver == "cgls")
 
-    def build_response_solver(
+    def prepare(
         self, problem: LeastSquaresProblem, preconditioner: PreconditionerInput = None
     ) -> Callable[[np.ndarray | list[np.ndarray]], Any]:
         """Return a reusable solver for matching RHS response blocks."""

@@ -22,7 +22,7 @@ from kompe.math.linear_map import (
     diagonal_linear_map,
     identity_linear_map,
     is_identity_linear_map,
-    pointwise_matrix_linear_map,
+    pointwise_component_map,
     take_linear_map,
     vstack_linear_maps,
 )
@@ -341,14 +341,14 @@ def test_take_linear_map_does_not_truncate_noninteger_indices(indices):
         take_linear_map((3,), indices)
 
 
-def test_pointwise_matrix_linear_map_matches_local_component_transform():
+def test_pointwise_component_map_matches_local_component_transform():
     """Pointwise component maps apply local matrices and adjoints."""
     matrix = (
         np.arange(24.0).reshape(2, 3, 4) / 10.0
         + 1j * np.arange(24.0, 48.0).reshape(2, 3, 4) / 20.0
     )
     values = np.arange(12.0).reshape(3, 4) / 5.0
-    linear_map = pointwise_matrix_linear_map(matrix)
+    linear_map = pointwise_component_map(matrix)
     expected = np.einsum("abg,bg->ag", matrix, values)
 
     adjoint_input = np.arange(8.0).reshape(2, 4) / 7.0
@@ -382,7 +382,7 @@ def test_structured_dense_builders_preserve_jax_backend(monkeypatch):
 
     previous_backend = jax_enabled()
     matrix = jnp.arange(24.0).reshape(2, 3, 4)
-    pointwise = pointwise_matrix_linear_map(matrix)
+    pointwise = pointwise_component_map(matrix)
     selector = take_linear_map((2, 4), [0, 2], axis=1)
 
     def fail_to_numpy(_):
@@ -743,7 +743,7 @@ def test_pointwise_linear_map_accepts_numpy_inputs_with_jax_backend():
     previous_backend = jax_enabled()
     matrix = np.arange(24.0).reshape(2, 3, 4)
     values = np.arange(12.0).reshape(3, 4)
-    linear_map = pointwise_matrix_linear_map(matrix)
+    linear_map = pointwise_component_map(matrix)
 
     try:
         set_backend("jax")

@@ -679,9 +679,9 @@ def test_global_and_harmonic_bases_accept_regional_grid_contract():
 
     assert harmonic.scalar_evaluation_array(grid.cell_centers).shape == (
         grid.size,
-        harmonic.index_length,
+        harmonic.coefficient_count,
     )
     assert global_cs.scalar_evaluation_array(grid.cell_centers).shape == (
         grid.size,
-        global_cs.index_length,
+        global_cs.coefficient_count,
     )

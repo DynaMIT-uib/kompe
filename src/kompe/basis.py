@@ -22,7 +22,7 @@ class ScalarBasis(ABC):
     SECS can implement scalar synthesis without making those stronger claims.
     """
 
-    required_attributes = ("kind", "index_names", "index_length", "index_arrays")
+    required_attributes = ("kind", "index_names", "coefficient_count", "index_arrays")
 
     @property
     def signature(self):
@@ -69,7 +69,7 @@ class ScalarBasis(ABC):
         """Return the scalar coefficient-to-grid operator."""
         array = self.scalar_evaluation_array(grid, derivative=derivative)
         return as_linear_map(
-            array, input_shape=(self.index_length,), output_shape=array.shape[:-1]
+            array, input_shape=(self.coefficient_count,), output_shape=array.shape[:-1]
         )
 
 
@@ -141,7 +141,7 @@ class SurfaceDifferentialBasis(ScalarBasis):
         """Return the scalar-to-vector surface-gradient operator."""
         array = self.surface_gradient_array(grid)
         return as_linear_map(
-            array, input_shape=(self.index_length,), output_shape=array.shape[:-1]
+            array, input_shape=(self.coefficient_count,), output_shape=array.shape[:-1]
         )
 
     def rhat_cross_gradient_array(self, grid):
@@ -153,7 +153,7 @@ class SurfaceDifferentialBasis(ScalarBasis):
         """Return the scalar-to-vector ``rhat x grad`` operator."""
         array = self.rhat_cross_gradient_array(grid)
         return as_linear_map(
-            array, input_shape=(self.index_length,), output_shape=array.shape[:-1]
+            array, input_shape=(self.coefficient_count,), output_shape=array.shape[:-1]
         )
 
     def helmholtz_synthesis_array(self, grid):
@@ -180,11 +180,11 @@ class SurfaceDifferentialBasis(ScalarBasis):
 
     def helmholtz_curl_free_potential_operator(self):
         """Return the Helmholtz-to-curl-free-potential operator."""
-        return take_linear_map((2, self.index_length), 0, axis=0)
+        return take_linear_map((2, self.coefficient_count), 0, axis=0)
 
     def helmholtz_divergence_free_potential_operator(self):
         """Return the Helmholtz-to-div-free-potential operator."""
-        return take_linear_map((2, self.index_length), 1, axis=0)
+        return take_linear_map((2, self.coefficient_count), 1, axis=0)
 
     def mean_free_surface_poisson_operator(self, r=1.0):
         """Return the gauge-fixed inverse surface Laplacian.
@@ -208,8 +208,8 @@ class SurfaceDifferentialBasis(ScalarBasis):
             )
         return diagonal_linear_map(
             1.0 / values,
-            input_shape=(self.index_length,),
-            output_shape=(self.index_length,),
+            input_shape=(self.coefficient_count,),
+            output_shape=(self.coefficient_count,),
         )
 
     def helmholtz_surface_divergence_operator(self, r=1.0):
@@ -252,7 +252,7 @@ class BasisSubset(SurfaceDifferentialBasis):
 
         self.kind = parent_basis.kind
         self.index_names = tuple(parent_basis.index_names)
-        self.index_length = int(self._parent_coefficient_indices.size)
+        self.coefficient_count = int(self._parent_coefficient_indices.size)
         self.index_arrays = tuple(
             self._slice_index_arrays(parent_basis, self._parent_coefficient_indices)
         )
@@ -269,13 +269,13 @@ class BasisSubset(SurfaceDifferentialBasis):
         """Summarize the selected coefficient space."""
         return (
             f"BasisSubset(kind={self.kind!r}, subset_name={self._subset_name!r}, "
-            f"index_length={self.index_length})"
+            f"coefficient_count={self.coefficient_count})"
         )
 
     @staticmethod
     def _normalize_coefficient_indices(parent_basis, coefficient_indices):
         """Return validated parent coefficient indices for a subset."""
-        parent_length = int(parent_basis.index_length)
+        parent_length = int(parent_basis.coefficient_count)
         if coefficient_indices is None:
             return np.arange(parent_length, dtype=int)
 
@@ -285,7 +285,7 @@ class BasisSubset(SurfaceDifferentialBasis):
         if raw_indices.dtype == bool:
             if raw_indices.size != parent_length:
                 raise ValueError(
-                    "BasisSubset boolean coefficient_indices must match parent index_length."
+                    "BasisSubset boolean coefficient_indices must match parent coefficient_count."
                 )
             indices = np.flatnonzero(raw_indices)
         else:
@@ -307,12 +307,12 @@ class BasisSubset(SurfaceDifferentialBasis):
         arrays = []
         for values in parent_basis.index_arrays:
             array = np.asarray(values)
-            if array.shape == (parent_basis.index_length,):
+            if array.shape == (parent_basis.coefficient_count,):
                 arrays.append(readonly_numpy_array(array[coefficient_indices]))
-            elif array.size == parent_basis.index_length:
+            elif array.size == parent_basis.coefficient_count:
                 arrays.append(
                     readonly_numpy_array(
-                        array.reshape(parent_basis.index_length)[coefficient_indices]
+                        array.reshape(parent_basis.coefficient_count)[coefficient_indices]
                     )
                 )
             else:
@@ -336,7 +336,7 @@ class BasisSubset(SurfaceDifferentialBasis):
         """Return a signature for coefficient-space compatibility."""
         if self._coefficient_space_signature is not None:
             return self._coefficient_space_signature
-        parent_indices = np.arange(self.parent_basis.index_length, dtype=int)
+        parent_indices = np.arange(self.parent_basis.coefficient_count, dtype=int)
         if np.array_equal(self._parent_coefficient_indices, parent_indices):
             return self.parent_basis.coefficient_space_signature
         return (
@@ -376,10 +376,10 @@ class BasisSubset(SurfaceDifferentialBasis):
         if parent_operator.is_diagonal:
             return diagonal_linear_map(
                 parent_operator.diagonal()[indices],
-                input_shape=(self.index_length,),
-                output_shape=(self.index_length,),
+                input_shape=(self.coefficient_count,),
+                output_shape=(self.coefficient_count,),
             )
-        selection = take_linear_map((self.parent_basis.index_length,), indices)
+        selection = take_linear_map((self.parent_basis.coefficient_count,), indices)
         return selection @ parent_operator @ selection.adjoint()
 
     def omits_constant_mode(self):

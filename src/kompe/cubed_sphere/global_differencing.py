@@ -23,7 +23,7 @@ def _shift_rows_into_bounds(values, lower, upper):
 
 def global_cs_derivative_matrices(
     projection,
-    cells_per_face,
+    cells_per_edge,
     *,
     stencil_radius=1,
     cross_face_points=4,
@@ -38,17 +38,17 @@ def global_cs_derivative_matrices(
     # adds a device round trip and makes that discrete classification depend
     # on JAX's trigonometric implementation.
     with backend_context("numpy"):
-        shape = (6, cells_per_face, cells_per_face)
+        shape = (6, cells_per_edge, cells_per_edge)
         size = np.prod(shape)
-        h = cs_coordinates.face_coordinate(1, cells_per_face) - cs_coordinates.face_coordinate(
-            0, cells_per_face
+        h = cs_coordinates.face_coordinate(1, cells_per_edge) - cs_coordinates.face_coordinate(
+            0, cells_per_edge
         )
         face, i, j = map(
             np.ravel,
             np.meshgrid(
                 np.arange(6),
-                np.arange(cells_per_face),
-                np.arange(cells_per_face),
+                np.arange(cells_per_edge),
+                np.arange(cells_per_edge),
                 indexing="ij",
             ),
         )
@@ -66,7 +66,7 @@ def global_cs_derivative_matrices(
             face_repeated,
             np.hstack([i + offset for offset in offsets]),
             j_repeated,
-            cells_per_face,
+            cells_per_edge,
             cross_face_points,
             rows=rows,
             weights=weights,
@@ -76,7 +76,7 @@ def global_cs_derivative_matrices(
             face_repeated,
             i_repeated,
             np.hstack([j + offset for offset in offsets]),
-            cells_per_face,
+            cells_per_edge,
             cross_face_points,
             rows=rows,
             weights=weights,
@@ -89,18 +89,18 @@ def _cross_face_interpolation_matrix(
     face,
     i,
     j,
-    cells_per_face,
+    cells_per_edge,
     point_count,
     *,
     weights=None,
     rows=None,
 ):
     """Interpolate off-face stencil points from the adjoining face."""
-    if point_count > cells_per_face:
-        raise ValueError("cross_face_points cannot exceed cells_per_face")
+    if point_count > cells_per_edge:
+        raise ValueError("cross_face_points cannot exceed cells_per_edge")
 
     face, i, j = map(np.ravel, [face, i, j])
-    shape = (6, cells_per_face, cells_per_face)
+    shape = (6, cells_per_edge, cells_per_edge)
     size = np.prod(shape)
 
     if rows is None:
@@ -109,17 +109,17 @@ def _cross_face_interpolation_matrix(
         weights = np.ones(face.size)
     weights = weights / point_count
 
-    h = cs_coordinates.face_coordinate(1, cells_per_face) - cs_coordinates.face_coordinate(
-        0, cells_per_face
+    h = cs_coordinates.face_coordinate(1, cells_per_edge) - cs_coordinates.face_coordinate(
+        0, cells_per_edge
     )
     columns = np.full(face.size, -1, dtype=np.int64)
 
-    xi = cs_coordinates.face_coordinate(i + 0.5, cells_per_face)
-    eta = cs_coordinates.face_coordinate(j + 0.5, cells_per_face)
+    xi = cs_coordinates.face_coordinate(i + 0.5, cells_per_edge)
+    eta = cs_coordinates.face_coordinate(j + 0.5, cells_per_edge)
     _, theta, phi = projection.cube_to_spherical(xi, eta, face, radius=1.0, degrees=True)
     new_xi, new_eta, new_face = projection.geographic_to_cube(phi, 90 - theta)
-    new_i = new_xi / h + (cells_per_face - 1) / 2
-    new_j = new_eta / h + (cells_per_face - 1) / 2
+    new_i = new_xi / h + (cells_per_edge - 1) / 2
+    new_j = new_eta / h + (cells_per_edge - 1) / 2
 
     on_i_grid_line = np.isclose(new_i - np.rint(new_i), 0)
     on_j_grid_line = np.isclose(new_j - np.rint(new_j), 0)
@@ -155,12 +155,12 @@ def _cross_face_interpolation_matrix(
     i_points = _shift_rows_into_bounds(
         points + np.int64(np.ceil(fractional_i)) - point_count // 2,
         0,
-        cells_per_face - 1,
+        cells_per_edge - 1,
     )
     j_points = _shift_rows_into_bounds(
         points + np.int64(np.ceil(fractional_j)) - point_count // 2,
         0,
-        cells_per_face - 1,
+        cells_per_edge - 1,
     )
 
     i_distances = fractional_i - i_points

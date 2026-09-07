@@ -808,61 +808,63 @@ def identity_linear_map(shape: int | tuple[int, ...], *, dtype: Any = np.float64
     return identity
 
 
-def pointwise_matrix_linear_map(matrix: Any) -> LinearMap:
+def pointwise_component_map(array: Any) -> LinearMap:
     """Return a pointwise component map.
 
-    ``matrix`` has shape
+    ``array`` has shape
     ``(n_output_components, n_input_components, *points)`` and maps
     arrays shaped ``(n_input_components, *points)`` to
     ``(n_output_components, *points)``.
     """
-    matrix_array = _dense_array_candidate(matrix)
-    if matrix_array.ndim < 2:
-        raise ValueError("pointwise matrix must have at least two component axes.")
+    component_array = _dense_array_candidate(array)
+    if component_array.ndim < 2:
+        raise ValueError("pointwise array must have at least two component axes.")
 
-    output_components = int(matrix_array.shape[0])
-    input_components = int(matrix_array.shape[1])
-    point_shape = tuple(int(dim) for dim in matrix_array.shape[2:])
+    output_components = int(component_array.shape[0])
+    input_components = int(component_array.shape[1])
+    point_shape = tuple(int(dim) for dim in component_array.shape[2:])
     input_shape = (input_components,) + point_shape
     output_shape = (output_components,) + point_shape
     input_size = int(math.prod(input_shape))
     output_size = int(math.prod(output_shape))
-    dtype = matrix_array.dtype
+    dtype = component_array.dtype
 
     def matvec(vec: Any) -> Any:
-        xp = _runtime_array_module(matrix_array, vec)
+        xp = _runtime_array_module(component_array, vec)
         values = xp.asarray(vec).reshape(input_shape)
-        result = xp.einsum("ab...,b...->a...", xp.asarray(matrix_array), values, optimize=True)
+        result = xp.einsum("ab...,b...->a...", xp.asarray(component_array), values, optimize=True)
         return result.reshape(-1)
 
     def rmatvec(vec: Any) -> Any:
-        xp = _runtime_array_module(matrix_array, vec)
+        xp = _runtime_array_module(component_array, vec)
         values = xp.asarray(vec).reshape(output_shape)
         result = xp.einsum(
-            "ab...,a...->b...", xp.conjugate(xp.asarray(matrix_array)), values, optimize=True
+            "ab...,a...->b...", xp.conjugate(xp.asarray(component_array)), values, optimize=True
         )
         return result.reshape(-1)
 
     def matmat(block: Any) -> Any:
-        xp = _runtime_array_module(matrix_array, block)
+        xp = _runtime_array_module(component_array, block)
         values = xp.asarray(block).reshape(input_shape + (-1,))
-        result = xp.einsum("ab...,b...h->a...h", xp.asarray(matrix_array), values, optimize=True)
+        result = xp.einsum(
+            "ab...,b...h->a...h", xp.asarray(component_array), values, optimize=True
+        )
         return result.reshape(output_size, -1)
 
     def rmatmat(block: Any) -> Any:
-        xp = _runtime_array_module(matrix_array, block)
+        xp = _runtime_array_module(component_array, block)
         values = xp.asarray(block).reshape(output_shape + (-1,))
         result = xp.einsum(
-            "ab...,a...h->b...h", xp.conjugate(xp.asarray(matrix_array)), values, optimize=True
+            "ab...,a...h->b...h", xp.conjugate(xp.asarray(component_array)), values, optimize=True
         )
         return result.reshape(input_size, -1)
 
     def normal_matrix_diag() -> np.ndarray:
-        return np.sum(np.abs(to_numpy(matrix_array)) ** 2, axis=0).reshape(-1)
+        return np.sum(np.abs(to_numpy(component_array)) ** 2, axis=0).reshape(-1)
 
     def dense_array(xp: Any) -> Any:
         point_size = int(math.prod(point_shape))
-        matrix_values = xp.asarray(matrix_array).reshape(
+        matrix_values = xp.asarray(component_array).reshape(
             output_components, input_components, point_size
         )
         dense = xp.zeros((output_size, input_size), dtype=dtype)
@@ -887,7 +889,7 @@ def pointwise_matrix_linear_map(matrix: Any) -> LinearMap:
         rmatmat=rmatmat,
         dense_array=dense_array,
         normal_matrix_diag=normal_matrix_diag,
-        backend_operands=(matrix_array,),
+        backend_operands=(component_array,),
         input_shape=input_shape,
         output_shape=output_shape,
     )

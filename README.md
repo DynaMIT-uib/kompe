@@ -27,6 +27,13 @@ The public implementations include:
   transfer operators;
 - backend-neutral `LinearMap` objects and least-squares solvers.
 
+`CoefficientSpace` describes a basis, coefficient layout, and mean-free
+gauge. `FieldCoefficients` owns values in that space; ordinary arrays remain
+valid numerical inputs. A `representation="helmholtz"` space contains the
+curl-free and divergence-free potentials, not sampled vector components.
+The space's `shape` and `size` describe its array layout and flattened size;
+the underlying scalar basis exposes `coefficient_count`.
+
 The package depends only on NumPy and SciPy. JAX support is
 optional and loaded only when requested; Kompe does not change JAX's global
 precision configuration. It never imports PynaMIT, Lompe, or secsy; those
@@ -62,6 +69,25 @@ mesh. Analysis and synthesis are operators associated with expansions rather
 than alternate names for coefficient fitting. In the four-part architecture,
 Projection objects are geometric coordinate charts and their vector/Jacobian
 transformations; coefficient fitting is called analysis.
+
+A global CS basis can reuse an existing mesh without reconstructing it:
+
+```python
+from kompe import GlobalCSBasis, GlobalCSMesh
+
+mesh = GlobalCSMesh(cells_per_edge=16)
+basis = GlobalCSBasis(mesh=mesh)
+assert basis.mesh is mesh
+```
+
+`cells_per_edge` is the resolution along each face edge, not the total
+number of cells on a face. The differential basis requires even resolution.
+
+`kompe.cache` provides `BoundedCache` for in-memory reuse and
+`PersistentArrayCache` for content-addressed numerical arrays on disk.
+They share no physical policy: the calculation owning a cached array
+defines its key, including its grid, basis, radius, or algorithm version
+as appropriate. Simulation artifacts are outside Kompe's scope.
 
 ## Conventions
 

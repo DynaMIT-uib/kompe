@@ -26,7 +26,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     Attributes
     ----------
-    cells_per_face : int
+    cells_per_edge : int
         Number of grid cells along each cube-face edge.
     mesh : GlobalCSMesh
         Native six-face mesh and its spherical geometry.
@@ -67,7 +67,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
     sample_analysis_uses_grid_remapping = True
 
-    def __init__(self, cells_per_face):
+    def __init__(self, cells_per_edge=None, *, mesh=None):
         """Initialize the cubed sphere basis.
 
         Initialize arrays for a grid with the requested number of cells along
@@ -75,32 +75,37 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
 
         Parameters
         ----------
-        cells_per_face : int
+        cells_per_edge : int, optional
             Number of grid cells per cube edge. Must be even.
+        mesh : GlobalCSMesh, optional
+            Existing mesh to reuse instead of constructing one. Supply
+            either cells_per_edge or mesh, not both.
 
         Raises
         ------
         TypeError
-            If ``cells_per_face`` is not an integer.
+            If ``cells_per_edge`` is not an integer.
         ValueError
-            If ``cells_per_face`` is not a positive even number.
+            If ``cells_per_edge`` is not a positive even number.
         """
         self.kind = "CS"
         self._remapper = _GlobalCSRemapper(self)
         self._surface_operator_cache = BoundedCache(16)
 
-        if isinstance(cells_per_face, bool) or not isinstance(cells_per_face, (int, np.integer)):
-            raise TypeError("cells_per_face must be an integer")
-        if cells_per_face <= 0:
-            raise ValueError("Cubed sphere grid dimension must be positive")
-        if cells_per_face % 2 != 0:
+        if mesh is None:
+            mesh = GlobalCSMesh(cells_per_edge)
+        elif cells_per_edge is not None:
+            raise ValueError("Supply either cells_per_edge or mesh, not both.")
+        elif not isinstance(mesh, GlobalCSMesh):
+            raise TypeError("mesh must be a GlobalCSMesh.")
+        if mesh.cells_per_edge % 2 != 0:
             raise ValueError("Cubed sphere grid dimension must be even")
 
-        self.cells_per_face = int(cells_per_face)
-        self.mesh = GlobalCSMesh(self.cells_per_face)
+        self.cells_per_edge = mesh.cells_per_edge
+        self.mesh = mesh
 
         self.index_names = ("theta", "phi")
-        self.index_length = self.mesh.size
+        self.coefficient_count = self.mesh.size
         self.index_arrays = (self.mesh.theta, self.mesh.phi)
 
         self.validate_metadata()
@@ -108,8 +113,8 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     def __repr__(self):
         """Summarize the global cubed-sphere coefficient space."""
         return (
-            f"GlobalCSBasis(cells_per_face={self.cells_per_face}, "
-            f"index_length={self.index_length})"
+            f"GlobalCSBasis(cells_per_edge={self.cells_per_edge}, "
+            f"coefficient_count={self.coefficient_count})"
         )
 
     def clear_cache(self, *, shared_remaps=False):
@@ -139,7 +144,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
     @property
     def coefficient_space_signature(self):
         """Return a signature for CS coefficient compatibility."""
-        return ("CS", int(self.cells_per_face))
+        return ("CS", int(self.cells_per_edge))
 
     @property
     def native_grid(self):
@@ -171,13 +176,15 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         def build():
             if self._is_native_grid(grid):
                 if derivative is None:
-                    return identity_linear_map((self.index_length,))
+                    return identity_linear_map((self.coefficient_count,))
                 elif derivative in {"theta", "phi"}:
                     matrix = self._native_derivatives[derivative]
                 else:
                     raise ValueError(f'Invalid derivative "{derivative}".')
                 return as_linear_map(
-                    matrix, input_shape=(self.index_length,), output_shape=(self.index_length,)
+                    matrix,
+                    input_shape=(self.coefficient_count,),
+                    output_shape=(self.coefficient_count,),
                 )
 
             if derivative is None:
@@ -201,9 +208,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         """Return the area-weighted mean of scalar CS coefficients."""
         xp = get_array_module(coeffs)
         values = xp.asarray(coeffs)
-        if values.shape[-1] != self.index_length:
+        if values.shape[-1] != self.coefficient_count:
             raise ValueError(
-                "CS scalar coefficients must have the basis index_length on the last axis."
+                "CS scalar coefficients must have the basis coefficient_count on the last axis."
             )
         return xp.tensordot(values, xp.asarray(self.scalar_mean_weights), axes=([-1], [0]))
 
@@ -218,13 +225,15 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         """Project both CS Helmholtz potentials to zero mean."""
         xp = get_array_module(coeffs)
         values = xp.asarray(coeffs)
-        if values.shape[-1] == self.index_length:
+        if values.shape[-1] == self.coefficient_count:
             return self.project_scalar_mean_free(values)
-        if values.shape[-1] == 2 * self.index_length:
+        if values.shape[-1] == 2 * self.coefficient_count:
             original_shape = values.shape
-            reshaped = values.reshape(original_shape[:-1] + (2, self.index_length))
+            reshaped = values.reshape(original_shape[:-1] + (2, self.coefficient_count))
             return self.project_scalar_mean_free(reshaped).reshape(original_shape)
-        raise ValueError("CS Helmholtz coefficients must end with index_length or 2*index_length.")
+        raise ValueError(
+            "CS Helmholtz coefficients must end with coefficient_count or 2*coefficient_count."
+        )
 
     def _is_native_grid(self, grid):
         """Return whether ``grid`` matches this basis' native points."""
@@ -280,7 +289,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         with backend_context("numpy"):
             dxi, deta = global_cs_derivative_matrices(
                 self.mesh.projection,
-                self.cells_per_face,
+                self.cells_per_edge,
             )
             dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi = self._coordinate_derivatives()
 
@@ -311,7 +320,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             derivatives = self._native_derivatives
             matrix = sp.vstack([derivatives["theta"], derivatives["phi"]], format="csr")
             native_operator = as_linear_map(
-                matrix, input_shape=(self.index_length,), output_shape=(2, self.index_length)
+                matrix,
+                input_shape=(self.coefficient_count,),
+                output_shape=(2, self.coefficient_count),
             )
             if self._is_native_grid(grid):
                 return native_operator
@@ -330,7 +341,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             derivatives = self._native_derivatives
             matrix = sp.vstack([-derivatives["phi"], derivatives["theta"]], format="csr")
             native_operator = as_linear_map(
-                matrix, input_shape=(self.index_length,), output_shape=(2, self.index_length)
+                matrix,
+                input_shape=(self.coefficient_count,),
+                output_shape=(2, self.coefficient_count),
             )
             if self._is_native_grid(grid):
                 return native_operator
@@ -348,7 +361,9 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         def build():
             matrix = self._native_helmholtz_synthesis_matrix()
             native_operator = as_linear_map(
-                matrix, input_shape=(2, self.index_length), output_shape=(2, self.index_length)
+                matrix,
+                input_shape=(2, self.coefficient_count),
+                output_shape=(2, self.coefficient_count),
             )
             if self._is_native_grid(grid):
                 return native_operator
@@ -368,7 +383,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         if not self._is_native_grid(grid):
             return None
 
-        n = self.index_length
+        n = self.coefficient_count
         synthesis = self._native_helmholtz_synthesis_matrix()
         normalized_mean = np.sqrt(n) * self.scalar_mean_weights
         gauges = sp.csr_matrix(
@@ -405,8 +420,8 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         r = float(r)
         unit_laplacian = as_linear_map(
             self._unit_surface_laplacian_matrix,
-            input_shape=(self.index_length,),
-            output_shape=(self.index_length,),
+            input_shape=(self.coefficient_count,),
+            output_shape=(self.coefficient_count,),
         )
         return unit_laplacian if r == 1.0 else (1.0 / r**2) * unit_laplacian
 
@@ -416,7 +431,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         laplacian = self._unit_surface_laplacian_matrix
         if r != 1.0:
             laplacian = (laplacian / r**2).tocsr()
-        n = self.index_length
+        n = self.coefficient_count
         normalized_mean = np.sqrt(n) * self.scalar_mean_weights
         gauge = sp.csr_matrix(normalized_mean.reshape(1, n))
         return sparse_constrained_least_squares_map(

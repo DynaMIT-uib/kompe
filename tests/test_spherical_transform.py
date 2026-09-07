@@ -47,7 +47,7 @@ def test_spherical_transform_analyzes_scalar_grid_values():
     basis = SHBasis(3, 2, mean_free=True)
     grid = _regular_grid()
     transform = SphericalTransform(basis, grid)
-    expected = np.zeros(basis.index_length)
+    expected = np.zeros(basis.coefficient_count)
     expected[1] = 1.0
     expected[3] = -0.25
     values = transform.synthesize_scalar(expected)
@@ -106,15 +106,15 @@ def test_rotated_gradient_analysis_matches_dense_least_squares():
     basis = SHBasis(3, 3, mean_free=True)
     grid = _regular_grid()
     transform = SphericalTransform(basis, grid, area_weighted=True)
-    scale = np.linspace(0.5, 1.5, basis.index_length)
+    scale = np.linspace(0.5, 1.5, basis.coefficient_count)
     synthesis = (
         np.asarray(transform.rhat_cross_gradient_array) * scale.reshape(1, 1, -1)
-    ).reshape(2 * grid.size, basis.index_length)
+    ).reshape(2 * grid.size, basis.coefficient_count)
     expected = dense_full_rank_least_squares_map(
         synthesis,
         sqrt_weights=transform.helmholtz_sqrt_weights,
         input_shape=(2, grid.size),
-        output_shape=(basis.index_length,),
+        output_shape=(basis.coefficient_count,),
     )
 
     observed = transform.rhat_cross_gradient_analysis_operator(coefficient_scale=scale)
@@ -252,11 +252,14 @@ def test_spherical_transform_regularization_uses_diagonal_operators():
     q = 1.0 / (2.0 * n + 1.0)
     mu = n * (n + 1.0)
     scalar_weights = np.sqrt(q * mu)
-    helmholtz_weights = np.broadcast_to(np.sqrt(q) * mu, (2, basis.index_length))
+    helmholtz_weights = np.broadcast_to(np.sqrt(q) * mu, (2, basis.coefficient_count))
     helmholtz_coeffs = np.vstack(
-        [np.linspace(0.0, 1.0, basis.index_length), np.linspace(1.0, 2.0, basis.index_length)]
+        [
+            np.linspace(0.0, 1.0, basis.coefficient_count),
+            np.linspace(1.0, 2.0, basis.coefficient_count),
+        ]
     )
-    scalar_coeffs = np.linspace(0.0, 1.0, basis.index_length)
+    scalar_coeffs = np.linspace(0.0, 1.0, basis.coefficient_count)
 
     scalar_regularization = transform.scalar_least_squares_problem.regularization_operators[0]
     helmholtz_regularization = transform.helmholtz_least_squares_problem.regularization_operators[
@@ -310,8 +313,8 @@ def test_surface_smoothness_regularization_matches_parseval_weights():
     basis = SHBasis(5, 3, mean_free=False)
     transform = SphericalTransform(basis, _regular_grid(), reg_lambda=1.0)
     rng = np.random.default_rng(17)
-    scalar = rng.normal(size=basis.index_length)
-    helmholtz = rng.normal(size=(2, basis.index_length))
+    scalar = rng.normal(size=basis.coefficient_count)
+    helmholtz = rng.normal(size=(2, basis.coefficient_count))
     n = np.asarray(basis.n, dtype=float)
     q = 1.0 / (2.0 * n + 1.0)
     mu = n * (n + 1.0)
@@ -324,10 +327,10 @@ def test_surface_smoothness_regularization_matches_parseval_weights():
     assert transform.scalar_regularization_operator.diagonal(backend="numpy")[0] == 0.0
     np.testing.assert_allclose(
         transform.helmholtz_regularization_operator.diagonal(backend="numpy").reshape(
-            2, basis.index_length
+            2, basis.coefficient_count
         )[0],
         transform.helmholtz_regularization_operator.diagonal(backend="numpy").reshape(
-            2, basis.index_length
+            2, basis.coefficient_count
         )[1],
     )
 
@@ -387,7 +390,7 @@ def test_scalar_smoothness_is_invariant_to_log_reference_mode():
     """A logarithmic reference change affects only the free mean."""
     basis = SHBasis(5, 3, mean_free=False)
     transform = SphericalTransform(basis, _regular_grid(), reg_lambda=1.0)
-    coefficients = np.linspace(-1.0, 1.0, basis.index_length)
+    coefficients = np.linspace(-1.0, 1.0, basis.coefficient_count)
     shifted = coefficients.copy()
     shifted[np.asarray(basis.n) == 0] += 7.5
 
@@ -403,9 +406,9 @@ def test_spherical_transform_requires_configured_regularization():
     transform = SphericalTransform(basis, _regular_grid())
 
     with pytest.raises(RuntimeError, match="Scalar regularization requires reg_lambda"):
-        transform.apply_scalar_regularization(np.zeros(basis.index_length))
+        transform.apply_scalar_regularization(np.zeros(basis.coefficient_count))
     with pytest.raises(RuntimeError, match="Helmholtz regularization requires reg_lambda"):
-        transform.apply_helmholtz_regularization(np.zeros((2, basis.index_length)))
+        transform.apply_helmholtz_regularization(np.zeros((2, basis.coefficient_count)))
 
 
 def test_regularized_transform_does_not_expose_unregularized_analysis_operator():
@@ -424,7 +427,7 @@ def test_spherical_transform_analyzes_tangential_grid_values():
     basis = SHBasis(3, 2, mean_free=True)
     grid = _regular_grid()
     transform = SphericalTransform(basis, grid)
-    expected = np.zeros((2, basis.index_length))
+    expected = np.zeros((2, basis.coefficient_count))
     expected[0, 1] = 1.0
     expected[1, 3] = -0.5
     values = transform.synthesize_helmholtz(expected)
@@ -442,11 +445,11 @@ def test_spherical_transform_batches_direct_analysis():
     basis = SHBasis(3, 2, mean_free=True)
     grid = _regular_grid()
     transform = SphericalTransform(basis, grid)
-    scalar_coeffs = np.zeros((2, basis.index_length))
+    scalar_coeffs = np.zeros((2, basis.coefficient_count))
     scalar_coeffs[0, 1] = 1.0
     scalar_coeffs[1, 3] = -0.25
     scalar_values = np.vstack([transform.synthesize_scalar(row) for row in scalar_coeffs])
-    vector_coeffs = np.zeros((2, 2, basis.index_length))
+    vector_coeffs = np.zeros((2, 2, basis.coefficient_count))
     vector_coeffs[0, 0, 1] = 1.0
     vector_coeffs[1, 1, 3] = -0.5
     vector_values = np.stack([transform.synthesize_helmholtz(row) for row in vector_coeffs])
@@ -491,7 +494,7 @@ def test_native_cs_transform_synthesizes_from_sparse_operator_paths(monkeypatch)
     theta = derivatives["theta"].toarray()
     phi = derivatives["phi"].toarray()
 
-    scalar_coeffs = np.linspace(0.0, 1.0, basis.index_length)
+    scalar_coeffs = np.linspace(0.0, 1.0, basis.coefficient_count)
     vector_coeffs = np.vstack([scalar_coeffs, scalar_coeffs[::-1]])
     expected_helmholtz = np.stack(
         [
@@ -558,7 +561,7 @@ def test_spherical_transform_reuses_scalar_grid_remap(monkeypatch):
     )
 
     assert calls == 1
-    assert projected_1.shape == (2, basis.index_length)
+    assert projected_1.shape == (2, basis.coefficient_count)
     np.testing.assert_allclose(projected_2, projected_1)
 
 
@@ -583,7 +586,7 @@ def test_spherical_transform_skips_matching_grid_remap(monkeypatch):
         values, input_grid=grid, analysis_basis=remapping_basis
     )
 
-    assert projected.shape == (2, basis.index_length)
+    assert projected.shape == (2, basis.coefficient_count)
 
 
 def test_remapped_sample_analysis_applies_target_fit_options(monkeypatch):
@@ -610,7 +613,7 @@ def test_remapped_sample_analysis_applies_target_fit_options(monkeypatch):
         tolerance=1e-10,
     )
 
-    assert projected.shape == (1, basis.index_length)
+    assert projected.shape == (1, basis.coefficient_count)
     assert recorded["reg_lambda"] == 1e-3
     assert recorded["tolerance"] == 1e-10
 
@@ -701,7 +704,7 @@ def test_spherical_transform_reuses_helmholtz_grid_remap(monkeypatch):
     )
 
     assert calls == 1
-    assert projected_1.shape == (2, 2 * basis.index_length)
+    assert projected_1.shape == (2, 2 * basis.coefficient_count)
     np.testing.assert_allclose(projected_2, projected_1)
 
 
@@ -871,7 +874,7 @@ def test_cs_non_native_scalar_analysis_solves_against_remap_operator():
         value_rows, input_grid=target, analysis_basis=basis
     )
 
-    assert coeffs.shape == (basis.index_length,)
+    assert coeffs.shape == (basis.coefficient_count,)
     assert projected_rows.shape == coeff_rows.shape
     np.testing.assert_allclose(transform.synthesize_scalar(coeffs), value_rows[0])
     for projected, expected_values in zip(projected_rows, value_rows, strict=True):
@@ -887,7 +890,7 @@ def test_direct_sample_analysis_uses_the_analysis_transform_layout():
     basis = DirectNativeCSBasis(4)
     target = SphericalGrid(theta=basis.mesh.theta + 1e-3, phi=basis.mesh.phi)
     transform = SphericalTransform(basis, target)
-    values = np.vstack([np.arange(basis.index_length), -np.arange(basis.index_length)])
+    values = np.vstack([np.arange(basis.coefficient_count), -np.arange(basis.coefficient_count)])
 
     projected = transform.analyze_scalar_samples(
         values, input_grid=basis.native_grid, analysis_basis=basis
@@ -933,11 +936,11 @@ def test_optimized_analysis_matches_solver_array_contract(backend, helmholtz, la
         if helmholtz:
             actual = transform.analyze_helmholtz(values)
             expected = reference.analyze_helmholtz(values, solver="svd")
-            solution_shape = (2, basis.index_length)
+            solution_shape = (2, basis.coefficient_count)
         else:
             actual = transform.analyze_scalar(values)
             expected = reference.analyze_scalar(values, solver="svd")
-            solution_shape = (basis.index_length,)
+            solution_shape = (basis.coefficient_count,)
             assert "scalar_least_squares_problem" not in transform.__dict__
 
         assert isinstance(actual, get_array_module().ndarray)
@@ -967,12 +970,12 @@ def test_native_scalar_analysis_validates_shape_and_accepts_lists():
     """The identity shortcut has the same input boundary as a solved analysis."""
     basis = GlobalCSBasis(4)
     transform = SphericalTransform(basis, basis.native_grid)
-    values = np.arange(basis.index_length, dtype=float)
+    values = np.arange(basis.coefficient_count, dtype=float)
     actual = transform.analyze_scalar(values.tolist())
     assert actual.shape == values.shape
     np.testing.assert_array_equal(actual, values)
     weighted_transform = SphericalTransform(
-        basis, basis.native_grid, sqrt_weights=np.ones(basis.index_length)
+        basis, basis.native_grid, sqrt_weights=np.ones(basis.coefficient_count)
     )
     np.testing.assert_allclose(weighted_transform.analyze_scalar(values.tolist()), actual)
     with pytest.raises(ValueError, match="incompatible with data_shape"):
@@ -995,7 +998,7 @@ def test_cs_non_native_helmholtz_analysis_solves_against_remap_operator():
 
     actual = transform.analyze_helmholtz(values)
 
-    assert actual.shape == (2, basis.index_length)
+    assert actual.shape == (2, basis.coefficient_count)
     np.testing.assert_allclose(transform.synthesize_helmholtz(actual), values, atol=1e-10)
 
 
@@ -1041,7 +1044,10 @@ def test_full_mean_sh_helmholtz_analysis_retains_rank_deficient_fallback():
     transform = SphericalTransform(basis, grid)
 
     assert transform._optimized_helmholtz_analysis_operator is None
-    assert transform.helmholtz_analysis_operator.shape == (2 * basis.index_length, 2 * grid.size)
+    assert transform.helmholtz_analysis_operator.shape == (
+        2 * basis.coefficient_count,
+        2 * grid.size,
+    )
 
 
 def test_rank_deficient_helmholtz_analysis_uses_transform_tolerance(monkeypatch):
@@ -1115,7 +1121,7 @@ def test_native_cs_helmholtz_analysis_is_sparse_constrained_least_squares(area_w
     values = rng.normal(size=(2, grid.size))
 
     operator = transform.helmholtz_analysis_operator
-    actual = operator.matvec(values).reshape(2, basis.index_length)
+    actual = operator.matvec(values).reshape(2, basis.coefficient_count)
     api_actual = transform.analyze_helmholtz(values)
     expected = reference_transform.analyze_helmholtz(values, solver="normal_pinv")
     expected = basis.project_helmholtz_mean_free(expected)
@@ -1210,7 +1216,7 @@ def test_spherical_transform_synthesis_preserves_jax_backend():
         )
 
         transform = SphericalTransform(basis, grid)
-        scalar_coeffs = np.linspace(0.0, 1.0, basis.index_length)
+        scalar_coeffs = np.linspace(0.0, 1.0, basis.coefficient_count)
         scalar_values = transform.synthesize_scalar(scalar_coeffs)
         assert "jax" in type(scalar_values).__module__
         backend_dtype = to_numpy(scalar_values).dtype
@@ -1248,7 +1254,7 @@ def test_spherical_transform_preserves_explicit_jax_coefficients():
             area_weights=np.asarray(basis.mesh.cell_areas.reshape(-1)),
         )
         transform = SphericalTransform(basis, grid)
-        coeffs = jnp.linspace(0.0, 1.0, basis.index_length)
+        coeffs = jnp.linspace(0.0, 1.0, basis.coefficient_count)
 
         values = transform.synthesize_scalar(coeffs)
 

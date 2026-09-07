@@ -70,7 +70,7 @@ class SECSBasis(ScalarBasis):
         self.current_type = current_type
         self.kind = "SECS"
         self.index_names = ("latitude", "longitude")
-        self.index_length = self.poles.size
+        self.coefficient_count = self.poles.size
         self.index_arrays = (self.poles.lat, self.poles.lon)
         self.validate_metadata()
 
@@ -170,7 +170,7 @@ class SECSBasis(ScalarBasis):
         if chunk_size is None:
             array = self.surface_current_array(grid, singularity_limit=singularity_limit)
             return as_linear_map(
-                array, input_shape=(self.index_length,), output_shape=(2, grid.size)
+                array, input_shape=(self.coefficient_count,), output_shape=(2, grid.size)
             )
 
         chunk_size = self._validate_chunk_size(chunk_size)
@@ -196,7 +196,7 @@ class SECSBasis(ScalarBasis):
 
         def matvec(coefficients):
             xp = get_array_module(coefficients)
-            coefficients = xp.asarray(coefficients).reshape(self.index_length)
+            coefficients = xp.asarray(coefficients).reshape(self.coefficient_count)
             output = xp.empty((2, grid.size), dtype=xp.result_type(coefficients, float))
             for start, stop in slices():
                 chunk = xp.einsum("cnp,p->cn", chunk_matrix(start, stop, xp), coefficients)
@@ -209,7 +209,7 @@ class SECSBasis(ScalarBasis):
         def rmatvec(values):
             xp = get_array_module(values)
             values = xp.asarray(values).reshape(2, grid.size)
-            output = xp.zeros(self.index_length, dtype=xp.result_type(values, float))
+            output = xp.zeros(self.coefficient_count, dtype=xp.result_type(values, float))
             for start, stop in slices():
                 output = output + xp.einsum(
                     "cnp,cn->p", chunk_matrix(start, stop, xp), values[:, start:stop]
@@ -218,7 +218,7 @@ class SECSBasis(ScalarBasis):
 
         def matmat(coefficients):
             xp = get_array_module(coefficients)
-            coefficients = xp.asarray(coefficients).reshape(self.index_length, -1)
+            coefficients = xp.asarray(coefficients).reshape(self.coefficient_count, -1)
             output = xp.empty(
                 (2, grid.size, coefficients.shape[1]),
                 dtype=xp.result_type(coefficients, float),
@@ -235,7 +235,7 @@ class SECSBasis(ScalarBasis):
             xp = get_array_module(values)
             values = xp.asarray(values).reshape(2, grid.size, -1)
             output = xp.zeros(
-                (self.index_length, values.shape[-1]), dtype=xp.result_type(values, float)
+                (self.coefficient_count, values.shape[-1]), dtype=xp.result_type(values, float)
             )
             for start, stop in slices():
                 output = output + xp.einsum(
@@ -244,13 +244,13 @@ class SECSBasis(ScalarBasis):
             return output
 
         return LinearMap(
-            shape=(2 * grid.size, self.index_length),
+            shape=(2 * grid.size, self.coefficient_count),
             dtype=np.float64,
             matvec=matvec,
             rmatvec=rmatvec,
             matmat=matmat,
             rmatmat=rmatmat,
-            input_shape=(self.index_length,),
+            input_shape=(self.coefficient_count,),
             output_shape=(2, grid.size),
         )
 
@@ -286,7 +286,7 @@ class SECSBasis(ScalarBasis):
         """Return two-potential SECS current synthesis operator."""
         array = self.helmholtz_current_synthesis_array(grid, singularity_limit=singularity_limit)
         return as_linear_map(
-            array, input_shape=(2, self.index_length), output_shape=(2, grid.size)
+            array, input_shape=(2, self.coefficient_count), output_shape=(2, grid.size)
         )
 
     def magnetic_field_array(
@@ -317,7 +317,9 @@ class SECSBasis(ScalarBasis):
     def magnetic_field_operator(self, grid, evaluation_radius, **kwargs):
         """Return coefficient-to-magnetic-field synthesis operator."""
         array = self.magnetic_field_array(grid, evaluation_radius, **kwargs)
-        return as_linear_map(array, input_shape=(self.index_length,), output_shape=(3, grid.size))
+        return as_linear_map(
+            array, input_shape=(self.coefficient_count,), output_shape=(3, grid.size)
+        )
 
 
 __all__ = ["DEFAULT_IONOSPHERE_RADIUS_M", "EARTH_RADIUS_M", "SECSBasis"]

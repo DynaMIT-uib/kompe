@@ -50,7 +50,7 @@ def test_global_basis_exposes_validated_native_mesh():
     assert isinstance(mesh, GlobalCSMesh)
     assert isinstance(mesh, StructuredSurfaceMesh)
     assert mesh.shape == (6, 4, 4)
-    assert mesh.size == basis.index_length == 96
+    assert mesh.size == basis.coefficient_count == 96
     assert mesh.cell_centers.size == mesh.size
     assert mesh.cell_areas.shape == mesh.shape
     assert mesh.signature == ("GLOBAL_CS_MESH", 4)
@@ -79,3 +79,29 @@ def test_regional_grid_is_a_structured_surface_mesh():
     np.testing.assert_allclose(mesh.cell_centers.phi, mesh.lon.reshape(-1))
     np.testing.assert_allclose(mesh.cell_centers.area_weights, mesh.cell_areas.reshape(-1))
     assert np.all(mesh.cell_areas > 0.0)
+
+
+def test_global_basis_reuses_supplied_mesh():
+    from kompe import GlobalCSBasis, GlobalCSMesh
+
+    mesh = GlobalCSMesh(4)
+    basis = GlobalCSBasis(mesh=mesh)
+    assert basis.mesh is mesh
+    assert basis.native_grid is mesh.cell_centers
+    assert basis.cells_per_edge == 4
+    assert basis.coefficient_count == 6 * 4**2
+    np.testing.assert_allclose(
+        basis.scalar_evaluation_operator(mesh.cell_centers).matvec(np.ones(mesh.size)),
+        np.ones(mesh.size),
+    )
+
+
+def test_global_basis_mesh_resolution_contract():
+    from kompe import GlobalCSBasis, GlobalCSMesh
+
+    with pytest.raises(ValueError, match="even"):
+        GlobalCSBasis(mesh=GlobalCSMesh(3))
+    with pytest.raises(ValueError, match="either"):
+        GlobalCSBasis(4, mesh=GlobalCSMesh(4))
+    with pytest.raises(TypeError, match="GlobalCSMesh"):
+        GlobalCSBasis(mesh=object())
