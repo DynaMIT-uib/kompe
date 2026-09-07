@@ -21,6 +21,32 @@ NumericInputList: TypeAlias = float | list[float]
 _NORMAL_PINV_CACHE_VERSION = 1
 
 
+def as_rhs_block(values: Any, data_shape: tuple[int, ...]) -> tuple[Any, tuple[int, ...]]:
+    """Flatten data axes into rows and batch axes into RHS columns.
+
+    Accept one field, a flat vector, or a batch with ``data_shape`` at
+    either end. Leading data axes take precedence when both ends match.
+    Return the column block and the original batch shape; solutions use
+    ``solution_shape + batch_shape`` regardless of the input layout.
+    """
+    xp = get_array_module(values)
+    array = xp.asarray(values)
+    data_size = math.prod(data_shape)
+    data_ndim = len(data_shape)
+
+    if array.shape == data_shape:
+        return array.reshape(data_size, 1), ()
+    if array.ndim > data_ndim and array.shape[:data_ndim] == data_shape:
+        batch_shape = array.shape[data_ndim:]
+        return array.reshape(data_size, math.prod(batch_shape)), batch_shape
+    if array.ndim > data_ndim and array.shape[-data_ndim:] == data_shape:
+        batch_shape = array.shape[:-data_ndim]
+        return array.reshape(math.prod(batch_shape), data_size).T, batch_shape
+    if array.ndim <= 1 and array.size == data_size:
+        return array.reshape(data_size, 1), ()
+    raise ValueError(f"Shape {array.shape} incompatible with data_shape {data_shape}.")
+
+
 class LeastSquaresProblem:
     """Data fit and optional regularization in one coefficient space.
 
@@ -296,7 +322,8 @@ class LeastSquaresProblem:
         """Assemble one or more right-hand side columns."""
         b_list = self._prepare_input_list(b, "b", count=len(self.data_operators))
         processed = [
-            self._process_b_vector(b_val, self.data_shapes[i]) for i, b_val in enumerate(b_list)
+            (None, None) if b_val is None else as_rhs_block(b_val, self.data_shapes[i])
+            for i, b_val in enumerate(b_list)
         ]
         valid_b = [p for p in processed if p[0] is not None]
         if not valid_b:
@@ -400,32 +427,3 @@ class LeastSquaresProblem:
         if len(data_shapes) != expected_count:
             raise ValueError("Number of data_shapes does not match number of A operators.")
         return [(s,) if isinstance(s, int) else tuple(s) for s in data_shapes]
-
-    def _process_b_vector(
-        self, b_val: Any, data_shape: tuple[int, ...]
-    ) -> tuple[Any | None, tuple[int, ...] | None]:
-        if b_val is None:
-            return None, None
-        xp = get_array_module(b_val)
-        b = xp.asarray(b_val)
-        flat_data_size = math.prod(data_shape)
-        num_data_dims = len(data_shape)
-
-        if b.shape == data_shape:
-            return b.reshape(flat_data_size, 1), ()
-
-        if b.ndim > num_data_dims and tuple(b.shape[:num_data_dims]) == data_shape:
-            rhs_shape = b.shape[num_data_dims:]
-            return b.reshape(flat_data_size, math.prod(rhs_shape)), rhs_shape
-
-        if b.ndim > num_data_dims and tuple(b.shape[-num_data_dims:]) == data_shape:
-            rhs_shape = b.shape[:-num_data_dims]
-            return b.reshape(math.prod(rhs_shape), flat_data_size).T, rhs_shape
-
-        if b.ndim == 1 and b.size == flat_data_size:
-            return b.reshape(flat_data_size, 1), ()
-
-        if b.ndim == 0 and flat_data_size == 1:
-            return b.reshape(1, 1), ()
-
-        raise ValueError(f"Shape {b.shape} incompatible with data_shape {data_shape}.")

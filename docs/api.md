@@ -60,6 +60,14 @@ for another coefficient basis while reusing the same grid and numerical policy.
 An explicitly different evaluation algorithm is retained even when its
 coefficient layout is compatible with the previous basis.
 
+On the bound grid, scalar analysis returns `(n_coeffs, *batch_shape)`;
+Helmholtz analysis returns `(2, n_coeffs, *batch_shape)`. Input data axes
+`(n_points,)` or `(2, n_points)` may precede or follow the batch axes. When
+both ends match, leading data axes take precedence. Identity shortcuts,
+optimized operators, and explicit least-squares solvers follow the same
+shape and array-backend conventions. The sample-grid methods instead
+accept time rows and return `(n_times, n_flat_coeffs)`.
+
 Explicit representations that retain scientific axes end in `_array`, even
 when a scalar case happens to be 2-D. Flat linear-algebra representations that
 are always exactly 2-D end in `_matrix`; structured equivalents end in
@@ -86,6 +94,9 @@ functions; implementation storage remains private.
 `to_matrix()` returns the flat 2-D representation; `to_array()` returns the
 same values with shaped domain and codomain axes. Both cache the dense
 representation instead of repeating its construction.
+New compositions reuse contractions already materialized on the active
+backend instead of expanding their original tensor factors again. Existing
+compositions retain the representation with which they were constructed.
 Known diagonal and identity maps remain vector-backed even when a full matrix
 has been requested for inspection.
 `diagonal()` returns the scale vector only when a diagonal representation is

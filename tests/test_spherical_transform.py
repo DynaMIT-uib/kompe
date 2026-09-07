@@ -6,7 +6,14 @@ import pytest
 import kompe.spherical_transform as spherical_transform_module
 from kompe import GlobalCSBasis, SHBasis, SphericalGrid, SphericalTransform
 from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
-from kompe.math import get_backend, jax_enabled, set_backend, to_numpy
+from kompe.math import (
+    backend_context,
+    get_array_module,
+    get_backend,
+    jax_enabled,
+    set_backend,
+    to_numpy,
+)
 from kompe.math.least_squares_solver import dense_full_rank_least_squares_map
 
 
@@ -902,6 +909,74 @@ def test_native_grid_identity_analysis_respects_explicit_zero_weights():
     expected = values.copy()
     expected[0] = 0.0
     np.testing.assert_allclose(analyzed, expected)
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+@pytest.mark.parametrize("helmholtz", [False, True])
+@pytest.mark.parametrize("layout", ["single", "flat", "data_first", "batch_first", "multi_batch"])
+def test_optimized_analysis_matches_solver_array_contract(backend, helmholtz, layout):
+    """Optimizations preserve backend, component axes, and RHS ordering."""
+    with backend_context(backend):
+        basis = SHBasis(3, 2, mean_free=True) if helmholtz else GlobalCSBasis(4)
+        grid = _regular_grid() if helmholtz else basis.native_grid
+        transform = SphericalTransform(basis, grid)
+        reference = SphericalTransform(basis, grid, sqrt_weights=np.ones(grid.size))
+        data_shape = (2, grid.size) if helmholtz else (grid.size,)
+        batch_shape = () if layout in ("single", "flat") else (3,)
+        if layout == "multi_batch":
+            batch_shape = (3, 4)
+        values = np.random.default_rng(42).normal(size=data_shape + batch_shape)
+        if layout == "flat":
+            values = values.reshape(-1)
+        elif layout in ("batch_first", "multi_batch"):
+            values = np.moveaxis(values, range(len(data_shape)), range(-len(data_shape), 0))
+        if helmholtz:
+            actual = transform.analyze_helmholtz(values)
+            expected = reference.analyze_helmholtz(values, solver="svd")
+            solution_shape = (2, basis.index_length)
+        else:
+            actual = transform.analyze_scalar(values)
+            expected = reference.analyze_scalar(values, solver="svd")
+            solution_shape = (basis.index_length,)
+            assert "scalar_least_squares_problem" not in transform.__dict__
+
+        assert isinstance(actual, get_array_module().ndarray)
+        assert actual.shape == expected.shape == solution_shape + batch_shape
+        np.testing.assert_allclose(actual, expected, rtol=2e-11, atol=2e-11)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("square_batch", [False, True])
+def test_native_scalar_sample_analysis_preserves_time_rows(weighted, square_batch):
+    """Internal time rows stay distinct from data axes, even for square batches."""
+    basis = GlobalCSBasis(4)
+    grid = basis.native_grid
+    transform = SphericalTransform(
+        basis, grid, sqrt_weights=np.ones(grid.size) if weighted else None
+    )
+    batch_size = grid.size if square_batch else 3
+    values = np.arange(batch_size * grid.size, dtype=float).reshape(batch_size, grid.size)
+
+    actual = transform.analyze_scalar_samples(values, input_grid=grid)
+
+    assert actual.shape == values.shape
+    np.testing.assert_allclose(actual, values, atol=1e-12)
+
+
+def test_native_scalar_analysis_validates_shape_and_accepts_lists():
+    """The identity shortcut has the same input boundary as a solved analysis."""
+    basis = GlobalCSBasis(4)
+    transform = SphericalTransform(basis, basis.native_grid)
+    values = np.arange(basis.index_length, dtype=float)
+    actual = transform.analyze_scalar(values.tolist())
+    assert actual.shape == values.shape
+    np.testing.assert_array_equal(actual, values)
+    weighted_transform = SphericalTransform(
+        basis, basis.native_grid, sqrt_weights=np.ones(basis.index_length)
+    )
+    np.testing.assert_allclose(weighted_transform.analyze_scalar(values.tolist()), actual)
+    with pytest.raises(ValueError, match="incompatible with data_shape"):
+        transform.analyze_scalar(values.reshape(2, -1))
 
 
 def test_cs_non_native_helmholtz_analysis_solves_against_remap_operator():

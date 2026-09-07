@@ -16,18 +16,18 @@ from kompe import (
     SHBasis,
     SphericalGrid,
 )
-from kompe.math import block_until_ready
+from kompe.math import as_linear_map, block_until_ready, get_array_module, set_backend
 
 
 def measure(label, operation, repeat):
-    """Print median and minimum wall time for one operation."""
+    """Report the first call separately from repeated calls."""
     samples = []
     for _ in range(repeat):
         start = time.perf_counter()
         result = operation()
         block_until_ready(result)
         samples.append(time.perf_counter() - start)
-    print(f"{label:36s} median={statistics.median(samples):.6f}s min={min(samples):.6f}s")
+    print(f"{label:36s} first={samples[0]:.6f}s warm median={statistics.median(samples[1:]):.6f}s")
 
 
 def main():
@@ -36,7 +36,23 @@ def main():
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--cs-resolution", type=int, default=16)
     parser.add_argument("--sh-degree", type=int, default=20)
+    parser.add_argument("--backend", choices=("numpy", "jax"), default="numpy")
     args = parser.parse_args()
+    if args.repeat < 2:
+        parser.error("--repeat must be at least 2 to measure first and warm calls.")
+    set_backend(args.backend)
+    xp = get_array_module()
+
+    # A grid contraction reduced to coefficient space should be reused
+    # when that map becomes part of a larger scientific calculation.
+    rng = np.random.default_rng(12)
+    left = as_linear_map(xp.asarray(rng.normal(size=(64, 2048))))
+    right = as_linear_map(xp.asarray(rng.normal(size=(2048, 48))))
+    contracted = left @ right
+    measure("Coefficient contraction", contracted.to_matrix, args.repeat)
+    composed = contracted @ as_linear_map(xp.asarray(rng.normal(size=(48, 40))))
+    probe = xp.ones(40)
+    measure("Materialized-map composition apply", lambda: composed @ probe, args.repeat)
 
     measure("GlobalCSBasis construction", lambda: GlobalCSBasis(args.cs_resolution), args.repeat)
     cs_basis = GlobalCSBasis(args.cs_resolution)

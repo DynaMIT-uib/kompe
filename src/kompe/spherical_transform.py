@@ -14,7 +14,7 @@ from kompe.cache import BoundedCache
 from kompe.grid import SphericalGrid
 from kompe.math import array_fingerprint
 from kompe.math.backend import get_array_module, readonly_numpy_array
-from kompe.math.least_squares_problem import LeastSquaresProblem
+from kompe.math.least_squares_problem import LeastSquaresProblem, as_rhs_block
 from kompe.math.least_squares_solver import (
     LeastSquaresSolver,
     cholesky_least_squares_map,
@@ -618,8 +618,9 @@ class SphericalTransform:
     def _solve_least_squares(self, problem, grid_values, solver=None):
         """Solve one configured least-squares problem."""
         solver = get_default_least_squares_solver() if solver is None else solver
+        xp = get_array_module(grid_values)
         return LeastSquaresSolver(solver=solver, tolerance=self.tolerance).solve(
-            problem=problem, rhs=grid_values
+            problem=problem, rhs=xp.asarray(grid_values)
         )
 
     def synthesize_scalar(self, coeffs, derivative=None):
@@ -633,17 +634,28 @@ class SphericalTransform:
         return self._coefficients_to_grid(coeff_array, helmholtz=True)
 
     def analyze_scalar(self, grid_values, solver=None):
-        """Analyze scalar grid values into basis coefficients."""
+        """Analyze scalar values, returning ``(n_coeffs, *batch_shape)``.
+
+        Values have shape ``(n_points, *batch_shape)`` or
+        ``(*batch_shape, n_points)``. Leading data axes take precedence.
+        An unbatched field returns a one-dimensional coefficient array.
+        """
         if (
             self._scalar_synthesis_is_identity()
             and self.reg_lambda is None
             and not self.explicit_sqrt_weights
         ):
-            return grid_values
+            values, batch_shape = as_rhs_block(grid_values, (self.grid.size,))
+            return values.reshape((self.basis.index_length,) + batch_shape)
         return self._solve_least_squares(self.scalar_least_squares_problem, grid_values, solver)
 
     def analyze_helmholtz(self, grid_values, solver=None):
-        """Analyze grid values into Helmholtz coefficients."""
+        """Analyze tangential values, returning ``(2, n_coeffs, *batch_shape)``.
+
+        Data axes ``(2, n_points)`` may precede or follow batch axes;
+        leading data axes take precedence. A flat single field is also
+        accepted. Components are ordered ``(theta, phi)``.
+        """
         if solver is None and self.reg_lambda is None:
             operator = self._optimized_helmholtz_analysis_operator
             if operator is not None:
@@ -652,27 +664,11 @@ class SphericalTransform:
 
     def _apply_helmholtz_analysis_operator(self, operator, grid_values):
         """Apply an analysis operator with standard RHS shapes."""
-        xp = get_array_module(grid_values)
-        values = xp.asarray(grid_values)
-        data_shape = (2, self.grid.size)
+        values, batch_shape = as_rhs_block(grid_values, (2, self.grid.size))
         output_shape = (2, self.basis.index_length)
-        data_size = int(np.prod(data_shape))
-
-        if values.shape == data_shape:
+        if not batch_shape:
             return operator.matvec(values).reshape(output_shape)
-        if values.ndim == 1 and values.size == data_size:
-            return operator.matvec(values).reshape(output_shape)
-        if values.ndim > 2 and tuple(values.shape[:2]) == data_shape:
-            rhs_shape = values.shape[2:]
-            value_block = values.reshape(data_size, -1)
-        elif values.ndim > 2 and tuple(values.shape[-2:]) == data_shape:
-            rhs_shape = values.shape[:-2]
-            value_block = values.reshape(-1, data_size).T
-        else:
-            raise ValueError(f"Shape {values.shape} incompatible with data_shape {data_shape}.")
-
-        result = operator.matmat(value_block)
-        return result.reshape(output_shape + rhs_shape)
+        return operator.matmat(values).reshape(output_shape + batch_shape)
 
     def apply_scalar_regularization(self, coeffs):
         """Apply scalar degree regularization to coefficients."""
@@ -819,23 +815,15 @@ class SphericalTransform:
                 )
             )
 
+        # Samples use time rows; analysis uses trailing RHS axes internally.
+        xp = get_array_module(grid_values)
+        grid_values = xp.moveaxis(grid_values, 0, -1)
         if helmholtz:
             coeffs = analysis_transform.analyze_helmholtz(grid_values)
         else:
             coeffs = analysis_transform.analyze_scalar(grid_values)
-        return analysis_transform._analysis_coefficients_to_rows(
-            coeffs, batch_size=sample_rows.shape[0], helmholtz=helmholtz
-        )
-
-    def _analysis_coefficients_to_rows(self, coeffs, *, batch_size, helmholtz):
-        """Return analysis coefficients in time-row layout."""
         xp = get_array_module(coeffs)
-        array = xp.asarray(coeffs)
-        if not helmholtz and self._scalar_synthesis_is_identity():
-            return array.reshape(batch_size, -1)
-        if batch_size == 1:
-            return array.reshape(1, -1)
-        return xp.moveaxis(array, -1, 0).reshape(batch_size, -1)
+        return xp.moveaxis(coeffs, -1, 0).reshape(sample_rows.shape[0], -1)
 
     def _scalar_synthesis_is_identity(self):
         """Return whether scalar analysis is a no-op."""

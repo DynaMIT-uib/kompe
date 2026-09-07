@@ -406,6 +406,53 @@ def test_structured_dense_builders_preserve_jax_backend(monkeypatch):
 # Composition and materialization
 
 
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_composition_reuses_materialized_contraction(backend, side, monkeypatch):
+    """New compositions reuse a contraction already evaluated in memory."""
+    with backend_context(backend):
+        xp = get_array_module()
+        rng = np.random.default_rng(71)
+        left = xp.asarray(rng.normal(size=(2, 3, 48)) + 1j * rng.normal(size=(2, 3, 48)))
+        right = xp.asarray(rng.normal(size=(48, 4)))
+        factor = einsum_linear_map(
+            component_tensors=[left, right],
+            einsum_string_dense="abg,gi->abi",
+            einsum_string_matvec="abg,gi,i->ab",
+            einsum_string_rmatvec="ab,abg,gi->i",
+            output_shape=(2, 3),
+            input_shape=(4,),
+        )
+        matrix = factor.to_matrix()
+        original_einsum = xp.einsum
+
+        def reused_einsum(subscripts, *operands, **kwargs):
+            if any(operand.shape in (left.shape, right.shape) for operand in operands):
+                pytest.fail("Composition repeated a materialized contraction")
+            return original_einsum(subscripts, *operands, **kwargs)
+
+        monkeypatch.setattr(xp, "einsum", reused_einsum)
+        if side == "left":
+            other = xp.asarray(rng.normal(size=(4, 5)))
+            composed = factor @ as_linear_map(other)
+            expected = matrix @ other
+        else:
+            other = xp.asarray(rng.normal(size=(5, 6)))
+            composed = as_linear_map(other, input_shape=(2, 3)) @ factor
+            expected = other @ matrix
+
+        x = xp.arange(composed.shape[1], dtype=float)
+        y = xp.arange(composed.shape[0], dtype=float)
+        for actual, reference in (
+            (composed.matvec(x), expected @ x),
+            (composed.rmatvec(y), expected.T.conj() @ y),
+            (composed.matmat(xp.stack([x, -x], axis=1)), expected @ xp.stack([x, -x], axis=1)),
+            (composed.to_matrix(), expected),
+        ):
+            assert isinstance(actual, xp.ndarray)
+            np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-12)
+
+
 def test_diagonal_composition_avoids_dense_diagonal_materialization():
     """Dense composite materialization scales rows/columns directly."""
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])

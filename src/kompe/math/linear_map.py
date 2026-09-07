@@ -420,22 +420,26 @@ class LinearMap:
 
     def _composition_einsum_map(self) -> Any:
         """Return an einsum view for composition, when safe."""
-        if (
+        dense = self._dense_cache.get(self.array_module())
+        if dense is not None:
+            # Reuse a completed contraction instead of expanding its factors.
+            tensor = dense.reshape(self.output_shape + self.input_shape)
+        elif (
             self._einsum_map is not None
             and self._einsum_map.output_shape == self.output_shape
             and self._einsum_map.input_shape == self.input_shape
         ):
             return self._einsum_map
-        if self._dense_tensor is None:
+        else:
+            tensor = self._dense_tensor
+        if tensor is None:
             return None
-        if tuple(getattr(self._dense_tensor, "shape", ())) != (
-            self.output_shape + self.input_shape
-        ):
+        if tuple(tensor.shape) != self.output_shape + self.input_shape:
             return None
         from kompe.math.einsum import dense_tensor_einsum_map
 
         return dense_tensor_einsum_map(
-            self._dense_tensor, output_shape=self.output_shape, input_shape=self.input_shape
+            tensor, output_shape=self.output_shape, input_shape=self.input_shape
         )
 
     def __add__(self, other: Any) -> LinearMap:
