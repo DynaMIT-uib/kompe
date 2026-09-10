@@ -3,16 +3,13 @@
 from functools import cached_property
 
 import numpy as np
-import scipy.sparse as sp
 
 from kompe.basis import SurfaceDifferentialBasis
 from kompe.cache import BoundedCache
-from kompe.cubed_sphere.global_differencing import global_cs_derivative_matrices
 from kompe.cubed_sphere.global_mesh import GlobalCSMesh
-from kompe.cubed_sphere.global_remapping import _GlobalCSRemapper
-from kompe.math import as_linear_map, identity_linear_map
-from kompe.math.backend import backend_context, get_array_module, to_numpy
-from kompe.math.least_squares_solver import sparse_constrained_least_squares_map
+from kompe.cubed_sphere.global_remapping import GlobalCSRemapper
+from kompe.math import as_linear_map, identity_linear_map, take_linear_map
+from kompe.math.backend import readonly_numpy_array, to_numpy
 
 
 class GlobalCSBasis(SurfaceDifferentialBasis):
@@ -65,8 +62,6 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         DOI: 10.1093/gji/ggx125
     """
 
-    sample_analysis_uses_grid_remapping = True
-
     def __init__(self, cells_per_edge=None, *, mesh=None):
         """Initialize the cubed sphere basis.
 
@@ -89,7 +84,7 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             If ``cells_per_edge`` is not a positive even number.
         """
         self.kind = "CS"
-        self._remapper = _GlobalCSRemapper(self)
+        self.remapper = GlobalCSRemapper()
         self._surface_operator_cache = BoundedCache(16)
 
         if mesh is None:
@@ -118,27 +113,26 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         )
 
     def clear_cache(self, *, shared_remaps=False):
-        """Clear derived operators and matrices owned by this basis.
+        """Clear target-grid caches and the shared mesh's native operators.
 
         Set ``shared_remaps`` to also clear the bounded process-wide cache of
         geometry-only interpolation matrices.
+        Previously returned LinearMaps remain usable.
         """
-        self.__dict__.pop("_native_derivatives", None)
-        self.__dict__.pop("_unit_surface_laplacian_matrix", None)
+        self.mesh.operators.clear_cache()
         self._surface_operator_cache.clear()
-        self._remapper.clear_cache()
+        self.remapper.clear_cache()
         if shared_remaps:
-            self._remapper.clear_shared_cache()
+            self.remapper.clear_shared_cache()
 
     def cache_info(self):
         """Return cache occupancy without exposing mutable cache objects."""
         return {
-            "derivatives_built": "_native_derivatives" in self.__dict__,
-            "laplacian_built": "_unit_surface_laplacian_matrix" in self.__dict__,
+            "mesh_operators": self.mesh.operators.cache_info(),
             "surface_operators": len(self._surface_operator_cache),
             "surface_max_size": self._surface_operator_cache.max_size,
-            "remap_operators": self._remapper.cache_info(),
-            "shared_remap_matrices": self._remapper.shared_cache_info(),
+            "remap_operators": self.remapper.cache_info(),
+            "shared_remap_matrices": self.remapper.shared_cache_info(),
         }
 
     @property
@@ -166,74 +160,51 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
             return build()
         return self._surface_operator_cache.get_or_create(key, build)
 
-    def scalar_evaluation_array(self, grid, derivative=None):
+    def scalar_evaluation_array(self, grid, gradient_component=None, *, persist=True):
         """Materialize the canonical CS scalar evaluation operator."""
-        return self.scalar_evaluation_operator(grid, derivative=derivative).to_array()
+        return self.scalar_evaluation_operator(
+            grid, gradient_component=gradient_component, persist=persist
+        ).to_array()
 
-    def scalar_evaluation_operator(self, grid, derivative=None):
+    def scalar_evaluation_operator(self, grid, gradient_component=None, *, persist=True):
         """Return the cached CS scalar evaluation operator."""
 
         def build():
             if self._is_native_grid(grid):
-                if derivative is None:
+                if gradient_component is None:
                     return identity_linear_map((self.coefficient_count,))
-                elif derivative in {"theta", "phi"}:
-                    matrix = self._native_derivatives[derivative]
+                elif gradient_component in {"theta", "phi"}:
+                    matrix = self.mesh.operators.surface_gradient_matrices()[
+                        0 if gradient_component == "theta" else 1
+                    ]
                 else:
-                    raise ValueError(f'Invalid derivative "{derivative}".')
+                    raise ValueError(f'Invalid gradient_component "{gradient_component}".')
                 return as_linear_map(
                     matrix,
                     input_shape=(self.coefficient_count,),
                     output_shape=(self.coefficient_count,),
                 )
 
-            if derivative is None:
-                return self.scalar_grid_remap_operator(self.native_grid, grid)
-            raise NotImplementedError(
-                "GlobalCSBasis derivative evaluation is currently implemented only "
-                "on the native cubed-sphere grid."
+            if gradient_component is None:
+                return self.remapper.scalar_operator(self.native_grid, grid)
+            if gradient_component not in {"theta", "phi"}:
+                raise ValueError(f'Invalid gradient_component "{gradient_component}".')
+            component = take_linear_map(
+                (2, grid.size), 0 if gradient_component == "theta" else 1, axis=0
             )
+            return component @ self.surface_gradient_operator(grid)
 
-        return self._cached_surface_operator("scalar_evaluation", grid, build, derivative)
+        return self._cached_surface_operator("scalar_evaluation", grid, build, gradient_component)
 
     @cached_property
+    def scalar_constant_coefficients(self):
+        """A unit constant has value one at every native node."""
+        return readonly_numpy_array(np.ones(self.coefficient_count))
+
+    @property
     def scalar_mean_weights(self):
-        """Return area-normalized weights for scalar surface means."""
-        weights = np.asarray(self.mesh.cell_areas.reshape(-1), dtype=float)
-        weights = weights / np.sum(weights)
-        weights.setflags(write=False)
-        return weights
-
-    def scalar_mean(self, coeffs):
-        """Return the area-weighted mean of scalar CS coefficients."""
-        xp = get_array_module(coeffs)
-        values = xp.asarray(coeffs)
-        if values.shape[-1] != self.coefficient_count:
-            raise ValueError(
-                "CS scalar coefficients must have the basis coefficient_count on the last axis."
-            )
-        return xp.tensordot(values, xp.asarray(self.scalar_mean_weights), axes=([-1], [0]))
-
-    def project_scalar_mean_free(self, coeffs):
-        """Project scalar CS coefficients to area-weighted zero mean."""
-        xp = get_array_module(coeffs)
-        values = xp.asarray(coeffs)
-        mean = self.scalar_mean(values)
-        return values - xp.expand_dims(mean, axis=-1)
-
-    def project_helmholtz_mean_free(self, coeffs):
-        """Project both CS Helmholtz potentials to zero mean."""
-        xp = get_array_module(coeffs)
-        values = xp.asarray(coeffs)
-        if values.shape[-1] == self.coefficient_count:
-            return self.project_scalar_mean_free(values)
-        if values.shape[-1] == 2 * self.coefficient_count:
-            original_shape = values.shape
-            reshaped = values.reshape(original_shape[:-1] + (2, self.coefficient_count))
-            return self.project_scalar_mean_free(reshaped).reshape(original_shape)
-        raise ValueError(
-            "CS Helmholtz coefficients must end with coefficient_count or 2*coefficient_count."
-        )
+        """Return the mesh's area-normalized weights for nodal coefficients."""
+        return self.mesh.operators.scalar_mean_weights
 
     def _is_native_grid(self, grid):
         """Return whether ``grid`` matches this basis' native points."""
@@ -246,277 +217,72 @@ class GlobalCSBasis(SurfaceDifferentialBasis):
         grid = SphericalGrid(theta=to_numpy(grid.theta), phi=to_numpy(grid.phi))
         return grid.same_as(self.native_grid)
 
-    def scalar_grid_remap_operator(self, source_grid, target_grid):
-        """Return a cached scalar grid-remap operator."""
-        return self._remapper.scalar_grid_remap_operator(source_grid, target_grid)
-
-    def tangential_grid_remap_operator(self, source_grid, target_grid):
-        """Return a cached tangential grid-remap operator."""
-        return self._remapper.tangential_grid_remap_operator(source_grid, target_grid)
-
-    def _coordinate_derivatives(self):
-        """Return derivatives of xi/eta with respect to theta/phi."""
-        xi, eta, radius, face = np.broadcast_arrays(
-            self.mesh.xi, self.mesh.eta, 1.0, self.mesh.face
-        )
-        xi, eta, radius, face = map(np.ravel, [xi, eta, radius, face])
-
-        pc = self.mesh.projection.cartesian_to_cube_vector_array(xi, eta, radius=radius, face=face)
-        _, theta, phi = self.mesh.projection.cube_to_spherical(xi, eta, face, radius=radius)
-
-        sin_theta, cos_theta = np.sin(theta), np.cos(theta)
-        sin_phi, cos_phi = np.sin(phi), np.cos(phi)
-
-        dx_dtheta = radius * cos_theta * cos_phi
-        dy_dtheta = radius * cos_theta * sin_phi
-        dz_dtheta = -radius * sin_theta
-        dx_dphi = -radius * sin_theta * sin_phi
-        dy_dphi = radius * sin_theta * cos_phi
-        dz_dphi = np.zeros_like(radius)
-
-        dxi_dtheta = pc[:, 0, 0] * dx_dtheta + pc[:, 0, 1] * dy_dtheta + pc[:, 0, 2] * dz_dtheta
-        dxi_dphi = pc[:, 0, 0] * dx_dphi + pc[:, 0, 1] * dy_dphi + pc[:, 0, 2] * dz_dphi
-        deta_dtheta = pc[:, 1, 0] * dx_dtheta + pc[:, 1, 1] * dy_dtheta + pc[:, 1, 2] * dz_dtheta
-        deta_dphi = pc[:, 1, 0] * dx_dphi + pc[:, 1, 1] * dy_dphi + pc[:, 1, 2] * dz_dphi
-
-        # These coefficients immediately enter SciPy sparse matrices. Keep
-        # that CPU boundary explicit when the active numerical backend is JAX.
-        return tuple(to_numpy(values) for values in (dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi))
-
-    @cached_property
-    def _native_derivatives(self):
-        """Build native-grid angular derivative operators."""
-        with backend_context("numpy"):
-            dxi, deta = global_cs_derivative_matrices(
-                self.mesh.projection,
-                self.cells_per_edge,
-            )
-            dxi_dtheta, dxi_dphi, deta_dtheta, deta_dphi = self._coordinate_derivatives()
-
-        dtheta = sp.diags(dxi_dtheta) @ dxi + sp.diags(deta_dtheta) @ deta
-        dphi_unscaled = sp.diags(dxi_dphi) @ dxi + sp.diags(deta_dphi) @ deta
-        # The required even, cell-centred mesh does not sample either pole.
-        sin_theta = np.sin(np.deg2rad(self.mesh.theta))
-
-        # ``phi_unscaled`` is d/dphi. ``phi`` is the azimuthal
-        # surface component sin(theta)^-1 d/dphi used by gradients.
-        return {
-            "theta": dtheta.tocsr(),
-            "phi_unscaled": dphi_unscaled.tocsr(),
-            "phi": (sp.diags(1.0 / sin_theta) @ dphi_unscaled).tocsr(),
-            "sin_theta": sp.diags(sin_theta).tocsr(),
-            "inv_sin_theta": sp.diags(1.0 / sin_theta).tocsr(),
-            "inv_sin2_theta": sp.diags(1.0 / (sin_theta**2)).tocsr(),
-        }
-
-    def surface_gradient_array(self, grid):
+    def surface_gradient_array(self, grid, *, persist=True):
         """Materialize the canonical CS surface-gradient operator."""
-        return self.surface_gradient_operator(grid).to_array()
+        return self.surface_gradient_operator(grid, persist=persist).to_array()
 
-    def surface_gradient_operator(self, grid):
-        """Return the CS surface-gradient operator on ``grid``."""
+    def surface_gradient_operator(self, grid, *, persist=True):
+        """Evaluate the native surface gradient on a target grid."""
 
         def build():
-            derivatives = self._native_derivatives
-            matrix = sp.vstack([derivatives["theta"], derivatives["phi"]], format="csr")
-            native_operator = as_linear_map(
-                matrix,
-                input_shape=(self.coefficient_count,),
-                output_shape=(2, self.coefficient_count),
-            )
+            native = self.mesh.operators.surface_gradient_operator()
             if self._is_native_grid(grid):
-                return native_operator
-            return self.tangential_grid_remap_operator(self.native_grid, grid) @ native_operator
+                return native
+            return self.remapper.tangential_operator(self.native_grid, grid) @ native
 
         return self._cached_surface_operator("surface_gradient", grid, build)
 
-    def rhat_cross_gradient_array(self, grid):
+    def rhat_cross_gradient_array(self, grid, *, persist=True):
         """Materialize the canonical CS rhat-cross-gradient operator."""
-        return self.rhat_cross_gradient_operator(grid).to_array()
+        return self.rhat_cross_gradient_operator(grid, persist=persist).to_array()
 
-    def rhat_cross_gradient_operator(self, grid):
-        """Return the CS rhat-cross-gradient operator on ``grid``."""
+    def rhat_cross_gradient_operator(self, grid, *, persist=True):
+        """Evaluate the native rhat cross gradient on a target grid."""
 
         def build():
-            derivatives = self._native_derivatives
-            matrix = sp.vstack([-derivatives["phi"], derivatives["theta"]], format="csr")
-            native_operator = as_linear_map(
-                matrix,
-                input_shape=(self.coefficient_count,),
-                output_shape=(2, self.coefficient_count),
-            )
+            native = self.mesh.operators.rhat_cross_gradient_operator()
             if self._is_native_grid(grid):
-                return native_operator
-            return self.tangential_grid_remap_operator(self.native_grid, grid) @ native_operator
+                return native
+            return self.remapper.tangential_operator(self.native_grid, grid) @ native
 
         return self._cached_surface_operator("rhat_cross_gradient", grid, build)
 
-    def helmholtz_synthesis_array(self, grid):
+    def helmholtz_synthesis_array(self, grid, *, persist=True):
         """Materialize the canonical CS Helmholtz synthesis operator."""
-        return self.helmholtz_synthesis_operator(grid).to_array()
+        return self.helmholtz_synthesis_operator(grid, persist=persist).to_array()
 
-    def helmholtz_synthesis_operator(self, grid):
-        """Return the CS Helmholtz synthesis operator on ``grid``."""
+    def helmholtz_synthesis_operator(self, grid, *, persist=True):
+        """Evaluate the native helmholtz synthesis on a target grid."""
 
         def build():
-            matrix = self._native_helmholtz_synthesis_matrix()
-            native_operator = as_linear_map(
-                matrix,
-                input_shape=(2, self.coefficient_count),
-                output_shape=(2, self.coefficient_count),
-            )
+            native = self.mesh.operators.helmholtz_synthesis_operator()
             if self._is_native_grid(grid):
-                return native_operator
-            return self.tangential_grid_remap_operator(self.native_grid, grid) @ native_operator
+                return native
+            return self.remapper.tangential_operator(self.native_grid, grid) @ native
 
         return self._cached_surface_operator("helmholtz_synthesis", grid, build)
 
-    def _native_helmholtz_synthesis_matrix(self):
-        """Return the sparse native-grid Helmholtz synthesis matrix."""
-        derivatives = self._native_derivatives
-        theta = derivatives["theta"]
-        phi = derivatives["phi"]
-        return sp.bmat([[-theta, -phi], [-phi, theta]], format="csr")
-
     def helmholtz_analysis_operator(self, grid, *, sqrt_weights=None):
-        """Return sparse constrained native-grid Helmholtz analysis."""
+        """Return sparse constrained analysis on the native grid."""
         if not self._is_native_grid(grid):
             return None
-
-        n = self.coefficient_count
-        synthesis = self._native_helmholtz_synthesis_matrix()
-        normalized_mean = np.sqrt(n) * self.scalar_mean_weights
-        gauges = sp.csr_matrix(
-            np.vstack(
-                [
-                    np.concatenate([normalized_mean, np.zeros(n)]),
-                    np.concatenate([np.zeros(n), normalized_mean]),
-                ]
-            )
-        )
-        return sparse_constrained_least_squares_map(
-            synthesis, gauges, sqrt_weights=sqrt_weights, input_shape=(2, n), output_shape=(2, n)
-        )
-
-    @cached_property
-    def _unit_surface_laplacian_matrix(self):
-        """Return the sparse scalar Laplacian on the unit sphere."""
-        derivatives = self._native_derivatives
-        term_theta = (
-            derivatives["inv_sin_theta"]
-            @ derivatives["theta"]
-            @ derivatives["sin_theta"]
-            @ derivatives["theta"]
-        )
-        term_phi = (
-            derivatives["inv_sin2_theta"]
-            @ derivatives["phi_unscaled"]
-            @ derivatives["phi_unscaled"]
-        )
-        return (term_theta + term_phi).tocsr()
+        return self.mesh.operators.helmholtz_analysis_operator(sqrt_weights=sqrt_weights)
 
     def surface_laplacian_operator(self, r=1.0):
-        """Return the native sparse scalar Laplacian operator."""
-        r = float(r)
-        unit_laplacian = as_linear_map(
-            self._unit_surface_laplacian_matrix,
-            input_shape=(self.coefficient_count,),
-            output_shape=(self.coefficient_count,),
-        )
-        return unit_laplacian if r == 1.0 else (1.0 / r**2) * unit_laplacian
+        """Apply the mesh's collocated Laplacian to nodal coefficients."""
+        return self.mesh.operators.surface_laplacian_operator(r)
 
     def mean_free_surface_poisson_operator(self, r=1.0):
-        """Return the mean-zero inverse of the discrete Laplacian."""
-        r = float(r)
-        laplacian = self._unit_surface_laplacian_matrix
-        if r != 1.0:
-            laplacian = (laplacian / r**2).tocsr()
-        n = self.coefficient_count
-        normalized_mean = np.sqrt(n) * self.scalar_mean_weights
-        gauge = sp.csr_matrix(normalized_mean.reshape(1, n))
-        return sparse_constrained_least_squares_map(
-            laplacian, gauge, input_shape=(n,), output_shape=(n,)
-        )
+        """Invert the native Laplacian with zero area mean."""
+        return self.mesh.operators.mean_free_surface_poisson_operator(r)
 
-    def interpolate_vector(
-        self, u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
-    ):
-        """Interpolate canonical spherical vector components.
+    def scalar_smoothness_operator(self):
+        """Return the mesh's area-weighted scalar-gradient penalty."""
+        return self.mesh.operators.scalar_smoothness_operator()
 
-        Interpolates ``(theta, phi, radial)`` components defined on spherical
-        coordinates to target spherical coordinates. Extra trailing dimensions on the
-        component arrays are treated as independent vector fields and
-        interpolated in one call.
-
-        Broadcasting rules apply for input and output separately.
-
-        Parameters
-        ----------
-        u_theta : array
-            Array of southward components.
-        u_phi : array
-            Array of eastward components.
-        u_radial : array
-            Array of radial components.
-        theta : array
-            Array of coordinates for components.
-        phi : array
-            Array of coordinates for vector components.
-        theta_target : array
-            Array of target coordinates.
-        phi_target : array
-            Array of target coordinates.
-
-        **kwargs
-            Passed to scipy.interpolate.griddata which performs the
-            interpolation on each face.
-
-        Returns
-        -------
-        interpolated_vector : array
-            Tuple of interpolated ``(theta, phi, radial)`` components.
-        """
-        with backend_context("numpy"):
-            return self._remapper.interpolate_vector(
-                u_theta, u_phi, u_radial, theta, phi, theta_target, phi_target, **kwargs
-            )
-
-    def interpolate_scalar(self, scalar, theta, phi, theta_target, phi_target, **kwargs):
-        """Interpolate scalar values.
-
-        Interpolate scalar values defined on (`theta`, `phi`) to given
-        spherical coordinates.  Extra trailing dimensions on ``scalar``
-        are treated as independent scalar fields and interpolated in
-        one call.
-
-        Broadcasting rules apply for input and output separately.
-
-        Parameters
-        ----------
-        scalar : array
-            Array of scalar values.
-        theta : array
-            Array of coordinates for components.
-        phi : array
-            Array of coordinates for vector components.
-        theta_target : array
-            Array of target coordinates.
-        phi_target : array
-            Array of target coordinates.
-
-        **kwargs
-            Passed to scipy.interpolate.griddata which performs the
-            interpolation on each face.
-
-        Returns
-        -------
-        interpolated_scalar : array
-            Interpolated scalar values.
-        """
-        with backend_context("numpy"):
-            return self._remapper.interpolate_scalar(
-                scalar, theta, phi, theta_target, phi_target, **kwargs
-            )
+    def helmholtz_smoothness_operator(self):
+        """Return the mesh's area-weighted div-curl penalty."""
+        return self.mesh.operators.helmholtz_smoothness_operator()
 
 
 __all__ = ["GlobalCSBasis"]

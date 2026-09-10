@@ -20,12 +20,13 @@ import numpy as _np
 JAX_AVAILABLE = find_spec("jax") is not None
 _jax_namespace: types.ModuleType | None = None
 _jax_array_type: tuple[type, ...] = ()
+_jax_tracer_type: tuple[type, ...] = ()
 _jax_import_lock = RLock()
 
 
 def _load_jax() -> types.ModuleType:
     """Import JAX on first use without changing process-wide configuration."""
-    global _jax_array_type, _jax_namespace
+    global _jax_array_type, _jax_namespace, _jax_tracer_type
 
     if not JAX_AVAILABLE:
         raise RuntimeError("JAX is not installed; cannot enable JAX backend.")
@@ -38,11 +39,13 @@ def _load_jax() -> types.ModuleType:
         try:
             import jax.numpy as jnp
             from jax import Array as JaxArray
+            from jax.core import Tracer
         except ImportError as exc:  # pragma: no cover - broken optional install
             raise RuntimeError("JAX is installed but could not be imported.") from exc
 
         _jax_namespace = jnp
         _jax_array_type = (JaxArray,)
+        _jax_tracer_type = (Tracer,)
         return _jax_namespace
 
 
@@ -53,6 +56,11 @@ def _is_jax_array(array: Any) -> bool:
         return False
     _load_jax()
     return isinstance(array, _jax_array_type)
+
+
+def _is_jax_tracer(array: Any) -> bool:
+    """Identify temporary traced values that must not enter Python caches."""
+    return _is_jax_array(array) and isinstance(array, _jax_tracer_type)
 
 
 _USE_JAX = JAX_AVAILABLE and os.environ.get("KOMPE_USE_JAX", "").strip().lower() in {
@@ -190,6 +198,21 @@ def readonly_numpy_array(values: Any, *, dtype=None) -> _np.ndarray:
     array = _np.array(values, dtype=dtype, copy=True, order="C")
     array.setflags(write=False)
     return array
+
+
+def immutable_array(values: Any) -> Any:
+    """Keep fixed numerical configuration on its backend, owning mutable input.
+
+    NumPy needs an owned read-only copy; JAX arrays are already immutable.
+    NumPy-to-JAX conversion must also copy: on the CPU, asarray can otherwise
+    borrow the caller's mutable NumPy buffer.
+    This prevents cached factors and their right-hand sides from acquiring
+    different weights when the caller later edits its original array.
+    """
+    xp = get_array_module(values)
+    if xp is _np:
+        return readonly_numpy_array(values)
+    return xp.asarray(values) if _is_jax_array(values) else xp.array(values, copy=True)
 
 
 __all__ = [

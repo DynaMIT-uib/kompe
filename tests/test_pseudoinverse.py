@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from kompe.math import backend_context, get_array_module, pseudoinverse, weighted_tensor_pinv
+from kompe.math import backend_context, get_array_module, tensor_pinv, weighted_tensor_pinv
 
 
 def test_weighted_tensor_pinv_matches_explicit_weighted_least_squares():
@@ -12,7 +12,7 @@ def test_weighted_tensor_pinv_matches_explicit_weighted_least_squares():
     sqrt_weights = np.array([1.0, 1.5, 2.0, 2.5])
     weight_matrix = np.diag(sqrt_weights**2)
 
-    actual = weighted_tensor_pinv(A, sqrt_weights=sqrt_weights, n_leading_flattened=1)
+    actual = weighted_tensor_pinv(A, sqrt_weights=sqrt_weights)
     expected = np.linalg.solve(A.T @ weight_matrix @ A, A.T @ weight_matrix)
 
     np.testing.assert_allclose(actual, expected)
@@ -21,10 +21,8 @@ def test_weighted_tensor_pinv_matches_explicit_weighted_least_squares():
 @pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
 @pytest.mark.parametrize("shape, leading", [((6, 4), 1), ((2, 3, 4), 2), ((2, 3, 2, 2), 2)])
 @pytest.mark.parametrize("complex_values", [False, True])
-def test_weighted_tensor_pinv_reuses_tensor_analysis(
-    monkeypatch, backend, shape, leading, complex_values
-):
-    """Weighting preserves axes and uses one canonical pseudoinverse."""
+def test_weighted_tensor_pinv_preserves_tensor_axes(backend, shape, leading, complex_values):
+    """Weighted analysis preserves scientific axes and complex adjoints."""
     rng = np.random.default_rng(123)
     values = rng.normal(size=shape)
     if complex_values:
@@ -34,22 +32,13 @@ def test_weighted_tensor_pinv_reuses_tensor_analysis(
     rtol = 1e-12
     matrix = values.reshape(weights.size, -1)
     expected = np.linalg.pinv(weights[:, None] * matrix, rtol=rtol) * weights
-    calls = []
-    tensor_pinv = pseudoinverse.tensor_pinv
-
-    def record_tensor_pinv(A, n_leading_flattened=2, rtol=1e-15):
-        calls.append((A.shape, n_leading_flattened, rtol))
-        return tensor_pinv(A, n_leading_flattened=n_leading_flattened, rtol=rtol)
-
-    monkeypatch.setattr(pseudoinverse, "tensor_pinv", record_tensor_pinv)
     with backend_context(backend):
         xp = get_array_module()
         actual = weighted_tensor_pinv(
-            xp.asarray(values), xp.asarray(weights), n_leading_flattened=leading, rtol=rtol
+            xp.asarray(values), xp.asarray(weights), output_ndim=leading, rtol=rtol
         )
         assert isinstance(actual, xp.ndarray)
 
-    assert calls == [(shape, leading, rtol)]
     assert actual.shape == coefficient_shape + data_shape
     np.testing.assert_allclose(actual, expected.reshape(actual.shape), rtol=1e-12, atol=1e-12)
 
@@ -60,7 +49,7 @@ def test_weighted_tensor_pinv_without_weights_preserves_cutoff(backend):
     with backend_context(backend):
         xp = get_array_module()
         values = xp.asarray([[2.0, 0.0], [0.0, 1e-8]])
-        actual = weighted_tensor_pinv(values, n_leading_flattened=1, rtol=1e-6)
+        actual = weighted_tensor_pinv(values, rtol=1e-6)
         assert isinstance(actual, xp.ndarray)
     np.testing.assert_allclose(actual, np.diag([0.5, 0.0]), atol=1e-12)
 
@@ -75,6 +64,42 @@ def test_explicit_jax_weights_preserve_jax_analysis(monkeypatch):
 
     with backend_context("numpy"):
         monkeypatch.setattr(np.linalg, "pinv", fail_numpy_pinv)
-        result = weighted_tensor_pinv(np.eye(2), jnp.asarray([1.0, 0.0]), n_leading_flattened=1)
+        result = weighted_tensor_pinv(np.eye(2), jnp.asarray([1.0, 0.0]))
         assert isinstance(result, jnp.ndarray)
     np.testing.assert_allclose(result, np.diag([1.0, 0.0]), atol=1e-12)
+
+
+@pytest.mark.parametrize("hermitian", [False, True])
+def test_tensor_pinv_defaults_to_matrix_inverse(hermitian):
+    xp = get_array_module()
+    A = xp.asarray([[2.0, 1.0j], [-1.0j, 2.0]])
+    inverse = tensor_pinv(A, hermitian=hermitian)
+    assert isinstance(inverse, xp.ndarray)
+    np.testing.assert_allclose(A @ inverse, np.eye(2), atol=1e-12)
+    np.testing.assert_allclose(inverse @ A, np.eye(2), atol=1e-12)
+
+
+@pytest.mark.parametrize("shape, output_ndim", [((2, 3, 2, 2), 2), ((6,), 0), ((6,), 1), ((), 0)])
+@pytest.mark.parametrize("complex_values", [False, True])
+def test_tensor_pinv_satisfies_moore_penrose_identities(shape, output_ndim, complex_values):
+    xp = get_array_module()
+    rng = np.random.default_rng(125)
+    values = rng.normal(size=shape)
+    if complex_values:
+        values = values + 1j * rng.normal(size=shape)
+    output_shape, input_shape = shape[:output_ndim], shape[output_ndim:]
+    inverse = tensor_pinv(xp.asarray(values), output_ndim=output_ndim)
+    assert inverse.shape == input_shape + output_shape
+    assert isinstance(inverse, xp.ndarray)
+    A = values.reshape(int(np.prod(output_shape)), int(np.prod(input_shape)))
+    P = np.asarray(inverse).reshape(A.shape[::-1])
+    np.testing.assert_allclose(A @ P @ A, A, atol=1e-12)
+    np.testing.assert_allclose(P @ A @ P, P, atol=1e-12)
+    np.testing.assert_allclose((A @ P).conj().T, A @ P, atol=1e-12)
+    np.testing.assert_allclose((P @ A).conj().T, P @ A, atol=1e-12)
+
+
+@pytest.mark.parametrize("output_ndim", [-1, 3])
+def test_tensor_pinv_rejects_invalid_axis_split(output_ndim):
+    with pytest.raises(ValueError, match="output_ndim"):
+        tensor_pinv(np.eye(2), output_ndim=output_ndim)

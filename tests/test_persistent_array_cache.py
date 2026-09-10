@@ -103,7 +103,7 @@ def test_transform_reuses_persisted_normal_pinv(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("persisted normal pseudo-inverse was rebuilt"),
     )
     monkeypatch.setattr(
-        "kompe.spherical_transform._scalar_data_normal_matrix",
+        "kompe.math.linear_map.LinearMap.normal_operator",
         lambda *_args, **_kwargs: pytest.fail("normal matrix was rebuilt on a cache hit"),
     )
     second_basis = SHBasis(3, 3, mean_free=True, operator_cache=cache)
@@ -126,7 +126,7 @@ def test_transform_reuses_persisted_helmholtz_factor(tmp_path, monkeypatch):
 
     assert any((cache.directory / "least_squares_factor").glob("*.npy"))
     monkeypatch.setattr(
-        "kompe.spherical_transform._helmholtz_normal_factor",
+        "kompe.spherical_transform.cholesky",
         lambda *_args, **_kwargs: pytest.fail("persisted Cholesky factor was rebuilt"),
     )
     second_basis = SHBasis(3, 3, mean_free=True, operator_cache=cache)

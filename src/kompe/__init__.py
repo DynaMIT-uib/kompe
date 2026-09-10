@@ -3,12 +3,14 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from kompe.basis import ScalarBasis, SurfaceDifferentialBasis
-from kompe.coefficients import CoefficientSpace, FieldCoefficients
+from kompe.coefficients import CoefficientSpace
 from kompe.constants import EARTH_RADIUS_M, MU0
 from kompe.cubed_sphere import (
     GlobalCSBasis,
     GlobalCSMesh,
+    GlobalCSOperators,
     GlobalCSProjection,
+    GlobalCSRemapper,
     RegionalCSMesh,
     RegionalCSMeshSpec,
     RegionalCSOperators,
@@ -30,10 +32,11 @@ __all__ = [
     "EARTH_RADIUS_M",
     "MU0",
     "CoefficientSpace",
-    "FieldCoefficients",
     "GlobalCSBasis",
     "GlobalCSMesh",
+    "GlobalCSOperators",
     "GlobalCSProjection",
+    "GlobalCSRemapper",
     "RegionalCSMesh",
     "RegionalCSMeshSpec",
     "RegionalCSOperators",

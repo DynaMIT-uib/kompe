@@ -59,7 +59,10 @@ interactively.
 - Test mathematical identities, coordinate conventions, operator action, numerical accuracy,
   and rank-deficient or boundary cases at the level where they matter. Exercise portable
   numerical paths with both NumPy and JAX, and test structured operators without requiring
-  unnecessary dense materialization.
+  unnecessary dense materialization. For numerical changes, include independent identities
+  or manufactured solutions rather than only comparisons to the previous implementation.
+  Keep tests with the package that owns the mathematical contract; test current behavior,
+  not the historical names of removed APIs.
 
 Preserve numerical behavior, performance, and backend compatibility, and run the relevant tests
 after changes.

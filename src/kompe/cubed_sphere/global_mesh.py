@@ -96,7 +96,7 @@ class GlobalCSMesh(StructuredSurfaceMesh):
 
     @property
     def shape(self):
-        """Logical ``(face, eta, xi)`` cell shape."""
+        """Logical ``(face, xi, eta)`` cell shape."""
         return (6, int(self.cells_per_edge), int(self.cells_per_edge))
 
     @cached_property
@@ -107,6 +107,13 @@ class GlobalCSMesh(StructuredSurfaceMesh):
             phi=self.phi,
             area_weights=self._cell_areas,
         )
+
+    @cached_property
+    def operators(self):
+        """Native differential operators shared by users of this mesh."""
+        from kompe.cubed_sphere.global_operators import GlobalCSOperators
+
+        return GlobalCSOperators(self)
 
     @property
     def cell_areas(self):

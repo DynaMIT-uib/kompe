@@ -9,12 +9,6 @@ from kompe.spherical_coordinates import ecef_to_enu
 DEGREES_TO_RADIANS = np.pi / 180
 
 
-def _clip_dot_product(x):
-    """Keep spherical dot products inside the roundoff-safe cosine range."""
-    xp = get_array_module(x)
-    return xp.clip(x, -1.0, 1.0)
-
-
 def _unit_ecef_vectors(xp, latitude, longitude):
     """Return unit ECEF position vectors for geographic coordinates."""
     latitude = xp.asarray(latitude).reshape(-1) * DEGREES_TO_RADIANS
@@ -43,20 +37,21 @@ def _spherical_secs_geometry(lat, lon, pole_latitudes, pole_longitudes):
         * evaluation_position[:, None, :]
     )
     poleward_norm = xp.linalg.norm(poleward_ecef, axis=-1)[..., None]
-    if xp is np:
-        with np.errstate(invalid="ignore", divide="ignore"):
-            poleward_ecef = poleward_ecef / poleward_norm
-    else:
-        poleward_ecef = poleward_ecef / poleward_norm
+    # The tangent length is sin(theta); atan2 retains small separations
+    # that arccos(dot) would round to zero. Reuse the geometry already built.
+    theta = xp.arctan2(
+        poleward_norm[..., 0], xp.einsum("ni,pi->np", evaluation_position, pole_position)
+    )
+    # At coincidence the direction is undefined. Keep its zero tangent so
+    # regularized currents and off-sheet magnetic fields have their exact
+    # zero horizontal limit; an infinite unregularized kernel stays singular.
+    poleward_ecef = poleward_ecef / xp.where(poleward_norm == 0, 1.0, poleward_norm)
 
     poleward_enu = ecef_to_enu(
         poleward_ecef,
         xp.asarray(lat).reshape(-1, 1),
         xp.asarray(lon).reshape(-1, 1),
     )[..., :2]
-    theta = xp.arccos(
-        _clip_dot_product(xp.einsum("ni,pi->np", evaluation_position, pole_position))
-    )
     return xp, evaluation_position, poleward_enu, theta
 
 
@@ -71,9 +66,11 @@ def angular_distance(lat, lon, pole_latitudes, pole_longitudes, return_degrees=F
     xp = get_array_module(lat, lon, pole_latitudes, pole_longitudes)
     evaluation_position = _unit_ecef_vectors(xp, lat, lon)
     pole_position = _unit_ecef_vectors(xp, pole_latitudes, pole_longitudes)
-    theta = xp.arccos(
-        _clip_dot_product(xp.einsum("ni,pi->np", evaluation_position, pole_position))
-    )
+    # Half-chords resolve both coincident and antipodal limits without
+    # constructing the tangent directions needed by the vector kernels.
+    difference = pole_position[None, :, :] - evaluation_position[:, None, :]
+    total = pole_position[None, :, :] + evaluation_position[:, None, :]
+    theta = 2 * xp.arctan2(xp.linalg.norm(difference, axis=-1), xp.linalg.norm(total, axis=-1))
 
     if return_degrees:
         theta = theta / DEGREES_TO_RADIANS
@@ -92,22 +89,27 @@ def scalar_green_matrix(
 ):
     """Return a scalar SECS Green matrix.
 
-    ``quantity="potential"`` returns the potential whose negative surface
-    gradient gives curl-free SECS current. ``quantity="current_magnitude"``
-    returns the scalar ``cot(theta/2)`` profile shared by the horizontal
-    current kernels before direction and radius scaling are applied.
+    ``quantity="curl_free_potential"`` returns Phi with J_cf = -grad_s(Phi).
+    ``quantity="divergence_free_potential"`` returns Psi with
+    J_df = rhat x grad_s(Psi), using Kompe's shared Helmholtz signs.
+    ``quantity="current_profile"`` returns the cot(theta/2) profile before
+    direction and 1/radius scaling. A sum of these profiles is not the
+    magnitude of the summed vector current.
     """
     theta = angular_distance(lat, lon, pole_latitudes, pole_longitudes)
     xp = get_array_module(theta)
 
-    if quantity == "potential":
+    if quantity in {"curl_free_potential", "divergence_free_potential"}:
+        sign = -1 if quantity == "curl_free_potential" else 1
         if xp is np:
             with np.errstate(divide="ignore"):
-                return -2 * normalization * xp.log(xp.sin(theta / 2))
-        return -2 * normalization * xp.log(xp.sin(theta / 2))
-    if quantity == "current_magnitude":
+                return sign * 2 * normalization * xp.log(xp.sin(theta / 2))
+        return sign * 2 * normalization * xp.log(xp.sin(theta / 2))
+    if quantity == "current_profile":
         return normalization / xp.tan(theta / 2)
-    raise ValueError('quantity must be "potential" or "current_magnitude"')
+    raise ValueError(
+        'quantity must be "curl_free_potential", "divergence_free_potential", or "current_profile"'
+    )
 
 
 def surface_current_matrices(
@@ -240,22 +242,25 @@ def magnetic_field_matrices(
         s = xp.minimum(evaluation_radius, source_radius) / xp.maximum(
             evaluation_radius, source_radius
         )
-        root = xp.sqrt(1 + s**2 - 2 * s * xp.cos(theta))
+        sin_half_squared = xp.sin(theta / 2) ** 2
+        root = xp.sqrt((1 - s) ** 2 + 4 * s * sin_half_squared)
 
         Ar = MU0 * normalization / evaluation_radius  # common factor radial direction
-        Sr = xp.where(below_current_sheet[:, None], 1 / root - 1, s / root - s)
+        # Rationalized forms of equations 2.13--2.14 retain the small-angle
+        # and small-radius-ratio limits without subtracting nearly equal terms.
+        cos_theta = xp.cos(theta)
+        Sr = s * (2 * cos_theta - s) / (root * (1 + root))
+        Sr = xp.where(below_current_sheet[:, None], Sr, s * Sr)
         Gr = Ar * Sr
 
-        An_ = (
-            MU0 * normalization / (evaluation_radius * xp.sin(theta))
-        )  # common factor local northward (note sign difference wrt theta) direction
-        cos_theta = xp.cos(theta)
-        Sn_ = xp.where(
-            below_current_sheet[:, None],
-            (s - cos_theta) / root + cos_theta,
-            (1 - s * cos_theta) / root - 1,
+        # Positive here means poleward, opposite to the local theta direction.
+        denominator = root * ((1 - s) + 2 * s * sin_half_squared + root)
+        Gn_ = (
+            Ar
+            * xp.sin(theta)
+            / denominator
+            * xp.where(below_current_sheet[:, None], s * (1 + root), -(s**2))
         )
-        Gn_ = An_ * Sn_
 
         # calculate geo east, north:
         Ge = Gn_ * poleward_enu[:, :, 0]
@@ -273,14 +278,14 @@ def magnetic_field_matrices(
             Ge_ = xp.where(theta < theta0, regularized, Ge_)
 
         # zero below current sheet:
-        Ge_ = Ge_ * (~below_current_sheet[:, None])
+        Ge_ = xp.where(below_current_sheet[:, None], 0.0, Ge_)
 
         # calculate geo east, north, radial:
         Ge = (
             Ge_ * poleward_enu[:, :, 1]
         )  # eastward component of poleward_enu is northward in the local azimuthal direction
         Gn = -Ge_ * poleward_enu[:, :, 0]
-        Gr = Ge_ * 0  # no radial component
+        Gr = xp.zeros_like(Ge_)  # no radial component, even on the singular axis
 
     else:
         raise ValueError('current_type must be "divergence_free" or "curl_free"')

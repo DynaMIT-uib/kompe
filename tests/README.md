@@ -5,6 +5,15 @@ meshes, bases, transforms, SECS kernels, linear maps, and least-squares
 solvers. Large modules keep closely coupled identities together and use short
 section headings to separate independent numerical contracts.
 
+`test_basis_operators.py` covers operator-only expansions and coefficient
+restrictions without dense parents. `test_smoothness.py` checks spherical
+energies against analytical fields and regularized fits against independently
+assembled objectives.
+`test_constrained_least_squares.py` checks sparse and dense constrained fits
+against independent coordinates, including cache ownership and adjoints.
+`test_jax_iterative.py` covers compiled LSMR/CGLS, independent RHS convergence,
+damping, precision, and compiled-cache lifetime.
+
 Tests should state deterministic coordinates, coefficients, and tolerances
 near the equations they exercise. Diagnostic plotting and exploratory random
 sampling belong in examples or notebooks unless the plotting operation itself

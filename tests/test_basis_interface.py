@@ -40,8 +40,6 @@ def test_public_sphere_package_is_canonical():
     assert ScalarBasis is kompe.ScalarBasis
     assert "BasisSubset" not in kompe.__all__
     assert not hasattr(kompe, "BasisSubset")
-    assert not hasattr(kompe, "SphericalBasis")
-    assert not hasattr(kompe, "SphericalRepresentation")
     assert isinstance(kompe.__version__, str)
 
 
@@ -131,8 +129,10 @@ def test_helmholtz_materialization_preserves_sample_axes(sample_shape):
     """Custom bases can retain grid axes without changing materialized action."""
 
     class ShapedSHBasis(SHBasis):
-        def scalar_evaluation_array(self, grid, derivative=None):
-            values = super().scalar_evaluation_array(grid, derivative=derivative)
+        def scalar_evaluation_array(self, grid, gradient_component=None, *, persist=True):
+            values = super().scalar_evaluation_array(
+                grid, gradient_component=gradient_component, persist=persist
+            )
             return values.reshape(grid.shape + (self.coefficient_count,))
 
     xp = get_array_module()
@@ -253,7 +253,7 @@ def test_custom_bases_must_define_coefficient_identity():
     """Matching index names and sizes alone do not identify a basis."""
 
     class MissingIdentity(ScalarBasis):
-        def scalar_evaluation_array(self, grid, derivative=None):
+        def scalar_evaluation_array(self, grid, gradient_component=None, *, persist=True):
             return np.ones((grid.size, 1))
 
     with pytest.raises(TypeError, match="coefficient_space_signature"):
@@ -266,8 +266,8 @@ def test_surface_operator_builders_match_component_arrays():
     grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
 
     G = cs_basis.scalar_evaluation_array(grid)
-    G_theta = cs_basis.scalar_evaluation_array(grid, derivative="theta")
-    G_phi = cs_basis.scalar_evaluation_array(grid, derivative="phi")
+    G_theta = cs_basis.scalar_evaluation_array(grid, gradient_component="theta")
+    G_phi = cs_basis.scalar_evaluation_array(grid, gradient_component="phi")
     gradient = cs_basis.surface_gradient_array(grid)
     rotated = cs_basis.rhat_cross_gradient_array(grid)
     helmholtz = cs_basis.helmholtz_synthesis_array(grid)
@@ -282,8 +282,8 @@ def test_surface_operator_builders_match_component_arrays():
     np.testing.assert_allclose(laplacian_matrix, laplacian.to_matrix())
 
     evaluator = SphericalTransform(cs_basis, grid)
-    np.testing.assert_allclose(evaluator.theta_derivative_array, G_theta)
-    np.testing.assert_allclose(evaluator.phi_derivative_array, G_phi)
+    np.testing.assert_allclose(evaluator.gradient_theta_array, G_theta)
+    np.testing.assert_allclose(evaluator.gradient_phi_array, G_phi)
 
 
 @pytest.mark.parametrize("basis_kind", ["CS", "SH"])
@@ -375,7 +375,7 @@ def test_csbasis_evaluates_with_finite_difference_derivatives():
     expected_dtheta = -np.sin(np.deg2rad(cs_basis.mesh.theta))
 
     G = cs_basis.scalar_evaluation_array(grid)
-    G_theta = cs_basis.scalar_evaluation_array(grid, derivative="theta")
+    G_theta = cs_basis.scalar_evaluation_array(grid, gradient_component="theta")
 
     np.testing.assert_allclose(G @ constant, constant)
     np.testing.assert_allclose(G_theta @ constant, 0.0, atol=1e-12)
@@ -436,14 +436,6 @@ def test_csbasis_vector_coordinate_transforms_round_trip():
     enu_to_cube = cs_basis.mesh.projection.enu_to_cube_vector_array(xi, eta, face=block)
     cube_to_enu = cs_basis.mesh.projection.cube_to_enu_vector_array(xi, eta, face=block)
 
-    for removed_name in (
-        "spherical_to_cube_vector_matrix",
-        "cube_to_spherical_vector_matrix",
-        "spherical_normalization_matrix",
-    ):
-        assert not hasattr(cs_basis.mesh.projection, removed_name)
-    assert not hasattr(cs_basis, "interpolate_vector_components")
-
     np.testing.assert_allclose(np.einsum("nij,njk->nik", pc, pc_inv), identity, atol=1e-12)
     np.testing.assert_allclose(
         np.einsum("nij,njk->nik", enu_to_cube, cube_to_enu), identity, atol=1e-12
@@ -463,13 +455,15 @@ def test_csbasis_non_native_scalar_evaluation_uses_interpolation():
     coeffs = np.sin(np.deg2rad(cs_basis.mesh.theta))
 
     G = cs_basis.scalar_evaluation_array(target)
-    expected = cs_basis.interpolate_scalar(
+    expected = cs_basis.remapper.interpolate_scalar(
         coeffs, cs_basis.mesh.theta, cs_basis.mesh.phi, target.theta, target.phi
     )
 
     np.testing.assert_allclose(G @ coeffs, expected)
-    with pytest.raises(NotImplementedError, match="native cubed-sphere grid"):
-        cs_basis.scalar_evaluation_array(target, derivative="theta")
+    np.testing.assert_allclose(
+        cs_basis.scalar_evaluation_operator(target, gradient_component="theta")(coeffs),
+        cs_basis.surface_gradient_operator(target)(coeffs)[0],
+    )
 
 
 def test_csbasis_non_native_helmholtz_uses_vector_interpolation():
@@ -491,7 +485,7 @@ def test_csbasis_non_native_helmholtz_uses_vector_interpolation():
     native_vector = np.tensordot(native_helmholtz, coeffs, 2)
     actual = np.tensordot(target_helmholtz, coeffs, 2)
 
-    expected_theta, expected_phi, _ = cs_basis.interpolate_vector(
+    expected_theta, expected_phi, _ = cs_basis.remapper.interpolate_vector(
         native_vector[0],
         native_vector[1],
         np.zeros_like(native_vector[0]),
@@ -523,7 +517,7 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
     )
     fields_radial = np.zeros_like(fields_theta)
 
-    multi = cs_basis.interpolate_vector(
+    multi = cs_basis.remapper.interpolate_vector(
         fields_theta,
         fields_phi,
         fields_radial,
@@ -533,7 +527,7 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
         phi,
     )
     per_field = [
-        cs_basis.interpolate_vector(
+        cs_basis.remapper.interpolate_vector(
             fields_theta[:, i],
             fields_phi[:, i],
             fields_radial[:, i],
@@ -553,21 +547,25 @@ def test_csbasis_multi_vector_interpolation_matches_per_field_calls():
 # Analysis weights and regularization boundaries
 
 
-def test_grid_basis_regularization_requires_a_natural_smoothness_norm():
-    """Regularization declares basis-specific smoothness support."""
+def test_grid_basis_regularization_uses_native_sparse_smoothness():
+    """CS penalties retain the mesh's discrete surface energies."""
     cs_basis = GlobalCSBasis(8)
     evaluator = SphericalTransform(
         cs_basis, SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi), reg_lambda=1.0
     )
 
-    with pytest.raises(NotImplementedError, match="surface smoothness weights"):
-        _ = evaluator.scalar_regularization_operator
-    with pytest.raises(NotImplementedError, match="surface smoothness weights"):
-        _ = evaluator.helmholtz_regularization_operator
+    scalar = evaluator.scalar_regularization_operator
+    helmholtz = evaluator.helmholtz_regularization_operator
+    assert scalar is cs_basis.mesh.operators.scalar_smoothness_operator()
+    assert helmholtz is cs_basis.mesh.operators.helmholtz_smoothness_operator()
+    assert scalar.shape == (2 * cs_basis.coefficient_count, cs_basis.coefficient_count)
+    assert helmholtz.input_shape == (2, cs_basis.coefficient_count)
+    assert scalar.materialized_matrix is None
+    assert helmholtz.materialized_matrix is None
 
 
-def test_area_weight_defaults_use_grid_areas_or_sin_theta():
-    """Default area weights use CS areas or sin(theta) grid weights."""
+def test_area_weighting_requires_a_supplied_measure():
+    """Coordinates do not determine whether sampling is uniform in theta or area."""
     cs_basis = GlobalCSBasis(4)
     cs_grid = SphericalGrid(
         theta=cs_basis.mesh.theta,
@@ -581,9 +579,28 @@ def test_area_weight_defaults_use_grid_areas_or_sin_theta():
     np.testing.assert_allclose(
         grid_sqrt_area_weights(cs_grid), np.sqrt(cs_basis.mesh.cell_areas.reshape(-1))
     )
-    np.testing.assert_allclose(
-        grid_sqrt_area_weights(regular_grid), np.sqrt(np.sin(np.deg2rad(regular_grid.theta)))
+    with pytest.raises(ValueError, match="grid.area_weights"):
+        grid_sqrt_area_weights(regular_grid)
+    with pytest.raises(ValueError, match="grid.area_weights"):
+        SphericalTransform(SHBasis(1, 1), regular_grid, area_weighted=True)
+    # Explicit residual weights remain valid even when points have no measure.
+    transform = SphericalTransform(
+        SHBasis(1, 1), regular_grid, area_weighted=True, sqrt_weights=np.ones(3)
     )
+    np.testing.assert_array_equal(transform.sqrt_weights, np.ones(3))
+
+
+def test_equal_area_quadrature_recovers_the_spherical_mean():
+    """The sphere average of cos(theta)^2 is 1/3, not the sin-weighted 1/4."""
+    z = (np.arange(2000) + 0.5) / 1000 - 1
+    grid = SphericalGrid(
+        theta=np.rad2deg(np.arccos(z)),
+        phi=np.arange(z.size) * 137.507764,
+        area_weights=np.full(z.size, 4 * np.pi / z.size),
+    )
+    transform = SphericalTransform(SHBasis(0, 0, mean_free=False), grid, area_weighted=True)
+    values = transform.synthesize_scalar(transform.analyze_scalar(z**2))
+    np.testing.assert_allclose(values, 1 / 3, atol=1e-7)
 
 
 def test_area_weight_option_and_explicit_weights_override():
@@ -634,8 +651,8 @@ def test_csbasis_derivatives_match_first_spherical_harmonics():
         (z, -np.sin(theta), np.zeros_like(theta), -2 * z),
     ]
 
-    G_theta = cs_basis.scalar_evaluation_array(grid, derivative="theta")
-    G_phi = cs_basis.scalar_evaluation_array(grid, derivative="phi")
+    G_theta = cs_basis.scalar_evaluation_array(grid, gradient_component="theta")
+    G_phi = cs_basis.scalar_evaluation_array(grid, gradient_component="phi")
     laplacian = cs_basis.surface_laplacian_operator()
 
     for values, expected_theta, expected_phi, expected_laplacian in fields:
@@ -656,9 +673,11 @@ def test_csbasis_derivative_convergence_rates_are_reasonable():
         values_l1 = sin_theta * np.cos(phi)
         values_l2 = sin_theta**2 * np.cos(2 * phi)
 
-        theta_error = cs_basis.scalar_evaluation_array(grid, derivative="theta") @ values_l1
+        theta_error = (
+            cs_basis.scalar_evaluation_array(grid, gradient_component="theta") @ values_l1
+        )
         theta_error -= np.cos(theta) * np.cos(phi)
-        phi_error = cs_basis.scalar_evaluation_array(grid, derivative="phi") @ values_l1
+        phi_error = cs_basis.scalar_evaluation_array(grid, gradient_component="phi") @ values_l1
         phi_error -= -np.sin(phi)
         laplacian_l1_error = cs_basis.surface_laplacian_operator() @ values_l1
         laplacian_l1_error -= -2 * values_l1
@@ -688,6 +707,31 @@ def test_csbasis_derivative_convergence_rates_are_reasonable():
     assert orders[3] > 1.8
 
 
+def test_csbasis_laplacian_converges_in_value_and_integrated_divergence():
+    """P4 has Laplacian -20 P4 and zero integral, including across cube seams.
+
+    Pointwise finite differences are not exactly area conservative. Check
+    convergence of that defect as well as the local error; low odd harmonics
+    alone can hide it by symmetry. Do not subtract a mean from the result.
+    """
+    errors = []
+    for resolution in (8, 16, 32):
+        basis = GlobalCSBasis(resolution)
+        x = np.cos(np.deg2rad(basis.mesh.theta))
+        values = (35 * x**4 - 30 * x**2 + 3) / 8
+        laplacian = to_numpy(basis.surface_laplacian_operator()(values))
+        weights = basis.scalar_mean_weights
+        errors.append(
+            [
+                np.sqrt(np.sum(weights * (laplacian + 20 * values) ** 2)),
+                abs(weights @ laplacian),
+            ]
+        )
+    errors = np.array(errors)
+    assert np.all(errors[1:] < 0.35 * errors[:-1] + 1e-12)
+    assert np.all(errors[-1] < [0.12, 0.02])
+
+
 def test_csbasis_mean_free_projection_is_area_weighted_and_operator_preserving():
     """CS scalar gauges use an area-weighted mean-free projection."""
     cs_basis = GlobalCSBasis(8)
@@ -712,7 +756,7 @@ def test_csbasis_mean_free_projection_is_area_weighted_and_operator_preserving()
     helmholtz = np.stack([values, -2.0 * values + 0.5])
     projected_helmholtz = cs_basis.project_helmholtz_mean_free(helmholtz)
 
-    np.testing.assert_allclose(cs_basis.scalar_mean(projected_helmholtz), 0.0, atol=1e-14)
+    np.testing.assert_allclose(cs_basis.scalar_mean(projected_helmholtz.T), 0.0, atol=1e-14)
     np.testing.assert_allclose(
         np.tensordot(cs_basis.helmholtz_synthesis_array(grid), projected_helmholtz, 2),
         np.tensordot(cs_basis.helmholtz_synthesis_array(grid), helmholtz, 2),
@@ -772,15 +816,15 @@ def test_csbasis_reuses_one_unit_sphere_laplacian_at_all_radii():
     values = np.linspace(-1.0, 1.0, basis.coefficient_count)
 
     unit_values = basis.surface_laplacian_operator().matvec(values)
-    unit_matrix = basis._unit_surface_laplacian_matrix
+    unit_matrix = basis.mesh.operators._unit_surface_laplacian_matrix
     radius_values = basis.surface_laplacian_operator(2.0).matvec(values)
 
     np.testing.assert_allclose(radius_values, unit_values / 4.0)
-    assert basis._unit_surface_laplacian_matrix is unit_matrix
-    assert basis.cache_info()["laplacian_built"]
+    assert basis.mesh.operators._unit_surface_laplacian_matrix is unit_matrix
+    assert basis.mesh.operators.cache_info()["laplacian_built"]
 
     basis.clear_cache()
-    assert not basis.cache_info()["laplacian_built"]
+    assert not basis.mesh.operators.cache_info()["laplacian_built"]
 
 
 # Backend preservation
@@ -1003,8 +1047,8 @@ def test_arbitrary_subset_does_not_guess_a_mean_free_variant(mean_free):
         subset.with_mean_free(not mean_free)
 
 
-def test_basis_view_slices_cs_surface_operators():
-    """Generic basis subsets also slice CS coefficient-space operators."""
+def test_basis_subset_evaluates_cs_derivatives_without_projecting():
+    """A derivative may extend outside the selected coefficient subspace."""
     cs_basis = GlobalCSBasis(8)
     indices = np.arange(0, cs_basis.coefficient_count, 2)
     view = BasisSubset(cs_basis, indices, subset_name="even")
@@ -1022,8 +1066,11 @@ def test_basis_view_slices_cs_surface_operators():
         view.surface_gradient_array(grid),
         cs_basis.surface_gradient_array(grid)[:, :, indices],
     )
-    expected = cs_basis.surface_laplacian_operator().to_matrix()[np.ix_(indices, indices)]
-    np.testing.assert_allclose(view.surface_laplacian_operator().to_matrix(), expected)
+    expected = cs_basis.surface_laplacian_operator().to_matrix()[:, indices]
+    np.testing.assert_allclose(view.laplacian_evaluation_operator(grid).to_matrix(), expected)
+    assert np.linalg.norm(expected[1::2]) > 0.0
+    with pytest.raises(NotImplementedError, match="closed under the Laplacian"):
+        view.surface_laplacian_operator()
     with pytest.raises(TypeError, match="SH surface basis"):
         SolidHarmonicOperators(view)
 
@@ -1059,8 +1106,8 @@ def test_spherical_transform_reuses_sh_evaluation_context(monkeypatch):
 
     _ = (
         transform.scalar_synthesis_array,
-        transform.theta_derivative_array,
-        transform.phi_derivative_array,
+        transform.gradient_theta_array,
+        transform.gradient_phi_array,
     )
 
     assert calls == {"legendre": 1, "derivative": 1}
@@ -1076,8 +1123,8 @@ def test_csbasis_reuses_native_operator_cache():
         same_grid
     )
     assert cs_basis.scalar_evaluation_operator(
-        grid, derivative="theta"
-    ) is cs_basis.scalar_evaluation_operator(same_grid, derivative="theta")
+        grid, gradient_component="theta"
+    ) is cs_basis.scalar_evaluation_operator(same_grid, gradient_component="theta")
     assert cs_basis.surface_gradient_operator(grid) is cs_basis.surface_gradient_operator(
         same_grid
     )

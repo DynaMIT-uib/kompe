@@ -9,17 +9,20 @@ RADIANS_TO_DEGREES = 180 / np.pi
 
 
 def spherical_to_cartesian(spherical_coordinates, degrees=True):
-    """Convert ``(radius, colatitude, longitude)`` to Cartesian coordinates."""
+    """Convert ``(radius, colatitude, longitude)`` to Cartesian coordinates.
+
+    The component axis leads the broadcast shape of the input samples.
+    """
     r, theta, phi = spherical_coordinates
     xp = get_array_module(r, theta, phi)
-    r, theta, phi = (xp.asarray(value) for value in (r, theta, phi))
+    r, theta, phi = xp.broadcast_arrays(*(xp.asarray(value) for value in (r, theta, phi)))
 
     if not degrees:
         conv = 1.0
     else:
         conv = DEGREES_TO_RADIANS
 
-    return xp.vstack(
+    return xp.stack(
         (
             r * xp.sin(theta * conv) * xp.cos(phi * conv),
             r * xp.sin(theta * conv) * xp.sin(phi * conv),
@@ -29,21 +32,25 @@ def spherical_to_cartesian(spherical_coordinates, degrees=True):
 
 
 def cartesian_to_spherical(cartesian_coordinates, degrees=True):
-    """Convert Cartesian coordinates to ``(radius, colatitude, longitude)``."""
+    """Convert Cartesian coordinates to ``(radius, colatitude, longitude)``.
+
+    The component axis leads the broadcast shape of the input samples.
+    """
     x, y, z = cartesian_coordinates
     xp = get_array_module(x, y, z)
-    x, y, z = (xp.asarray(value) for value in (x, y, z))
+    x, y, z = xp.broadcast_arrays(*(xp.asarray(value) for value in (x, y, z)))
 
     if not degrees:
         conv = 1.0
     else:
         conv = RADIANS_TO_DEGREES
 
-    r = xp.sqrt(x**2 + y**2 + z**2)
-    theta = xp.arccos(z / r) * conv
+    cylindrical_radius = xp.hypot(x, y)
+    r = xp.hypot(cylindrical_radius, z)
+    theta = xp.where(r == 0, xp.nan, xp.arctan2(cylindrical_radius, z)) * conv
     phi = xp.mod(xp.arctan2(y, x), 2 * np.pi) * conv
 
-    return xp.vstack((r, theta, phi))
+    return xp.stack((r, theta, phi))
 
 
 def rotate_spherical_coordinates(
@@ -57,8 +64,10 @@ def rotate_spherical_coordinates(
 ):
     """Express geographic coordinates in a rotated spherical frame."""
     xp = get_array_module(latitude, longitude)
-    latitude = xp.asarray(latitude).flatten()
-    longitude = xp.asarray(longitude).flatten()
+    latitude, longitude = (
+        value.flatten()
+        for value in xp.broadcast_arrays(xp.asarray(latitude), xp.asarray(longitude))
+    )
 
     if not degrees:
         conv = 1.0
@@ -125,11 +134,11 @@ def rotate_spherical_by_matrix(
 
     xp = get_array_module(latitude, longitude, rotation, east, north)
     if east is None:
-        latitude, longitude = xp.broadcast_arrays(latitude, longitude)
+        latitude, longitude = xp.broadcast_arrays(xp.asarray(latitude), xp.asarray(longitude))
     else:
-        latitude, longitude, east, north = xp.broadcast_arrays(latitude, longitude, east, north)
-    latitude = xp.asarray(latitude)
-    longitude = xp.asarray(longitude)
+        latitude, longitude, east, north = xp.broadcast_arrays(
+            *(xp.asarray(value) for value in (latitude, longitude, east, north))
+        )
     rotation = xp.asarray(rotation)
     if rotation.shape != (3, 3):
         raise ValueError("rotation must have shape (3, 3)")
@@ -171,7 +180,7 @@ def rotate_spherical_by_matrix(
 def _enu_basis(latitude, longitude, *, degrees=True):
     """Return ENU basis vectors as columns in Cartesian coordinates."""
     xp = get_array_module(latitude, longitude)
-    latitude, longitude = xp.broadcast_arrays(latitude, longitude)
+    latitude, longitude = xp.broadcast_arrays(xp.asarray(latitude), xp.asarray(longitude))
     angle_scale = DEGREES_TO_RADIANS if degrees else 1.0
     latitude = xp.asarray(latitude) * angle_scale
     longitude = xp.asarray(longitude) * angle_scale

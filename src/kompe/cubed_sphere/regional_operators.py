@@ -47,8 +47,11 @@ class RegionalCSOperators:
         Parameters
         ----------
         stencil_radius: int, optional
-            Number of neighbouring cells used on each side. The default of
-            1 gives a 3-point stencil; 2 gives a 5-point stencil, and so on.
+            Number of neighbouring cells used on each side in the interior.
+            Stencils are truncated at boundaries, not widened inward. For
+            radius k, accuracy is order 2k in the interior and k at the ends.
+            The default has centered 3-point interior differences and
+            one-sided 2-point boundary differences.
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """
@@ -95,7 +98,9 @@ class RegionalCSOperators:
             dxi_entries["cols"].append(mesh.flat_index(i_dy, j_dy + point))
             dxi_entries["elements"].append(np.full(i_dy.size, coefficient / dxi))
 
-        # Boundary cells use one-sided stencils of the same order.
+        # Truncate the stencil at boundaries, retaining its local reach.
+        # For radius 1 this preserves the trapezoidal integration-by-parts
+        # identity on the coordinate interval between the end cell centres.
         for boundary_index in np.arange(0, stencil_radius)[::-1]:
             # LEFT
             points = np.r_[-boundary_index : stencil_radius + 1 : 1]
@@ -196,8 +201,8 @@ class RegionalCSOperators:
         Parameters
         ----------
         stencil_radius: int, optional
-            Number of neighbouring cells used on each side. The default of
-            1 gives a 3-point stencil; 2 gives a 5-point stencil, and so on.
+            Neighbouring cells on each side in the interior. Boundary
+            stencils are truncated as in ``coordinate_derivative_matrices``.
         sparse: bool, optional
             Set to True if you want scipy.sparse matrices instead of dense numpy arrays
         """

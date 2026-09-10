@@ -48,6 +48,114 @@ def test_angular_distance_preserves_coincident_and_antipodal_geometry():
     np.testing.assert_allclose(distances[0, 1], 180.0, atol=1e-6)
 
 
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_secs_angular_distance_resolves_small_separations(backend):
+    with backend_context(backend):
+        distances = angular_distance([0.0, 0.0], [1e-8, 180.0 - 1e-8], [0.0], [0.0])
+    np.testing.assert_allclose(distances[:, 0], np.deg2rad([1e-8, 180.0 - 1e-8]), rtol=1e-14)
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+@pytest.mark.parametrize("current_type", ["curl_free", "divergence_free"])
+def test_regularized_secs_current_has_zero_limit_at_its_pole(backend, current_type):
+    with backend_context(backend), np.errstate(divide="ignore", invalid="ignore"):
+        regularized = surface_current_matrices(
+            [65.0], [10.0], [65.0], [10.0], current_type=current_type, singularity_limit=1e3
+        )
+        singular = surface_current_matrices(
+            [65.0], [10.0], [65.0], [10.0], current_type=current_type
+        )
+    np.testing.assert_array_equal(regularized, np.zeros((2, 1, 1)))
+    assert not np.isfinite(singular).all()
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_secs_magnetic_field_has_finite_axis_limits(backend):
+    from kompe.constants import MU0
+
+    radius = np.array([6371.2e3, 6600e3])
+    source_radius = 6481.2e3
+    with backend_context(backend), np.errstate(divide="ignore", invalid="ignore"):
+        east, north, radial = magnetic_field_matrices(
+            [65.0, 65.0], [10.0, 10.0], radius, [65.0], [10.0], source_radius=source_radius
+        )
+        curl_free_below = magnetic_field_matrices(
+            [65.0], [10.0], radius[0], [65.0], [10.0], current_type="curl_free"
+        )
+        curl_free_regularized = magnetic_field_matrices(
+            [65.0, 65.0],
+            [10.0, 10.0],
+            radius,
+            [65.0],
+            [10.0],
+            current_type="curl_free",
+            singularity_limit=1e3,
+        )
+    s = np.minimum(radius, source_radius) / np.maximum(radius, source_radius)
+    expected = MU0 / (4 * np.pi * radius) * (1 / (1 - s) - 1)
+    expected[1] *= s[1]
+    np.testing.assert_array_equal(east, np.zeros((2, 1)))
+    np.testing.assert_array_equal(north, np.zeros((2, 1)))
+    np.testing.assert_allclose(radial[:, 0], expected, rtol=1e-13)
+    np.testing.assert_array_equal(curl_free_below, np.zeros((3, 1, 1)))
+    np.testing.assert_array_equal(curl_free_regularized, np.zeros((3, 2, 1)))
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_secs_magnetic_field_resolves_the_near_axis_slope(backend):
+    from kompe.constants import MU0
+
+    radius = np.array([6371.2e3, 6600e3])
+    source_radius = 6481.2e3
+    angle = np.deg2rad(1e-8)
+    with backend_context(backend), np.errstate(divide="ignore", invalid="ignore"):
+        east, north, _ = magnetic_field_matrices(
+            [0.0, 0.0], [1e-8, 1e-8], radius, [0.0], [0.0], source_radius=source_radius
+        )
+    s = np.minimum(radius, source_radius) / np.maximum(radius, source_radius)
+    expected_slope = MU0 / (4 * np.pi * radius) / (2 * (1 - s) ** 2)
+    expected_slope *= [-s[0] * (2 - s[0]), s[1] ** 2]
+    np.testing.assert_allclose(east[:, 0] / angle, expected_slope, rtol=1e-12)
+    np.testing.assert_allclose(north, 0.0, atol=1e-30)
+
+
+@pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
+def test_secs_field_matches_published_formulas_away_from_the_axis(backend):
+    from kompe.constants import MU0
+
+    source_radius = 6481.2e3
+    theta, radius_ratio = np.meshgrid([0.2, 0.7, 1.5, 2.5, 3.0], [0.1, 0.5, 0.9, 1, 1.1, 2, 10])
+    theta, radius_ratio = theta.reshape(-1), radius_ratio.reshape(-1)
+    radius = source_radius * radius_ratio
+    with backend_context(backend):
+        east, north, radial = magnetic_field_matrices(
+            90 - np.rad2deg(theta),
+            np.zeros(theta.size),
+            radius,
+            [90.0],
+            [0.0],
+            source_radius=source_radius,
+        )
+    # Vanhamaki and Juusola (2020), equations 2.13--2.14, with the
+    # source at the north pole: local poleward direction is geographic north.
+    s = np.minimum(radius_ratio, 1) / np.maximum(radius_ratio, 1)
+    root = np.sqrt(1 + s**2 - 2 * s * np.cos(theta))
+    factor = MU0 / (4 * np.pi * radius)
+    expected_radial = factor * np.where(radius_ratio <= 1, 1 / root - 1, s / root - s)
+    expected_north = (
+        factor
+        / np.sin(theta)
+        * np.where(
+            radius_ratio <= 1,
+            (s - np.cos(theta)) / root + np.cos(theta),
+            (1 - s * np.cos(theta)) / root - 1,
+        )
+    )
+    np.testing.assert_allclose(east, 0.0, atol=1e-27)
+    np.testing.assert_allclose(north[:, 0], expected_north, rtol=1e-11, atol=1e-27)
+    np.testing.assert_allclose(radial[:, 0], expected_radial, rtol=1e-12, atol=1e-27)
+
+
 def test_secs_is_scalar_synthesis_without_closed_surface_claims(secs_basis):
     assert isinstance(secs_basis, ScalarBasis)
     assert not isinstance(secs_basis, SurfaceDifferentialBasis)
@@ -55,8 +163,6 @@ def test_secs_is_scalar_synthesis_without_closed_surface_claims(secs_basis):
     assert secs_basis.kind == "SECS"
     assert secs_basis.coefficient_count == 3
     assert secs_basis.index_names == ("latitude", "longitude")
-    with pytest.raises(NotImplementedError, match="surface-current synthesis"):
-        secs_basis.scalar_evaluation_array(secs_basis.poles, derivative="theta")
 
 
 def test_secs_accepts_regional_grid_for_poles_and_evaluation():
@@ -84,15 +190,15 @@ def test_secs_scalar_synthesis_has_explicit_physical_mode(evaluation_grid):
         evaluation_grid.lon,
         poles.lat,
         poles.lon,
-        quantity="potential",
+        quantity="curl_free_potential",
         normalization=curl_free.normalization,
     )
-    expected_current_magnitude = scalar_green_matrix(
+    expected_df_potential = scalar_green_matrix(
         evaluation_grid.lat,
         evaluation_grid.lon,
         poles.lat,
         poles.lon,
-        quantity="current_magnitude",
+        quantity="divergence_free_potential",
         normalization=divergence_free.normalization,
     )
 
@@ -100,7 +206,7 @@ def test_secs_scalar_synthesis_has_explicit_physical_mode(evaluation_grid):
         curl_free.scalar_evaluation_array(evaluation_grid), expected_potential
     )
     np.testing.assert_allclose(
-        divergence_free.scalar_evaluation_array(evaluation_grid), expected_current_magnitude
+        divergence_free.scalar_evaluation_array(evaluation_grid), expected_df_potential
     )
     assert curl_free.signature != divergence_free.signature
 

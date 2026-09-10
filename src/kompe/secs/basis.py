@@ -22,7 +22,7 @@ class SECSBasis(ScalarBasis):
 
     Coefficients are amplitudes at the pole locations in ``poles``. One
     pole layout supports curl-free and divergence-free surface-current
-    synthesis, their scalar Green kernels, and magnetic-field synthesis. The
+    synthesis, their scalar current potentials, and magnetic-field synthesis. The
     required ``current_type`` selects the physical meaning of one coefficient
     vector; two-potential Helmholtz methods remain explicit about both modes.
 
@@ -115,26 +115,39 @@ class SECSBasis(ScalarBasis):
             raise ValueError("chunk_size must be positive")
         return int(chunk_size)
 
-    def scalar_evaluation_array(self, grid, derivative=None):
-        """Evaluate scalar Green functions for the selected current-system mode.
+    def scalar_evaluation_operator(self, grid, gradient_component=None, *, persist=True):
+        """Evaluate the scalar current potential, or its unit-sphere gradient.
 
-        Derivatives are intentionally exposed through the explicitly framed
-        surface-current methods instead of overloading angular derivatives
-        with radius-scaled current density.
+        For curl-free currents this is Phi with J = -grad_s(Phi); for
+        divergence-free currents it is Psi with J = rhat x grad_s(Psi).
+        Potentials have units A when coefficients have units A. Currents
+        have units A/m for a radius in meters. Gradient components here
+        use angular radians, like other ScalarBasis implementations: divide
+        by ``radius`` to obtain the physical spatial gradient.
         """
         self._validate_grid(grid)
-        if derivative is not None:
-            raise NotImplementedError(
-                "SECS scalar derivatives are represented by surface-current synthesis."
+        if gradient_component is None:
+            array = scalar_green_matrix(
+                grid.lat,
+                grid.lon,
+                self.poles.lat,
+                self.poles.lon,
+                quantity=f"{self.current_type}_potential",
+                normalization=self.normalization,
             )
-        quantity = "potential" if self.current_type == "curl_free" else "current_magnitude"
-        return scalar_green_matrix(
-            grid.lat,
-            grid.lon,
-            self.poles.lat,
-            self.poles.lon,
-            quantity=quantity,
-            normalization=self.normalization,
+        elif gradient_component in {"theta", "phi"}:
+            current = self.surface_current_array(grid)
+            xp = get_array_module(current)
+            gradient = (
+                -self.radius * current
+                if self.current_type == "curl_free"
+                else self.radius * xp.stack([current[1], -current[0]])
+            )
+            array = gradient[0 if gradient_component == "theta" else 1]
+        else:
+            raise ValueError("gradient_component must be None, 'theta', or 'phi'.")
+        return as_linear_map(
+            array, input_shape=(self.coefficient_count,), output_shape=(grid.size,)
         )
 
     def surface_current_array(self, grid, *, singularity_limit=0.0):

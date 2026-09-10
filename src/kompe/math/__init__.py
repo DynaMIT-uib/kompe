@@ -13,18 +13,19 @@ from kompe.math.backend import (
     to_numpy,
 )
 from kompe.math.einsum import einsum_linear_map, einsum_linear_map_from_matvec
+from kompe.math.exponential import affine_exponential
 from kompe.math.fingerprints import array_fingerprint, content_fingerprint
-from kompe.math.finite_differences import finite_difference_weights
-from kompe.math.least_squares_problem import LeastSquaresProblem
+from kompe.math.finite_differences import centered_derivative, finite_difference_weights
+from kompe.math.least_squares_problem import LeastSquaresProblem, relative_regularization
 from kompe.math.least_squares_solver import (
     LEAST_SQUARES_SOLVER_ENV,
     LeastSquaresSolver,
     cholesky_least_squares_map,
-    dense_full_rank_least_squares_factor,
     dense_full_rank_least_squares_map,
     get_default_least_squares_solver,
-    sparse_constrained_least_squares_map,
+    sparse_least_squares_map,
 )
+from kompe.math.linear_evolution import LINEAR_EVOLUTION_METHODS, prepare_linear_evolution
 from kompe.math.linear_map import (
     ArrayBackend,
     LinearMap,
@@ -32,6 +33,7 @@ from kompe.math.linear_map import (
     diagonal_linear_map,
     identity_linear_map,
     is_identity_linear_map,
+    null_space_linear_map,
     pointwise_component_map,
     take_linear_map,
     vstack_linear_maps,
@@ -42,17 +44,19 @@ from kompe.math.small_matrices import determinant_3x3, inverse_3x3
 __all__ = [
     "JAX_AVAILABLE",
     "LEAST_SQUARES_SOLVER_ENV",
+    "LINEAR_EVOLUTION_METHODS",
     "ArrayBackend",
     "LeastSquaresProblem",
     "LeastSquaresSolver",
     "LinearMap",
+    "affine_exponential",
     "array_fingerprint",
     "as_linear_map",
     "backend_context",
     "block_until_ready",
+    "centered_derivative",
     "cholesky_least_squares_map",
     "content_fingerprint",
-    "dense_full_rank_least_squares_factor",
     "dense_full_rank_least_squares_map",
     "determinant_3x3",
     "diagonal_linear_map",
@@ -66,10 +70,13 @@ __all__ = [
     "inverse_3x3",
     "is_identity_linear_map",
     "jax_enabled",
+    "null_space_linear_map",
     "pointwise_component_map",
+    "prepare_linear_evolution",
     "readonly_numpy_array",
+    "relative_regularization",
     "set_backend",
-    "sparse_constrained_least_squares_map",
+    "sparse_least_squares_map",
     "synchronize_linalg_result",
     "take_linear_map",
     "tensor_pinv",

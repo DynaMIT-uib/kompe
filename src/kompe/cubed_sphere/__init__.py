@@ -2,7 +2,9 @@
 
 from kompe.cubed_sphere.global_basis import GlobalCSBasis
 from kompe.cubed_sphere.global_mesh import GlobalCSMesh
+from kompe.cubed_sphere.global_operators import GlobalCSOperators
 from kompe.cubed_sphere.global_projection import GlobalCSProjection
+from kompe.cubed_sphere.global_remapping import GlobalCSRemapper
 from kompe.cubed_sphere.regional_mesh import RegionalCSMesh
 from kompe.cubed_sphere.regional_mesh_spec import (
     REGIONAL_CS_MESH_SCHEMA,
@@ -18,7 +20,9 @@ __all__ = [
     "REGIONAL_CS_MESH_SCHEMA_VERSION",
     "GlobalCSBasis",
     "GlobalCSMesh",
+    "GlobalCSOperators",
     "GlobalCSProjection",
+    "GlobalCSRemapper",
     "RegionalCSMesh",
     "RegionalCSMeshSpec",
     "RegionalCSOperators",

@@ -32,16 +32,16 @@ def test_sh_gradient_at_and_near_both_poles(legendre_method, backend):
     np.testing.assert_allclose(gradient[1, :, xy_column], expected, rtol=1e-13, atol=1e-27)
 
 
-@pytest.mark.parametrize("derivative", [None, "theta", "phi"])
+@pytest.mark.parametrize("gradient_component", [None, "theta", "phi"])
 @pytest.mark.parametrize("normalized", [False, True])
-def test_scipy_and_internal_sh_evaluation_agree_through_the_poles(derivative, normalized):
+def test_scipy_and_internal_sh_evaluation_agree_through_the_poles(gradient_component, normalized):
     """Both explicit Legendre algorithms use the same phase and normalization."""
     grid = SphericalGrid(theta=[0.0, 1e-11, 26.0, 90.0, 155.0, 180.0 - 1e-11, 180.0], phi=37.0)
     internal = SHBasis(6, 4, schmidt_quasi_normalized=normalized, legendre_method="internal")
     scipy = SHBasis(6, 4, schmidt_quasi_normalized=normalized, legendre_method="scipy")
     np.testing.assert_allclose(
-        scipy.scalar_evaluation_array(grid, derivative=derivative),
-        internal.scalar_evaluation_array(grid, derivative=derivative),
+        scipy.scalar_evaluation_array(grid, gradient_component=gradient_component),
+        internal.scalar_evaluation_array(grid, gradient_component=gradient_component),
         atol=2e-14,
         rtol=2e-13,
     )
@@ -127,8 +127,8 @@ def test_csbasis_differentiates_low_degree_spherical_harmonics():
     grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
     weights = cs_basis.mesh.cell_areas.reshape(-1)
 
-    D_theta = cs_basis.scalar_evaluation_array(grid, derivative="theta")
-    D_phi = cs_basis.scalar_evaluation_array(grid, derivative="phi")
+    D_theta = cs_basis.scalar_evaluation_array(grid, gradient_component="theta")
+    D_phi = cs_basis.scalar_evaluation_array(grid, gradient_component="phi")
     laplacian = cs_basis.surface_laplacian_operator()
 
     constant = np.ones(cs_basis.coefficient_count)
@@ -186,8 +186,8 @@ def test_csbasis_differentiation_errors_converge_for_smooth_harmonics():
         grid = SphericalGrid(theta=cs_basis.mesh.theta, phi=cs_basis.mesh.phi)
         weights = cs_basis.mesh.cell_areas.reshape(-1)
 
-        D_theta = cs_basis.scalar_evaluation_array(grid, derivative="theta")
-        D_phi = cs_basis.scalar_evaluation_array(grid, derivative="phi")
+        D_theta = cs_basis.scalar_evaluation_array(grid, gradient_component="theta")
+        D_phi = cs_basis.scalar_evaluation_array(grid, gradient_component="phi")
         laplacian = cs_basis.surface_laplacian_operator()
 
         gradient_errors = []

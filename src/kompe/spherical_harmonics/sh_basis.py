@@ -101,7 +101,6 @@ class SHBasis(SurfaceDifferentialBasis):
             effective_nmin,
             legendre_method,
         )
-        self.mean_free = self.min_degree >= 1
         self.operator_cache = operator_cache
         self._related_basis_cache = {}
         self._grid_cache = BoundedCache(8)
@@ -221,7 +220,7 @@ class SHBasis(SurfaceDifferentialBasis):
             return None
         return (signature, bool(jax_enabled()))
 
-    def _evaluation_cache_identity(self, grid, derivative):
+    def _evaluation_cache_identity(self, grid, gradient_component):
         """Return exact identity for one persisted SH evaluation."""
         grid_signature = getattr(grid, "signature", None)
         if grid_signature is None:
@@ -231,7 +230,7 @@ class SHBasis(SurfaceDifferentialBasis):
             "algorithm_version": _EVALUATION_CACHE_VERSION,
             "basis": self.signature,
             "grid_coordinates": grid_signature,
-            "derivative": "value" if derivative is None else derivative,
+            "derivative": "value" if gradient_component is None else gradient_component,
         }
 
     def _grid_cache_entry(self, grid):
@@ -269,7 +268,7 @@ class SHBasis(SurfaceDifferentialBasis):
         return self.mean_free
 
     def _surface_mode_norm(self):
-        """Return the L2 norm of each spherical-harmonic surface mode."""
+        """Return each mode's surface RMS, sqrt(integral(Y**2 dOmega)/(4*pi))."""
         coefficient_factors = np.hstack(
             (
                 self._schmidt_quasi_factors[self.cosine_filter],
@@ -281,13 +280,32 @@ class SHBasis(SurfaceDifferentialBasis):
             angular_norm = angular_norm / coefficient_factors**2
         return np.sqrt(angular_norm)
 
-    def scalar_smoothness_weights(self):
-        """Return gradient-norm weights for scalar coefficients."""
-        return self._surface_mode_norm() * np.sqrt(self.n * (self.n + 1.0))
+    def scalar_smoothness_operator(self):
+        """Return the diagonal unit-sphere gradient RMS penalty."""
+        return diagonal_linear_map(self._surface_mode_norm() * np.sqrt(self.n * (self.n + 1.0)))
 
-    def helmholtz_smoothness_weights(self):
-        """Return gradient-norm weights for Helmholtz field coefficients."""
-        return self._surface_mode_norm() * self.n * (self.n + 1.0)
+    @property
+    def scalar_constant_coefficients(self):
+        """The unit monopole, when included in this coefficient space."""
+        return None if self.omits_constant_mode() else (self.n == 0).astype(float)
+
+    @property
+    def scalar_mean_weights(self):
+        """Only the degree-zero coefficient contributes to the surface mean."""
+        return (self.n == 0).astype(float)
+
+    def helmholtz_smoothness_operator(self):
+        """Return the diagonal unit-sphere div-curl RMS penalty.
+
+        The squared penalty is mean(div(F)**2 + curl_r(F)**2), not the
+        covariant vector-gradient norm; those differ by curvature on a sphere.
+        """
+        weights = self._surface_mode_norm() * self.n * (self.n + 1.0)
+        return diagonal_linear_map(
+            np.tile(weights, 2),
+            input_shape=(2, self.coefficient_count),
+            output_shape=(2, self.coefficient_count),
+        )
 
     def with_mean_free(self, mean_free):
         """Return a cached SH scalar-space basis or view."""
@@ -306,7 +324,6 @@ class SHBasis(SurfaceDifferentialBasis):
                     "max_degree": self.max_degree,
                     "max_order": self.max_order,
                     "min_degree": 1,
-                    "mean_free": True,
                     "legendre_method": self.legendre_method,
                     "schmidt_quasi_normalized": self.schmidt_quasi_normalized,
                 },
@@ -348,88 +365,96 @@ class SHBasis(SurfaceDifferentialBasis):
         )
         return P_scaled, dP_scaled
 
-    def scalar_evaluation_array(self, grid, derivative=None):
-        """Evaluate scalar basis or surface derivatives on ``grid``."""
+    def scalar_evaluation_array(self, grid, gradient_component=None, *, persist=True):
+        """Evaluate scalar values or a unit-sphere gradient component."""
 
         def build(legendre_cache):
             def evaluate():
                 return self._evaluate_on_grid(
-                    grid, derivative=derivative, legendre_cache=legendre_cache
+                    grid, gradient_component=gradient_component, legendre_cache=legendre_cache
                 )
 
-            identity = self._evaluation_cache_identity(grid, derivative)
-            if self.operator_cache is None or identity is None:
+            identity = self._evaluation_cache_identity(grid, gradient_component)
+            if not persist or self.operator_cache is None or identity is None:
                 return evaluate()
             cached = self.operator_cache.get_or_create("sh_evaluation", identity, evaluate)
             return get_array_module().asarray(cached)
 
-        return self._cached_grid_array(grid, ("scalar_evaluation", derivative), build)
+        return self._cached_grid_array(grid, ("scalar_evaluation", gradient_component), build)
 
-    def _uncached_scalar_evaluation_array(self, grid, derivative=None):
-        """Evaluate without the persistent array cache."""
-        return get_array_module().asarray(self._evaluate_on_grid(grid, derivative=derivative))
-
-    def scalar_evaluation_operator(self, grid, derivative=None):
+    def scalar_evaluation_operator(self, grid, gradient_component=None, *, persist=True):
         """Return the cached SH scalar evaluation operator."""
+
+        def build():
+            array = self.scalar_evaluation_array(
+                grid, gradient_component=gradient_component, persist=persist
+            )
+            sample_shape = array.shape[:-1]
+            # A single sample is a row map, not a diagonal vector.
+            return as_linear_map(
+                array.reshape(int(np.prod(sample_shape)), self.coefficient_count),
+                input_shape=(self.coefficient_count,),
+                output_shape=sample_shape,
+            )
+
         return self._cached_grid_operator(
             grid,
-            ("scalar_evaluation", derivative),
-            lambda: as_linear_map(
-                self.scalar_evaluation_array(grid, derivative=derivative),
-                input_shape=(self.coefficient_count,),
-            ),
+            ("scalar_evaluation", gradient_component),
+            build,
         )
 
-    def surface_gradient_array(self, grid):
-        """Return the cached SH surface-gradient array."""
+    def surface_gradient_array(self, grid, *, persist=True):
+        """Inspect the cached gradient map without a second materialization."""
         return self._cached_grid_array(
             grid,
             "surface_gradient",
-            lambda _legendre_cache: SurfaceDifferentialBasis.surface_gradient_array(self, grid),
+            lambda _legendre_cache: self.surface_gradient_operator(
+                grid, persist=persist
+            ).to_array(),
         )
 
-    def surface_gradient_operator(self, grid):
+    def surface_gradient_operator(self, grid, *, persist=True):
         """Return the cached SH surface-gradient operator."""
         return self._cached_grid_operator(
             grid,
             "surface_gradient",
-            lambda: as_linear_map(
-                self.surface_gradient_array(grid), input_shape=(self.coefficient_count,)
-            ),
+            lambda: super(SHBasis, self).surface_gradient_operator(grid, persist=persist),
         )
 
-    def rhat_cross_gradient_array(self, grid):
-        """Return the cached SH r-hat-cross-gradient array."""
+    def rhat_cross_gradient_array(self, grid, *, persist=True):
+        """Inspect the cached rotated-gradient map."""
         return self._cached_grid_array(
             grid,
             "rhat_cross_gradient",
-            lambda _legendre_cache: SurfaceDifferentialBasis.rhat_cross_gradient_array(self, grid),
+            lambda _legendre_cache: self.rhat_cross_gradient_operator(
+                grid, persist=persist
+            ).to_array(),
         )
 
-    def rhat_cross_gradient_operator(self, grid):
+    def rhat_cross_gradient_operator(self, grid, *, persist=True):
         """Return the cached SH r-hat-cross-gradient operator."""
         return self._cached_grid_operator(
             grid,
             "rhat_cross_gradient",
-            lambda: as_linear_map(
-                self.rhat_cross_gradient_array(grid), input_shape=(self.coefficient_count,)
-            ),
+            lambda: super(SHBasis, self).rhat_cross_gradient_operator(grid, persist=persist),
         )
 
-    def helmholtz_synthesis_array(self, grid):
+    def helmholtz_synthesis_array(self, grid, *, persist=True):
         """Return the cached SH Helmholtz synthesis array."""
         return self._cached_grid_array(
             grid,
             "helmholtz_synthesis",
-            lambda _legendre_cache: self.helmholtz_synthesis_operator(grid).to_array(),
+            lambda _legendre_cache: self.helmholtz_synthesis_operator(
+                grid, persist=persist
+            ).to_array(),
         )
 
-    def helmholtz_synthesis_operator(self, grid):
+    def helmholtz_synthesis_operator(self, grid, *, persist=True):
         """Return the cached SH Helmholtz synthesis operator."""
         return self._cached_grid_operator(
             grid,
             "helmholtz_synthesis",
-            lambda: SurfaceDifferentialBasis.helmholtz_synthesis_operator(self, grid),
+            lambda: super(SHBasis, self).helmholtz_synthesis_operator(grid, persist=persist),
         )
 
     def _normalized_legendre_values(self, theta, *, derivative_required, cache):
@@ -461,8 +486,8 @@ class SHBasis(SurfaceDifferentialBasis):
         dP = dP_unnormalized * self.schmidt_factors if dP_unnormalized is not None else None
         return P, dP
 
-    def _phi_derivative_values(self, P, dP, theta, phi):
-        """Evaluate azimuthal derivatives, including the poles."""
+    def _gradient_phi_values(self, P, dP, theta, phi):
+        """Evaluate ``(1/sin(theta)) d/dphi``, including its pole limits."""
         sin_theta = np.sin(theta).reshape(-1, 1)
         phi_col = phi.reshape(-1, 1)
         is_pole = ((theta == 0.0) | (theta == np.pi)).reshape(-1, 1)
@@ -480,28 +505,28 @@ class SHBasis(SurfaceDifferentialBasis):
         Gs = P_over_sin[:, self.sine_filter] * m_s * np.cos(m_s * phi_col)
         return Gc, Gs
 
-    def _evaluate_on_grid(self, grid, derivative=None, legendre_cache=None):
-        """Evaluate scalar basis or surface derivatives on ``grid``."""
+    def _evaluate_on_grid(self, grid, gradient_component=None, legendre_cache=None):
+        """Evaluate scalar values or a unit-sphere gradient component."""
         xp = get_array_module(grid.phi, grid.theta)
         phi = np.deg2rad(to_numpy(grid.phi))
         theta = np.deg2rad(to_numpy(grid.theta))
-        needs_legendre_derivative = derivative == "theta" or (
-            derivative == "phi" and np.any((theta == 0.0) | (theta == np.pi))
+        needs_legendre_derivative = gradient_component == "theta" or (
+            gradient_component == "phi" and np.any((theta == 0.0) | (theta == np.pi))
         )
         P, dP = self._normalized_legendre_values(
             theta, derivative_required=needs_legendre_derivative, cache=legendre_cache
         )
 
-        if derivative is None:
+        if gradient_component is None:
             Gc = P[:, self.cosine_filter] * np.cos(phi.reshape((-1, 1)) * self.cosine_order)
             Gs = P[:, self.sine_filter] * np.sin(phi.reshape((-1, 1)) * self.sine_order)
-        elif derivative == "theta":
+        elif gradient_component == "theta":
             Gc = dP[:, self.cosine_filter] * np.cos(phi.reshape((-1, 1)) * self.cosine_order)
             Gs = dP[:, self.sine_filter] * np.sin(phi.reshape((-1, 1)) * self.sine_order)
-        elif derivative == "phi":
-            Gc, Gs = self._phi_derivative_values(P, dP, theta, phi)
+        elif gradient_component == "phi":
+            Gc, Gs = self._gradient_phi_values(P, dP, theta, phi)
         else:
-            raise ValueError(f'Invalid derivative "{derivative}".')
+            raise ValueError(f'Invalid gradient_component "{gradient_component}".')
 
         return xp.asarray(np.hstack((Gc, Gs)))
 

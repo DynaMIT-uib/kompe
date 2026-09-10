@@ -527,6 +527,55 @@ def test_regional_coordinate_derivatives_are_explicitly_xi_eta():
     np.testing.assert_allclose(D_eta @ eta, 1.0, atol=2e-14)
 
 
+@pytest.mark.parametrize("stencil_radius", [1, 2, 3])
+def test_regional_derivative_accuracy_matches_the_local_stencil(stencil_radius):
+    grid = RegionalCSMesh(
+        RegionalCSProjection((20.0, 70.0), 23.0),
+        1800.0,
+        1400.0,
+        shape=(11, 9),
+        radius=6371.2,
+    )
+    D_xi, D_eta = grid.operators.coordinate_derivative_matrices(stencil_radius=stencil_radius)
+    xi, eta = grid.xi.reshape(-1), grid.eta.reshape(-1)
+    i, j = np.indices(grid.shape)
+    xi_order = stencil_radius + np.minimum(stencil_radius, np.minimum(j, grid.n_xi - 1 - j))
+    eta_order = stencil_radius + np.minimum(stencil_radius, np.minimum(i, grid.n_eta - 1 - i))
+    for degree in range(2 * stencil_radius + 1):
+        values = xi**degree + 2 * eta**degree
+        expected_xi = degree * xi ** (degree - 1) if degree else np.zeros_like(xi)
+        expected_eta = 2 * degree * eta ** (degree - 1) if degree else np.zeros_like(eta)
+        xi_exact = degree <= xi_order.reshape(-1)
+        eta_exact = degree <= eta_order.reshape(-1)
+        np.testing.assert_allclose((D_xi @ values)[xi_exact], expected_xi[xi_exact], atol=1e-12)
+        np.testing.assert_allclose(
+            (D_eta @ values)[eta_exact], expected_eta[eta_exact], atol=1e-12
+        )
+
+
+def test_regional_default_derivatives_obey_coordinate_integration_by_parts():
+    """Check H D + D.T H = B on the interval between cell centres."""
+    grid = RegionalCSMesh(
+        RegionalCSProjection((20.0, 70.0), 23.0),
+        1800.0,
+        1400.0,
+        shape=(7, 9),
+        radius=6371.2,
+    )
+    D_xi, D_eta = grid.operators.coordinate_derivative_matrices(sparse=False)
+    xi_weights, eta_weights = np.ones(grid.n_xi), np.ones(grid.n_eta)
+    xi_weights[[0, -1]] = eta_weights[[0, -1]] = 0.5
+    H_xi = np.diag(xi_weights * grid.dxi)
+    H_eta = np.diag(eta_weights * grid.deta)
+    H = np.kron(H_eta, H_xi)
+    xi_endpoints, eta_endpoints = np.zeros(grid.n_xi), np.zeros(grid.n_eta)
+    xi_endpoints[[0, -1]] = eta_endpoints[[0, -1]] = [-1.0, 1.0]
+    B_xi = np.kron(H_eta, np.diag(xi_endpoints))
+    B_eta = np.kron(np.diag(eta_endpoints), H_xi)
+    np.testing.assert_allclose(H @ D_xi + D_xi.T @ H, B_xi, atol=1e-15)
+    np.testing.assert_allclose(H @ D_eta + D_eta.T @ H, B_eta, atol=1e-15)
+
+
 def test_regional_grid_owns_topology_while_operator_object_owns_numerics():
     grid = RegionalCSMesh(
         RegionalCSProjection((20.0, 70.0), 23.0),

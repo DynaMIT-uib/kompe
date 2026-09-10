@@ -6,110 +6,47 @@
 and fields. Its name comes from the round Norwegian potato dumpling and
 deliberately complements the `lompe` package it serves.
 
-The four terms in the name describe separate architectural roles:
+Install with `pip install kompe`; the core depends only on NumPy and SciPy.
 
-- **projections** parameterize continuous spherical geometry and transform
-  coordinates and vector components;
-- **meshes** discretize that geometry into structured cells with areas,
-  boundaries, and implicit neighbourhood topology;
-- **expansions** represent fields through bases and coefficients;
-- **operators** act between field, sample, and coefficient spaces.
-
-The public implementations include:
-
-- spherical-harmonic (`SHBasis`), Spherical Elementary Current System
-  (`SECSBasis`), and global cubed-sphere (`GlobalCSBasis`) expansions;
-- regional and global cubed-sphere projections (`RegionalCSProjection` and
-  `GlobalCSProjection`);
-- regional and global structured cubed-sphere meshes (`RegionalCSMesh` and
-  `GlobalCSMesh`);
-- scalar, tangential, magnetic-field, analysis, synthesis, differential, and
-  transfer operators;
-- backend-neutral `LinearMap` objects and least-squares solvers.
-
-`CoefficientSpace` describes a basis, coefficient layout, and mean-free
-gauge. `FieldCoefficients` owns values in that space; ordinary arrays remain
-valid numerical inputs. A `representation="helmholtz"` space contains the
-curl-free and divergence-free potentials, not sampled vector components.
-The space's `shape` and `size` describe its array layout and flattened size;
-the underlying scalar basis exposes `coefficient_count`.
-
-Synthesis accepts either arrays or `FieldCoefficients`. When given the
-coefficient object, it checks basis compatibility and scalar/Helmholtz
-representation instead of treating equal array lengths as equivalent bases.
-Plain arrays intentionally leave that scientific identity with the caller.
-
-The package depends only on NumPy and SciPy. JAX support is
-optional and loaded only when requested; Kompe does not change JAX's global
-precision configuration. It never imports PynaMIT, Lompe, or secsy; those
-libraries are consumers or compatibility facades.
-
-## Dependency direction
-
-```text
-                 kompe
-              /      |      \
-         PynaMIT    Lompe    secsy compatibility API
-```
-
-PynaMIT imports Kompe directly. Legacy secsy function names and class spellings
-remain in secsy rather than becoming aliases in Kompe. Lompe consumes the
-canonical regional mesh directly and translates historical serialized grids
-at its own package boundary.
-
-## Geometry and representation boundaries
-
-`SphericalGrid` is an arbitrary set of
-evaluation or observation points; it does not claim cells or topology.
-`StructuredSurfaceMesh` is the distinct contract implemented by the regional
-CS mesh and the native `GlobalCSMesh` exposed as `GlobalCSBasis.mesh`.
-`RegionalCSMesh` owns geometry; its cached `operators` object owns gradient,
-divergence, surface-metric, and interpolation operations. A versioned
-`RegionalCSMeshSpec` is the stable interchange format for saved grids and
-consumer translation layers.
-
-An expansion does not have to use a mesh. SH and SECS expansions are analytic
-or kernel-based, while the global CS expansion is supported by its native
-mesh. Analysis and synthesis are operators associated with expansions rather
-than alternate names for coefficient fitting. In the four-part architecture,
-Projection objects are geometric coordinate charts and their vector/Jacobian
-transformations; coefficient fitting is called analysis.
-
-A global CS basis can reuse an existing mesh without reconstructing it:
+## Fit and evaluate a field
 
 ```python
-from kompe import GlobalCSBasis, GlobalCSMesh
+from kompe import SHBasis, SphericalGrid, SphericalTransform
+from kompe.math import get_array_module
 
-mesh = GlobalCSMesh(cells_per_edge=16)
-basis = GlobalCSBasis(mesh=mesh)
-assert basis.mesh is mesh
+xp = get_array_module()
+lat, lon = xp.meshgrid(xp.linspace(-87.5, 87.5, 36), xp.linspace(-180.0, 175.0, 72), indexing="ij")
+# This grid is uniform in latitude and longitude: dA is proportional to cos(lat).
+grid = SphericalGrid(lat=lat, lon=lon, area_weights=xp.cos(xp.deg2rad(lat)))
+basis = SHBasis(8, 8, mean_free=False)
+transform = SphericalTransform(basis, grid, area_weighted=True)
+
+samples = xp.cos(xp.deg2rad(lat)).reshape(-1)
+coefficients = transform.analyze_scalar(samples)
+fitted = transform.synthesize_scalar(coefficients).reshape(grid.shape)
 ```
 
-`cells_per_edge` is the resolution along each face edge, not the total
-number of cells on a face. The differential basis requires even resolution.
+A grid specifies **where**, a basis specifies **how the field is represented**,
+and a transform fits or evaluates that representation. Arrays are sufficient;
+coefficient containers and cache configuration are optional advanced tools.
+`SHBasis` uses spherical harmonics; `GlobalCSBasis(cells_per_edge=16)` uses a
+global cubed-sphere mesh. `SECSBasis` represents elementary-current systems.
 
-`kompe.cache` provides `BoundedCache` for in-memory reuse and
-`PersistentArrayCache` for content-addressed numerical arrays on disk.
-They share no physical policy: the calculation owning a cached array
-defines its key, including its grid, basis, radius, or algorithm version
-as appropriate. Simulation artifacts are outside Kompe's scope.
+Numerical arrays keep scientific axes first and batch axes last. Scalar
+analysis maps `(points, *batch)` to `(coefficients, *batch)`; Helmholtz analysis
+maps `(2, points, *batch)` to `(2, coefficients, *batch)`. Analysis outputs can
+be synthesized directly. Flatten spatial grid axes explicitly; analysis and
+synthesis do not guess whether an axis is time, component, or position.
 
-## Conventions
+For example, several fields can share one cached fit:
 
-All public coordinate and component conventions are explicit:
+```python
+fields = xp.stack((samples, 2 * samples), axis=-1)
+coefficient_columns = transform.analyze_scalar(fields)
+fitted_columns = transform.synthesize_scalar(coefficient_columns)
+```
 
-- `SphericalGrid` latitude/longitude and canonical `theta`/`phi` are degrees in
-  the spherical frame chosen by the caller;
-- cubed-sphere `xi`/`eta` are radians;
-- radii are unit-agnostic but must be mutually consistent;
-- surface-operator components are `(theta, phi)` (south, east);
-- SECS kernels return `(east, north[, radial])`.
-
-Regional meshes are bounded patches. They share geometry and operator
-capabilities with closed-sphere representations, but do not claim
-closed-surface Helmholtz or mean-free Poisson semantics.
-
-## Quick start
+## Regional meshes
 
 ```python
 from kompe import RegionalCSMesh, RegionalCSProjection
@@ -127,28 +64,6 @@ mesh = RegionalCSMesh(
 
 theta_gradient, phi_gradient = mesh.operators.surface_gradient_matrices(sparse=True)
 divergence = mesh.operators.surface_divergence_matrix(sparse=True)
-
-metadata = mesh.to_spec().to_dict()
-restored = RegionalCSMesh.from_spec(metadata)
-assert restored.signature == mesh.signature
-```
-
-For global basis fitting and evaluation, the workflow is equally direct:
-
-```python
-import numpy as np
-from kompe import SHBasis, SphericalGrid, SphericalTransform
-
-latitude = np.linspace(-87.5, 87.5, 36)
-longitude = np.linspace(-180.0, 175.0, 72)
-lon, lat = np.meshgrid(longitude, latitude)
-grid = SphericalGrid(lat=lat, lon=lon)
-
-basis = SHBasis(8, 8, mean_free=False)
-transform = SphericalTransform(basis, grid, area_weighted=True)
-samples = np.cos(np.deg2rad(lat)).reshape(-1)
-coefficients = transform.analyze_scalar(samples)
-fitted = transform.synthesize_scalar(coefficients).reshape(grid.shape)
 ```
 
 When physical resolution is more natural than a cell count, name the two
@@ -156,12 +71,28 @@ directions explicitly: `xi_cell_size` is parallel to the projection orientation
 and `eta_cell_size` is perpendicular to it. This avoids reversing the physical
 axes to match the array shape's `(eta, xi)` order.
 
-Install the numerical core with `pip install kompe`. JAX acceleration is an
-optional extra: `pip install "kompe[jax]"`. Select it with
+Unlike point grids, meshes own cells and topology. Regional meshes have
+boundaries; they do not imply closed-sphere Helmholtz or Poisson conditions.
+
+## Conventions and backends
+
+- `SphericalGrid` angles are degrees in the caller's spherical frame;
+  `theta` is colatitude and `phi` is longitude. Cubed-sphere `xi`/`eta` are radians.
+- Tangential components are `(theta, phi)` = `(south, east)`;
+  SECS kernels use `(east, north[, radial])` at their geographic boundary.
+- Basis gradients are unit-sphere gradients: `gradient_phi_operator` includes
+  `1/sin(theta)`. Divide by radius for physical spatial derivatives.
+  Regional mesh operators already include their mesh radius.
+- `LinearMap` preserves diagonal, sparse, or matrix-free structure. Inspect
+  scientific axes with `to_array()` or flat linear-algebra axes with `to_matrix()`.
+
+JAX acceleration is an optional extra: `pip install "kompe[jax]"`. Select it with
 `KOMPE_USE_JAX=1` or `kompe.math.set_backend("jax")`. Applications that need
 64-bit JAX arithmetic should set `JAX_ENABLE_X64=1` before importing JAX.
 
-The public API, coordinate conventions, release policy, and consumer migration
-are documented in [`docs/`](docs/). Kompe is currently an alpha API: releases
+See the [API guide](docs/api.md) for remapping, solver choices, optional coefficient
+containers, and mesh serialization, and [architecture](docs/architecture.md) for
+extension points, caching, and ownership. Kompe does not import its consumers
+PynaMIT, Lompe, or secsy. Kompe is currently an alpha API: releases
 follow semantic versioning, but breaking corrections may occur before 1.0 and
 will be recorded in the changelog.

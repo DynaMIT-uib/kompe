@@ -21,8 +21,10 @@ def _semi_infinite_current_magnetic_field_matrices(
 ):
     """Return magnetic-field matrices for semi-infinite straight currents.
 
-    The direction components describe each current line in the local east,
-    north, and radial frame at its finite endpoint.
+    The direction components describe each line in the local east, north,
+    and radial frame at its finite endpoint; its radial component must be
+    nonzero. The ray is oriented outward, independently of the direction's
+    sign. Positive amplitude means current flowing inward along that ray.
     """
     xp = get_array_module(
         lat,
@@ -115,28 +117,30 @@ def _semi_infinite_current_magnetic_field_matrices(
     # Distances from evaluation points to the closest points on each line (N x K).
     perpendicular_distance = xp.sqrt(perpendicular_x**2 + perpendicular_y**2 + perpendicular_z**2)
 
-    # normalized versions of p_ecef vectors:
-    perpendicular_unit = perpendicular_ecef / perpendicular_distance.reshape(
-        (1, n_points, n_wedges)
-    )
-
-    # Biot-Savart direction: perpendicular-to-wire crossed with wire direction.
+    # Positive current flows opposite the outward ray direction, so
+    # Biot-Savart uses perpendicular-to-wire crossed with ray direction.
     field_direction_x = (
-        perpendicular_unit[1] * direction_ecef[2] - perpendicular_unit[2] * direction_ecef[1]
+        perpendicular_ecef[1] * direction_ecef[2] - perpendicular_ecef[2] * direction_ecef[1]
     )
     field_direction_y = (
-        perpendicular_unit[2] * direction_ecef[0] - perpendicular_unit[0] * direction_ecef[2]
+        perpendicular_ecef[2] * direction_ecef[0] - perpendicular_ecef[0] * direction_ecef[2]
     )
     field_direction_z = (
-        perpendicular_unit[0] * direction_ecef[1] - perpendicular_unit[1] * direction_ecef[0]
+        perpendicular_ecef[0] * direction_ecef[1] - perpendicular_ecef[1] * direction_ecef[0]
     )
     field_direction = xp.stack((field_direction_x, field_direction_y, field_direction_z))
-
-    # Angle from the perpendicular point on each wire to its finite endpoint.
-    endpoint_angle = xp.arctan(-distance_along / perpendicular_distance)
-
-    # magnetic field scaling factor (N x K):
-    field_scale = MU0 / (4 * np.pi * perpendicular_distance) * (1 - xp.sin(endpoint_angle))
+    endpoint_distance = xp.hypot(perpendicular_distance, distance_along)
+    behind_endpoint = distance_along < 0
+    # Integral_0^infinity ds / (rho^2 + (s-a)^2)^(3/2).
+    # Rationalize 1+a/d behind the endpoint. The field is then exactly
+    # zero on the ray's backward extension, without shifting a point.
+    denominator = xp.where(
+        behind_endpoint,
+        endpoint_distance * (endpoint_distance - distance_along),
+        perpendicular_distance**2,
+    )
+    numerator = xp.where(behind_endpoint, 1.0, 1.0 + distance_along / endpoint_distance)
+    field_scale = MU0 / (4 * np.pi) * numerator / denominator
     field_scale = field_scale.reshape((1, n_points, n_wedges))
 
     # (3 x N x K) array that map current magnitudes to ECEF components of the magnetic field:
@@ -176,7 +180,10 @@ def current_wedge_magnetic_field_matrices(
     semi-infinite current at one connection point. The direction components
     describe the inclined leg in the local east, north, and radial frame. The
     returned matrices map wedge currents in amperes to east, north, and radial
-    magnetic-field components.
+    magnetic-field components. Positive amplitude enters along the inclined
+    leg and leaves along the radial leg. The supplied radial direction
+    component must be nonzero; reversing all three components changes
+    neither the geometry nor this amplitude convention.
 
     This straight-line field-line approximation is intended as a first-order
     mid-latitude correction.

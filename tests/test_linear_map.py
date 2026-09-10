@@ -22,12 +22,34 @@ from kompe.math.linear_map import (
     diagonal_linear_map,
     identity_linear_map,
     is_identity_linear_map,
+    null_space_linear_map,
     pointwise_component_map,
     take_linear_map,
     vstack_linear_maps,
 )
 
 # Core maps and shaped operations
+
+
+@pytest.mark.parametrize("complex_values", [False, True])
+@pytest.mark.parametrize("materialized", [False, True])
+def test_null_space_map_is_orthonormal_and_preserves_the_adjoint(complex_values, materialized):
+    """Reflectors impose exact constraints with O(n k) retained storage."""
+    rng = np.random.default_rng(9)
+    constraints = rng.normal(size=(2, 12))
+    if complex_values:
+        constraints = constraints + 1j * rng.normal(size=constraints.shape)
+    basis = null_space_linear_map(constraints, output_shape=(2, 6))
+    if materialized:
+        basis.to_matrix()
+    x = rng.normal(size=(10, 3)) + 1j * rng.normal(size=(10, 3))
+    y = rng.normal(size=(12, 3)) + 1j * rng.normal(size=(12, 3))
+    values = basis.matmat(x)
+    np.testing.assert_allclose(constraints @ values, 0.0, atol=1e-13)
+    np.testing.assert_allclose(basis.rmatmat(values), x, atol=1e-13)
+    np.testing.assert_allclose(np.vdot(values, y), np.vdot(x, basis.rmatmat(y)), atol=1e-13)
+    assert basis(x).shape == (2, 6, 3)
+    assert bool(basis._dense_cache) == materialized
 
 
 @pytest.mark.parametrize("kind", ["dense", "sparse", "diagonal", "matrix_free", "composed"])
@@ -120,6 +142,27 @@ def test_scaled_dense_map_owns_one_scaled_array(materialized):
     np.testing.assert_allclose(
         scaled.adjoint()(xp.ones((3, 1))), (matrix.T.conj() @ xp.ones(3)).reshape(2, 2)
     )
+
+
+@pytest.mark.parametrize("dtype, scalar", [("float32", 0.3), ("complex64", 0.3 + 0.2j)])
+def test_scaled_matrix_free_adjoint_preserves_weak_scalar_precision(dtype, scalar):
+    xp = get_array_module()
+    matrix = xp.asarray([[1, 2], [-1, 3]], dtype=dtype)
+    operator = LinearMap(
+        shape=(2, 2),
+        dtype=matrix.dtype,
+        matvec=lambda x: matrix @ x,
+        rmatvec=lambda y: matrix.T.conj() @ y,
+        matmat=lambda x: matrix @ x,
+        rmatmat=lambda y: matrix.T.conj() @ y,
+        backend_operands=(matrix,),
+    )
+    scaled = scalar * operator
+    for values in (xp.ones(2, dtype=dtype), xp.ones((2, 3), dtype=dtype)):
+        actual = scaled.adjoint()(values)
+        expected = (matrix.T.conj() @ values) * scalar.conjugate()
+        assert actual.dtype == expected.dtype == matrix.dtype
+        np.testing.assert_allclose(actual, expected, atol=1e-6)
 
 
 def test_scaling_materialized_contraction_does_not_revisit_factors(monkeypatch):
@@ -628,6 +671,57 @@ def test_structured_dense_builders_preserve_jax_backend(monkeypatch):
 # Composition and materialization
 
 
+@pytest.mark.parametrize("shape", [(2, 6), (6, 2)])
+def test_lazy_composition_materializes_from_the_smaller_identity_and_reuses_it(shape):
+    """Generic materialization retains efficient forward and adjoint routes."""
+    xp = get_array_module()
+    rng = np.random.default_rng(78)
+    left = xp.asarray(rng.normal(size=(shape[0], 3)) + 1j * rng.normal(size=(shape[0], 3)))
+    right = xp.asarray(rng.normal(size=(3, shape[1])) + 1j * rng.normal(size=(3, shape[1])))
+    calls = []
+
+    def matrix_free(matrix, name):
+        def matmat(values):
+            calls.append((name, "forward", values.shape[1]))
+            return matrix @ values
+
+        def rmatmat(values):
+            calls.append((name, "adjoint", values.shape[1]))
+            return matrix.T.conj() @ values
+
+        return LinearMap(
+            shape=matrix.shape,
+            dtype=matrix.dtype,
+            matvec=lambda values: matrix @ values,
+            rmatvec=lambda values: matrix.T.conj() @ values,
+            matmat=matmat,
+            rmatmat=rmatmat,
+            backend_operands=(matrix,),
+        )
+
+    left_map = matrix_free(left, "left")
+    right_map = matrix_free(right, "right")
+    product = left_map @ right_map
+    np.testing.assert_allclose(product.to_matrix(), left @ right, rtol=1e-13, atol=1e-13)
+    expected_calls = (
+        [("left", "adjoint", 2), ("right", "adjoint", 2)]
+        if shape[0] < shape[1]
+        else [("right", "forward", 2), ("left", "forward", 2)]
+    )
+    assert calls == expected_calls
+    assert not left_map._dense_cache and not right_map._dense_cache
+    values = xp.ones((shape[1], 3), dtype=left.dtype)
+    np.testing.assert_allclose(product(values), left @ right @ values, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        product.adjoint()(xp.ones(shape[0])),
+        (left @ right).T.conj() @ xp.ones(shape[0]),
+        rtol=1e-13,
+        atol=1e-13,
+    )
+    product.to_array()
+    assert calls == expected_calls
+
+
 @pytest.mark.parametrize("backend", ["numpy", pytest.param("jax", marks=pytest.mark.requires_jax)])
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_composition_reuses_materialized_contraction(backend, side, monkeypatch):
@@ -675,10 +769,22 @@ def test_composition_reuses_materialized_contraction(backend, side, monkeypatch)
             np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-12)
 
 
-def test_diagonal_composition_avoids_dense_diagonal_materialization():
+@pytest.mark.parametrize("matrix_free", [False, True])
+def test_diagonal_composition_avoids_dense_diagonal_materialization(matrix_free):
     """Dense composite materialization scales rows/columns directly."""
     matrix = np.array([[1.0, 2.0], [3.0, 5.0]])
-    matrix_map = as_linear_map(matrix)
+    matrix_map = (
+        LinearMap(
+            shape=matrix.shape,
+            dtype=matrix.dtype,
+            matvec=lambda x: matrix @ x,
+            rmatvec=lambda y: matrix.T @ y,
+            matmat=lambda x: matrix @ x,
+            rmatmat=lambda y: matrix.T @ y,
+        )
+        if matrix_free
+        else as_linear_map(matrix)
+    )
     left = diagonal_linear_map(np.array([7.0, 11.0]))
     right = diagonal_linear_map(np.array([2.0, 3.0]))
 
@@ -793,6 +899,34 @@ def test_scaled_einsum_map_preserves_composition_structure():
     np.testing.assert_allclose(
         composed.normal_matrix_diag(), np.sum(np.abs(expected) ** 2, axis=0)
     )
+
+
+@pytest.mark.requires_jax
+@pytest.mark.parametrize("matrix_free", [False, True])
+def test_materializing_under_jit_does_not_cache_traced_values(matrix_free):
+    """Materialization inside a compiled function leaves no escaped state."""
+    import jax
+    import jax.numpy as jnp
+
+    matrix = np.array([[2.0, 1.0], [1.0, 3.0], [1.0, -2.0]])
+    linear_map = (
+        LinearMap(
+            shape=matrix.shape,
+            dtype=matrix.dtype,
+            matvec=lambda x: matrix @ x,
+            rmatvec=lambda y: matrix.T @ y,
+        )
+        if matrix_free
+        else as_linear_map(matrix)
+    )
+    values = jnp.array([0.25, 2.0])
+    with jax.checking_leaks():
+        compiled = jax.jit(lambda x: linear_map.to_matrix(backend="jax") @ x)
+        np.testing.assert_allclose(compiled(values), matrix @ values)
+    assert not linear_map._dense_cache
+    materialized = linear_map.to_matrix(backend="jax")
+    assert linear_map.to_matrix(backend="jax") is materialized
+    np.testing.assert_allclose(linear_map.matvec(values), matrix @ values)
 
 
 def test_to_matrix_reuses_cached_matrix_for_application():
@@ -1099,6 +1233,42 @@ def test_linear_map_backend_operands_drives_matrix_free_batches():
 # Sparse maps
 
 
+@pytest.mark.requires_jax
+@pytest.mark.parametrize("action", ["matvec", "rmatvec", "matmat", "rmatmat"])
+def test_sparse_map_first_compiled_use_keeps_reusable_device_storage(action, monkeypatch):
+    """First use under JIT must not leak tracers into the sparse cache."""
+    import jax
+    import jax.numpy as jnp
+
+    matrix = np.array([[2.0 + 1j, 0.0], [0.0, 3.0 - 2j], [1.0, -1j]])
+    linear_map = as_linear_map(csr_matrix(matrix))
+    expected_matrix = matrix.T.conj() if action.startswith("r") else matrix
+    values = np.arange(1.0, expected_matrix.shape[1] + 1) * (1.0 - 0.5j)
+    if action.endswith("mat"):
+        values = np.column_stack([values, 2 * values])
+    device_values = jnp.asarray(values)
+    apply = getattr(linear_map, action)
+
+    with jax.checking_leaks():
+        np.testing.assert_allclose(jax.jit(apply)(device_values), expected_matrix @ values)
+
+    def fail_rebuild(*_args, **_kwargs):
+        pytest.fail("Sparse device storage must be reused without densifying.")
+
+    asarray = jnp.asarray
+
+    def reject_index_transfer(values, *args, **kwargs):
+        if isinstance(values, np.ndarray) and values.shape == (np.count_nonzero(matrix), 2):
+            fail_rebuild()
+        return asarray(values, *args, **kwargs)
+
+    monkeypatch.setattr(jnp, "asarray", reject_index_transfer)
+    monkeypatch.setattr(csr_matrix, "toarray", fail_rebuild)
+    np.testing.assert_allclose(apply(device_values), expected_matrix @ values)
+    np.testing.assert_allclose(jax.jit(apply)(2 * device_values), 2 * (expected_matrix @ values))
+    assert not linear_map._dense_cache
+
+
 def test_sparse_linear_map_uses_sparse_normal_diagonal():
     """Sparse maps avoid generic densifying for normal diagonals."""
     matrix = np.array([[2.0, 0.0], [0.0, 3.0], [1.0, -1.0]])
@@ -1207,6 +1377,233 @@ def test_composed_linear_map_normal_diagonal_uses_matmat_path():
     expected = np.sum((weights[:, None] * matrix) ** 2, axis=0)
 
     np.testing.assert_allclose(composed.normal_matrix_diag(), expected)
+
+
+@pytest.mark.parametrize("operation", ["compose", "sum", "row_scale"])
+@pytest.mark.parametrize("materialized", [False, True])
+def test_normal_diagonal_reuses_materialization_or_probes_without_densifying(
+    operation, materialized, monkeypatch
+):
+    """One generic fallback covers lazy and already evaluated map algebra."""
+    xp = get_array_module()
+    matrix = xp.asarray(np.arange(16).reshape(4, 4) / 16 + 1j * np.eye(4))
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Normal diagonal must not rebuild a matrix or cached map action.")
+
+    source = LinearMap(
+        shape=(4, 4),
+        dtype=matrix.dtype,
+        matvec=lambda x: matrix @ x,
+        rmatvec=lambda x: matrix.T.conj() @ x,
+        matmat=lambda x: matrix @ x,
+        rmatmat=lambda x: matrix.T.conj() @ x,
+        dense_array=unexpected,
+    )
+    if operation == "compose":
+        operator = source @ source
+        expected = matrix @ matrix
+    elif operation == "sum":
+        operator = source + source
+        expected = matrix + matrix
+    else:
+        weights = xp.arange(1.0, 5.0)
+        operator = diagonal_linear_map(weights) @ source
+        expected = weights[:, None] * matrix
+    # Materialization itself uses actions here, not the deliberately
+    # unsupported dense factories of the source or algebraic expression.
+    object.__setattr__(operator, "_dense_array_func", None)
+    if materialized:
+        operator.to_matrix()
+        monkeypatch.setattr(LinearMap, "matmat", unexpected)
+        monkeypatch.setattr(LinearMap, "rmatmat", unexpected)
+    else:
+        object.__setattr__(operator, "_dense_array_func", unexpected)
+
+    np.testing.assert_allclose(
+        operator.normal_matrix_diag(), np.sum(np.abs(np.asarray(expected)) ** 2, axis=0)
+    )
+    row_scale = xp.asarray([1, 2j, 0, -0.5])
+    np.testing.assert_allclose(
+        operator.normal_matrix_diag(row_scale=row_scale),
+        np.sum(np.abs(np.asarray(row_scale[:, None] * expected)) ** 2, axis=0),
+    )
+    assert bool(operator._dense_cache) == materialized
+    assert not source._dense_cache
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["sparse", "diagonal", "identity", "pointwise", "take", "take_scalar", "einsum", "stack"],
+)
+def test_weighted_normal_diagonal_preserves_structure(kind, monkeypatch):
+    """Nested row/column scalings reduce structured entries, without probing columns."""
+    import kompe.math.linear_map as module
+
+    xp = get_array_module()
+    matrix = np.array([[1, 2j, 0], [0, 3, -1j]])
+    if kind == "sparse":
+        operator = as_linear_map(csr_matrix(matrix))
+    elif kind == "diagonal":
+        matrix = np.diag([1, 2j, 3])
+        operator = diagonal_linear_map(xp.asarray(np.diag(matrix)))
+    elif kind == "identity":
+        matrix = np.eye(3)
+        operator = identity_linear_map(3)
+    elif kind == "pointwise":
+        components = np.arange(12).reshape(2, 3, 2) + 1j
+        matrix = np.einsum("abi,ij->aibj", components, np.eye(2)).reshape(4, 6)
+        operator = pointwise_component_map(xp.asarray(components))
+    elif kind in {"take", "take_scalar"}:
+        indices = [2, 0, 2] if kind == "take" else 1
+        matrix = np.eye(6).reshape(2, 3, 6)[:, indices].reshape(-1, 6)
+        operator = take_linear_map((2, 3), indices, axis=1)
+    elif kind == "einsum":
+        components = np.arange(24).reshape(2, 3, 4) + 1j
+        matrix = components.reshape(6, 4)
+        operator = einsum_linear_map_from_matvec(
+            component_tensors=[xp.asarray(components)],
+            einsum_string_matvec="abi,i->ab",
+            output_shape=(2, 3),
+            input_shape=(4,),
+        )
+    else:
+        operator = vstack_linear_maps([as_linear_map(csr_matrix(matrix)), identity_linear_map(3)])
+        matrix = np.vstack([matrix, np.eye(3)])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("A weighted structured normal diagonal must not probe or densify.")
+
+    monkeypatch.setattr(module, "_normal_matrix_diag_from_matmat", unexpected)
+    monkeypatch.setattr(LinearMap, "_dense_array", unexpected)
+    rows = xp.asarray(np.arange(matrix.shape[0]) + 1j)
+    columns = xp.asarray(np.arange(matrix.shape[1]) - 0.5j)
+    outer_rows = xp.asarray(np.linspace(0, 2, matrix.shape[0]) + 0.2j)
+    scaled = (2j * operator) @ diagonal_linear_map(columns)
+    scaled = diagonal_linear_map(rows) @ scaled
+    expected = np.sum(
+        np.abs(np.asarray(outer_rows * rows)[:, None] * (2j * matrix) * np.asarray(columns)) ** 2,
+        axis=0,
+    )
+    np.testing.assert_allclose(scaled.normal_matrix_diag(row_scale=outer_rows), expected)
+    assert operator.materialized_matrix is None
+    assert scaled.materialized_matrix is None
+
+
+@pytest.mark.requires_jax
+@pytest.mark.parametrize("materialized", [False, True])
+def test_dense_jax_normal_diagonal_transfers_only_the_reduced_vector(materialized, monkeypatch):
+    """An existing device matrix is reduced on-device before returning CPU metadata."""
+    import jax.numpy as jnp
+
+    import kompe.math.linear_map as module
+
+    matrix = jnp.asarray(np.arange(12).reshape(4, 3) + 1j)
+    operator = as_linear_map(matrix)
+    if materialized:
+        operator.to_matrix(backend="jax")
+    transfers = []
+    to_numpy = module.to_numpy
+
+    def record(values):
+        transfers.append(values.shape)
+        return to_numpy(values)
+
+    monkeypatch.setattr(module, "to_numpy", record)
+    actual = operator.normal_matrix_diag()
+    assert isinstance(actual, np.ndarray)
+    assert transfers == [(3,)]
+    np.testing.assert_allclose(actual, np.sum(np.abs(np.asarray(matrix)) ** 2, axis=0))
+
+
+def test_materialized_matrix_inspection_does_not_construct_values():
+    """Known dense values are inspectable without materializing other maps."""
+
+    def unexpected(*args):
+        pytest.fail("Inspection must not apply or materialize the map.")
+
+    operator = LinearMap(
+        shape=(3, 3),
+        dtype=float,
+        matvec=unexpected,
+        rmatvec=unexpected,
+        dense_array=unexpected,
+    )
+    assert operator.materialized_matrix is None
+    assert not operator._dense_cache
+    values = np.arange(12.0).reshape(2, 2, 3)
+    dense = as_linear_map(values, output_shape=(2, 2), input_shape=(3,))
+    np.testing.assert_array_equal(dense.materialized_matrix, values.reshape(4, 3))
+    matrix = dense.to_matrix()
+    np.testing.assert_array_equal(dense.materialized_matrix, matrix)
+
+
+@pytest.mark.requires_jax
+def test_probed_normal_diagonal_transfers_only_reduced_columns(monkeypatch):
+    """Matrix-free probing reduces its sample blocks on the device."""
+    import jax.numpy as jnp
+
+    import kompe.math.linear_map as module
+
+    values = jnp.asarray(np.random.default_rng(392).normal(size=(70, 40)))
+    operator = LinearMap(
+        shape=values.shape,
+        dtype=values.dtype,
+        matvec=lambda x: values @ x,
+        rmatvec=lambda y: values.T @ y,
+        matmat=lambda x: values @ x,
+        backend_operands=(values,),
+    )
+    transfer = module.to_numpy
+    shapes = []
+
+    def record(array):
+        shapes.append(array.shape)
+        return transfer(array)
+
+    monkeypatch.setattr(module, "to_numpy", record)
+    actual = operator.normal_matrix_diag()
+    assert shapes == [(32,), (8,)]
+    assert operator.materialized_matrix is None
+    np.testing.assert_allclose(actual, np.sum(np.asarray(values) ** 2, axis=0), rtol=1e-13)
+
+
+@pytest.mark.requires_jax
+def test_einsum_normal_diagonal_keeps_its_component_arrays_on_device(monkeypatch):
+    """Tensor scaling transfers the diagonal, not the full component arrays."""
+    import jax.numpy as jnp
+
+    import kompe.math.einsum as module
+
+    matrix = np.random.default_rng(44).normal(size=(7, 4)) + 1j
+    weights = np.linspace(0.2, 1.2, 7)
+    operator = einsum_linear_map(
+        component_tensors=[jnp.asarray(matrix), jnp.asarray(weights)],
+        einsum_string_dense="ij,i->ij",
+        einsum_string_matvec="ij,i,j->i",
+        einsum_string_rmatvec="i,ij,i->j",
+        output_shape=(7,),
+        input_shape=(4,),
+    )
+    monkeypatch.setattr(
+        operator._einsum_map,
+        "_numpy_component_arrays",
+        lambda: pytest.fail("Normal-diagonal construction must retain JAX component arrays."),
+    )
+    transfer = module.to_numpy
+    shapes = []
+
+    def record(values):
+        shapes.append(values.shape)
+        return transfer(values)
+
+    monkeypatch.setattr(module, "to_numpy", record)
+    np.testing.assert_allclose(
+        operator.normal_matrix_diag(),
+        np.sum(np.abs(weights[:, None] * matrix) ** 2, axis=0),
+        rtol=1e-13,
+    )
+    assert shapes == [(4,)]
 
 
 # Tensor and einsum maps
@@ -1807,6 +2204,111 @@ def test_least_squares_accepts_linear_map_and_sparse_inputs():
 
     for operator in [as_linear_map(A), csr_matrix(A)]:
         problem = LeastSquaresProblem(A=operator)
-        solver = LeastSquaresSolver(solver="lsmr", tolerance=1e-12)
+        solver = LeastSquaresSolver(method="lsmr", tolerance=1e-12)
         solution = solver.solve(problem, rhs, maxiter=200)
         np.testing.assert_allclose(solution, expected, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize("complex_values", [False, True])
+def test_dense_numpy_adjoint_reuses_real_storage(complex_values):
+    """A real transpose is a view; complex adjoints still conjugate correctly."""
+    matrix = np.arange(12.0).reshape(3, 4)
+    if complex_values:
+        matrix = matrix + 1j * (matrix + 1)
+    operator = as_linear_map(matrix)
+    dense = operator.to_matrix(backend="numpy")
+    adjoint = operator.adjoint().to_matrix(backend="numpy")
+    np.testing.assert_array_equal(adjoint, matrix.T.conj())
+    assert np.shares_memory(dense, adjoint) is not complex_values
+
+
+@pytest.mark.parametrize("kind", ["dense", "diagonal", "sparse", "matrix_free", "structured"])
+@pytest.mark.parametrize("materialized", [False, True])
+def test_normal_operator_preserves_weighted_energy_and_shaped_batches(kind, materialized):
+    """A normal map is self-adjoint and measures the weighted field energy."""
+    from scipy.sparse import csr_matrix
+
+    from kompe.math import diagonal_linear_map, vstack_linear_maps
+
+    xp = get_array_module()
+    rng = np.random.default_rng(342)
+    matrix = rng.normal(size=(6, 6)) + 1j * rng.normal(size=(6, 6))
+    if kind == "diagonal":
+        matrix = np.diag(np.diag(matrix))
+    data = xp.asarray(matrix)
+    calls = []
+
+    def normal_matrix(xp, scale):
+        calls.append("normal")
+        values = xp.asarray(matrix)
+        if scale is not None:
+            values = xp.asarray(scale)[:, None] * values
+        return values.T.conj() @ values
+
+    if kind in {"matrix_free", "structured"}:
+        operator = LinearMap(
+            shape=matrix.shape,
+            dtype=matrix.dtype,
+            matvec=lambda x: data @ x,
+            rmatvec=lambda y: data.T.conj() @ y,
+            matmat=lambda x: data @ x,
+            rmatmat=lambda y: data.T.conj() @ y,
+            normal_matrix=normal_matrix if kind == "structured" else None,
+            backend_operands=(data,),
+            input_shape=(2, 3),
+            output_shape=(3, 2),
+        )
+    else:
+        operator = as_linear_map(
+            csr_matrix(matrix)
+            if kind == "sparse"
+            else xp.diag(data)
+            if kind == "diagonal"
+            else data,
+            input_shape=(2, 3),
+            output_shape=(3, 2),
+        )
+    if materialized:
+        operator.to_matrix()
+    weights = xp.asarray(np.linspace(0.4, 1.1, 6) * (1 + 0.3j))
+    normal = operator.normal_operator(weights)
+    assert calls == []
+    assert normal.input_shape == normal.output_shape == (2, 3)
+    assert normal.is_diagonal == (kind == "diagonal")
+    coefficients = xp.asarray(rng.normal(size=(2, 3, 2, 4)))
+    expected = matrix.T.conj() @ (np.abs(np.asarray(weights))[:, None] ** 2 * matrix)
+    np.testing.assert_allclose(
+        normal(coefficients),
+        (expected @ np.asarray(coefficients).reshape(6, -1)).reshape(2, 3, 2, 4),
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(normal.to_matrix(), expected, atol=1e-12)
+    x = np.asarray(coefficients).reshape(6, -1)[:, 0]
+    np.testing.assert_allclose(
+        np.vdot(x, normal.matvec(x)),
+        np.linalg.norm(np.asarray(weights) * (matrix @ x)) ** 2,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(normal.rmatvec(x), normal.matvec(x), atol=1e-12)
+    assert calls == (["normal"] if kind == "structured" and not materialized else [])
+
+    # Weights, column scaling and a stacked penalty carry the same objective.
+    rows = diagonal_linear_map(
+        weights, input_shape=operator.output_shape, output_shape=operator.output_shape
+    )
+    scale = xp.asarray(np.linspace(0.5, 2, 6) * (1 - 0.2j))
+    columns = diagonal_linear_map(scale, input_shape=(2, 3), output_shape=(2, 3))
+    system = vstack_linear_maps([rows @ operator @ columns, 0.2 * columns])
+    scaled = matrix * np.asarray(weights)[:, None] * np.asarray(scale)[None, :]
+    reference = scaled.T.conj() @ scaled + np.diag(0.04 * np.abs(np.asarray(scale)) ** 2)
+    np.testing.assert_allclose(system.normal_operator().to_matrix(), reference, atol=1e-11)
+
+
+def test_diagonal_normal_and_sum_stay_vector_backed():
+    from kompe.math import diagonal_linear_map
+
+    operator = diagonal_linear_map([2.0, 3.0])
+    normal = operator.normal_operator() + (0.5 * operator).normal_operator()
+    assert normal.is_diagonal
+    np.testing.assert_allclose(normal.diagonal(), [5.0, 11.25])
+    assert normal.materialized_matrix is None

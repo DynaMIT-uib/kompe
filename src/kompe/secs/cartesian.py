@@ -228,35 +228,28 @@ def cartesian_magnetic_field_matrices(
     constant = float(constant)
     if not np.isfinite(constant):
         raise ValueError("constant must be finite")
-    _, _, z_prime = relative_coordinates(x, y, z, x_poles, y_poles, z_poles)
+    x_prime, y_prime, z_prime = relative_coordinates(x, y, z, x_poles, y_poles, z_poles)
     xp = get_array_module(z_prime)
-
-    rho = horizontal_distance(x, y, z, x_poles, y_poles, z_poles)
-
-    coeff = constant / rho
+    rho = xp.hypot(x_prime, y_prime)
 
     # G matrix scale factors
     if current_type == "divergence_free":
-        rho_hat = radial_unit_vectors(x, y, z, x_poles, y_poles, z_poles)
-
-        G_rho_prime = (
-            -coeff * (1 - xp.abs(z_prime) / xp.sqrt(rho**2 + z_prime**2)) * xp.sign(z_prime)
-        )
-
-        Gx = G_rho_prime * rho_hat[:, :, 0]
-        Gy = G_rho_prime * rho_hat[:, :, 1]
-
-        Gz = -coeff * rho / xp.sqrt(rho**2 + z_prime**2)
+        distance = xp.hypot(rho, z_prime)
+        # Rationalize 1 - |z|/distance before dividing by rho. This
+        # preserves the finite axis limit and small off-axis fields.
+        horizontal_scale = -constant * xp.sign(z_prime) / (distance * (distance + xp.abs(z_prime)))
+        Gx = horizontal_scale * x_prime
+        Gy = horizontal_scale * y_prime
+        Gz = -constant / distance
 
     elif current_type == "curl_free":
         phi_hat = azimuth_unit_vectors(x, y, z, x_poles, y_poles, z_poles)
 
-        heaviside = xp.where((z_prime > 0.0) | xp.isclose(z_prime, 0.0), 1.0, 0.0)
-
-        G_phi_prime = -2.0 * coeff * heaviside
-
-        Gx = G_phi_prime * phi_hat[:, :, 0]
-        Gy = G_phi_prime * phi_hat[:, :, 1]
+        G_phi_prime = -2.0 * constant / rho
+        # The sheet value uses the upper limit. A point strictly below
+        # it has zero field, including on the extension of the FAC axis.
+        Gx = xp.where(z_prime >= 0.0, G_phi_prime * phi_hat[:, :, 0], 0.0)
+        Gy = xp.where(z_prime >= 0.0, G_phi_prime * phi_hat[:, :, 1], 0.0)
         Gz = xp.zeros_like(phi_hat[:, :, 2])
 
     return Gx, Gy, Gz

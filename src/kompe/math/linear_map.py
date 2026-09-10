@@ -9,15 +9,22 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
+import scipy.linalg
 import scipy.sparse
 from scipy.sparse.linalg import LinearOperator as ScipyLinearOperator
 
 from kompe.math.backend import (
+    _is_jax_tracer,
     block_until_ready,
     get_array_module,
+    get_backend,
+    immutable_array,
     readonly_numpy_array,
     to_numpy,
 )
+
+_NORMAL_MATRIX_WORK_BYTES = 64 * 1024**2
+_WEIGHTED_PRODUCT_WORK_BYTES = 512 * 1024**2
 
 MatrixShape: TypeAlias = tuple[int, int]
 VectorizedMapFunc: TypeAlias = Callable[[Any], Any]
@@ -29,10 +36,14 @@ class LinearMap:
     """Backend-agnostic linear map between shaped scientific arrays.
 
     Construct a matrix-free map from its forward and adjoint actions. Optional
-    block, dense, diagonal, and normal-matrix functions preserve useful
+    block, dense, sparse, diagonal, and normal-matrix functions preserve useful
     structure. ``map(values)`` retains domain/codomain and trailing batch
     axes. ``map @ values``, ``matvec``, and ``matmat`` use flat linear algebra;
     ``map @ other_map`` composes maps.
+
+    A map has a fixed mathematical action. Array factories may borrow their
+    numerical data; do not mutate those data while the map or its cached fits
+    are in use. Construct a new map for a changed operator.
     """
 
     shape: MatrixShape
@@ -42,8 +53,11 @@ class LinearMap:
     _matmat: VectorizedMapFunc | None = field(default=None, repr=False)
     _rmatmat: VectorizedMapFunc | None = field(default=None, repr=False)
     _dense_array_func: Callable[[Any], Any] | None = field(default=None, repr=False)
+    _sparse_matrix_func: Callable[[], Any] | None = field(default=None, repr=False)
+    _sparse_cache: Any = field(default=None, repr=False)
     _diagonal_array_func: Callable[[Any], Any] | None = field(default=None, repr=False)
-    _normal_matrix_diag: Callable[[], np.ndarray] | None = field(default=None, repr=False)
+    _normal_matrix_func: Callable | None = field(default=None, repr=False)
+    _normal_matrix_diag: Callable[..., np.ndarray] | None = field(default=None, repr=False)
     _backend_operands: tuple[Any, ...] = field(default=(), repr=False)
     _is_identity: bool = field(default=False, repr=False)
     _einsum_map: Any = field(default=None, repr=False, compare=False)
@@ -64,13 +78,22 @@ class LinearMap:
         rmatmat: VectorizedMapFunc | None = None,
         *,
         dense_array: Callable[[Any], Any] | None = None,
+        sparse_matrix: Callable[[], Any] | None = None,
         diagonal: Callable[[Any], Any] | None = None,
-        normal_matrix_diag: Callable[[], np.ndarray] | None = None,
+        normal_matrix: Callable[[Any, Any], Any] | None = None,
+        normal_matrix_diag: Callable[..., np.ndarray] | None = None,
         backend_operands: tuple[Any, ...] = (),
         output_shape: tuple[int, ...] | None = None,
         input_shape: tuple[int, ...] | None = None,
     ) -> None:
-        """Initialize a map from forward and adjoint vector operations."""
+        """Initialize a map from forward and adjoint vector operations.
+
+        A ``normal_matrix(xp, row_scale)`` callback materializes
+        A* diag(abs(row_scale)²) A without expanding A.
+        A normal-diagonal callback accepts optional ``row_scale=None`` and
+        computes diag(A* diag(abs(row_scale)²) A), or diag(A* A) when omitted.
+        This retains cheap reductions through weighted operator compositions.
+        """
         shape = tuple(int(dimension) for dimension in shape)
         output_shape, input_shape = _map_shapes(shape, input_shape, output_shape)
         object.__setattr__(self, "shape", shape)
@@ -80,7 +103,10 @@ class LinearMap:
         object.__setattr__(self, "_matmat", matmat)
         object.__setattr__(self, "_rmatmat", rmatmat)
         object.__setattr__(self, "_dense_array_func", dense_array)
+        object.__setattr__(self, "_sparse_matrix_func", sparse_matrix)
+        object.__setattr__(self, "_sparse_cache", None)
         object.__setattr__(self, "_diagonal_array_func", diagonal)
+        object.__setattr__(self, "_normal_matrix_func", normal_matrix)
         object.__setattr__(self, "_normal_matrix_diag", normal_matrix_diag)
         object.__setattr__(self, "_backend_operands", tuple(backend_operands))
         object.__setattr__(self, "_is_identity", False)
@@ -109,9 +135,44 @@ class LinearMap:
         self._dense_cache.clear()
 
     @property
+    def materialized_matrix(self):
+        """Return an existing dense matrix, or None without constructing one.
+
+        Prefer the active backend's copy, then any existing representation.
+        The result stays on its own backend. Declared diagonal maps should
+        still use ``diagonal()`` for their vector-backed numerical action.
+        """
+        dense = self._dense_cache.get(self.array_module())
+        if dense is None:
+            dense = next(iter(self._dense_cache.values()), self._dense_tensor)
+        return None if dense is None else dense.reshape(self.shape)
+
+    @property
     def is_diagonal(self) -> bool:
         """Whether this map has an exact diagonal representation."""
         return self._diagonal_array_func is not None
+
+    @property
+    def is_sparse(self) -> bool:
+        """Whether exact sparse structure is known, including diagonal maps."""
+        return self.is_diagonal or self._sparse_matrix_func is not None
+
+    def to_sparse_matrix(self):
+        """Return a SciPy CSR matrix from declared sparse structure.
+
+        This explicit CPU boundary never probes or densifies a map. Sparse
+        algebra is evaluated lazily and retained for subsequent factorizations.
+        Diagonal vectors are transferred only when this method is requested.
+        """
+        if self._sparse_cache is None:
+            if self.is_diagonal:
+                matrix = scipy.sparse.diags(self.diagonal(backend="numpy"), format="csr")
+            elif self._sparse_matrix_func is not None:
+                matrix = self._sparse_matrix_func().tocsr()
+            else:
+                raise ValueError("This map has no declared sparse representation.")
+            object.__setattr__(self, "_sparse_cache", matrix)
+        return self._sparse_cache
 
     def __call__(self, values: Any) -> Any:
         """Map ``input_shape + batch_shape`` to ``output_shape + batch_shape``.
@@ -147,7 +208,7 @@ class LinearMap:
         dense = self._dense_cache.get(xp)
         if dense is not None and self._diagonal_array_func is None:
             y_arr = xp.asarray(y).reshape(self.shape[0])
-            return xp.swapaxes(xp.conjugate(dense), -2, -1) @ y_arr
+            return dense.T.conj() @ y_arr
         return self._rmatvec(y)
 
     def matmat(self, x_block: Any) -> Any:
@@ -184,7 +245,7 @@ class LinearMap:
             )
         dense = self._dense_cache.get(xp)
         if dense is not None and self._diagonal_array_func is None:
-            adjoint = xp.swapaxes(xp.conjugate(dense), -2, -1)
+            adjoint = dense.T.conj()
             return adjoint @ xp.asarray(y_arr)
         if self._rmatmat is not None:
             return self._rmatmat(y_arr)
@@ -200,19 +261,20 @@ class LinearMap:
 
         if self._dense_array_func is not None:
             dense = self._dense_array_func(xp)
-            self._dense_cache[xp] = dense
-            return dense
-
-        eye_dtype = np.result_type(self.dtype, np.float64)
-        if self.shape[0] < self.shape[1]:
-            output_identity = xp.eye(self.shape[0], dtype=eye_dtype)
-            adjoint = self.rmatmat(output_identity)
-            dense = xp.swapaxes(xp.conjugate(adjoint), -2, -1)
         else:
-            input_identity = xp.eye(self.shape[1], dtype=eye_dtype)
-            dense = self.matmat(input_identity)
-        dense = xp.asarray(dense)
-        self._dense_cache[xp] = dense
+            eye_dtype = np.result_type(self.dtype, np.float64)
+            if self.shape[0] < self.shape[1]:
+                output_identity = xp.eye(self.shape[0], dtype=eye_dtype)
+                adjoint = self.rmatmat(output_identity)
+                dense = adjoint.T.conj()
+            else:
+                input_identity = xp.eye(self.shape[1], dtype=eye_dtype)
+                dense = self.matmat(input_identity)
+            dense = xp.asarray(dense)
+        # Traced materialization belongs to the compiled function,
+        # not this reusable Python object's eager cache.
+        if not _is_jax_tracer(dense):
+            self._dense_cache[xp] = dense
         return dense
 
     def to_matrix(self, *, backend: ArrayBackend | None = None) -> Any:
@@ -236,7 +298,7 @@ class LinearMap:
 
         def dense_array(xp: Any) -> Any:
             dense = self._dense_array(xp)
-            return xp.swapaxes(xp.conjugate(dense), -2, -1)
+            return dense.T.conj()
 
         return LinearMap(
             shape=(self.shape[1], self.shape[0]),
@@ -247,6 +309,9 @@ class LinearMap:
             rmatmat=self.matmat,
             dense_array=dense_array,
             diagonal=diagonal_func,
+            sparse_matrix=(lambda: self.to_sparse_matrix().T.conjugate())
+            if self.is_sparse
+            else None,
             backend_operands=self.backend_operands,
             input_shape=self.output_shape,
             output_shape=self.input_shape,
@@ -270,16 +335,126 @@ class LinearMap:
             "Use diagonal_linear_map to declare diagonal structure."
         )
 
-    def normal_matrix_diag(self) -> np.ndarray:
-        """Compute ``diag(A* A)`` for this map."""
-        if self._normal_matrix_diag is not None:
-            return np.asarray(self._normal_matrix_diag()).real
+    def normal_operator(self, row_scale=None):
+        """Return A* diag(abs(row_scale)²) A, retaining operator structure.
+
+        ``row_scale`` contains one scale per flat output row (None means
+        unit weights). Application is matrix-free; explicit materialization
+        reuses dense, sparse, diagonal, or declared normal-product structure.
+        The result maps ``input_shape`` to itself. No solver is selected.
+        """
+        if row_scale is not None:
+            row_scale = immutable_array(row_scale).reshape(-1)
+            if row_scale.shape != (self.shape[0],):
+                raise ValueError("row_scale must contain one scale per output row.")
+        if self.is_diagonal:
+            xp = self.array_module(row_scale)
+            diagonal = self._diagonal_array(xp)
+            if row_scale is not None:
+                diagonal = diagonal * xp.asarray(row_scale)
+            return diagonal_linear_map(
+                xp.abs(diagonal) ** 2, input_shape=self.input_shape, output_shape=self.input_shape
+            )
+
+        xp = self.array_module(row_scale)
+        squared_scale = None if row_scale is None else xp.abs(xp.asarray(row_scale)) ** 2
+
+        def matvec(x):
+            values = self.matvec(x)
+            if row_scale is not None:
+                xp = self.array_module(values, row_scale)
+                values = xp.asarray(squared_scale) * values
+            return self.rmatvec(values)
+
+        def matmat(x):
+            values = self.matmat(x)
+            if row_scale is not None:
+                xp = self.array_module(values, row_scale)
+                values = xp.asarray(squared_scale)[:, None] * values
+            return self.rmatmat(values)
+
+        def sparse_matrix():
+            matrix = self.to_sparse_matrix()
+            if row_scale is not None:
+                matrix = matrix.multiply(to_numpy(row_scale)[:, None]).tocsr()
+            return matrix.T.conj() @ matrix
+
+        return LinearMap(
+            shape=(self.shape[1], self.shape[1]),
+            dtype=np.result_type(self.dtype, getattr(row_scale, "dtype", self.dtype)),
+            matvec=matvec,
+            rmatvec=matvec,
+            matmat=matmat,
+            rmatmat=matmat,
+            dense_array=lambda xp: self._normal_matrix(xp, row_scale),
+            sparse_matrix=sparse_matrix if self.is_sparse else None,
+            backend_operands=self.backend_operands + (() if row_scale is None else (row_scale,)),
+            input_shape=self.input_shape,
+            output_shape=self.input_shape,
+        )
+
+    def _normal_matrix(self, xp, row_scale=None):
+        """Materialize a normal product without retaining a second cache."""
+        matrix = self.materialized_matrix
+        if matrix is not None:
+            matrix = self._dense_array(xp)
+            if row_scale is None:
+                return matrix.T.conj() @ matrix
+            scale = xp.asarray(to_numpy(row_scale) if xp is np else row_scale)
+            return _weighted_cross_product(matrix, matrix, xp.abs(scale) ** 2)
+        if self._normal_matrix_func is not None:
+            result = self._normal_matrix_func(xp, row_scale)
+            return xp.asarray(to_numpy(result) if xp is np else result)
+        if self.is_sparse:
+            return xp.asarray(self.normal_operator(row_scale).to_sparse_matrix().toarray())
+
+        # Bound temporary directions and sampled columns. Unlike A* A via
+        # a dense A, this also works when the sampled field is very large.
+        n = self.shape[1]
+        dtype = np.result_type(self.dtype, getattr(row_scale, "dtype", self.dtype))
+        normal = xp.zeros((n, n), dtype=dtype)
+        bytes_per_column = max(1, (2 * n + self.shape[0]) * np.dtype(dtype).itemsize)
+        block_size = max(1, _NORMAL_MATRIX_WORK_BYTES // bytes_per_column)
+        operator = self.normal_operator(row_scale)
+        for start in range(0, n, block_size):
+            stop = min(n, start + block_size)
+            directions = xp.eye(n, stop - start, k=-start, dtype=dtype)
+            columns = operator.matmat(directions)
+            if xp is np:
+                normal[:, start:stop] = to_numpy(columns)
+            else:
+                normal = normal.at[:, start:stop].set(columns)
+        return normal
+
+    def normal_matrix_diag(self, row_scale=None) -> np.ndarray:
+        """Return the CPU normal diagonal, optionally after scaling flat rows.
+
+        Keep diagonal vectors compact; otherwise reuse an existing matrix
+        on its backend, transferring only the resulting diagonal. Without
+        materialized values, use a structured formula or bounded column probes.
+        With row_scale w, the result is diag(A* diag(abs(w)²) A).
+        """
+        if row_scale is not None and np.shape(row_scale) != (self.shape[0],):
+            raise ValueError("row_scale must contain one value per flat output row.")
         if self._diagonal_array_func is not None:
-            return np.abs(np.asarray(self.diagonal(backend="numpy"))) ** 2
-        if np in self._dense_cache or self._dense_array_func is not None:
-            dense = np.asarray(self.to_matrix(backend="numpy"))
-            return np.sum(np.abs(dense) ** 2, axis=0)
-        return _normal_matrix_diag_from_matmat(self.shape, self.dtype, self.matmat)
+            values = np.asarray(self.diagonal(backend="numpy"))
+            if row_scale is not None:
+                values = values * to_numpy(row_scale)
+            return np.abs(values) ** 2
+        dense = self.materialized_matrix
+        if dense is not None:
+            xp = _runtime_array_module(dense)
+            if row_scale is not None:
+                dense = xp.asarray(row_scale)[:, None] * dense
+            return to_numpy(xp.sum(xp.abs(dense) ** 2, axis=0))
+        if self._normal_matrix_diag is not None:
+            diagonal = (
+                self._normal_matrix_diag()
+                if row_scale is None
+                else self._normal_matrix_diag(row_scale=row_scale)
+            )
+            return np.asarray(diagonal).real
+        return _normal_matrix_diag_from_matmat(self.shape, self.dtype, self.matmat, row_scale)
 
     def __matmul__(self, other: Any) -> Any:
         """Apply to arrays or compose with another operator."""
@@ -309,10 +484,10 @@ class LinearMap:
             return as_linear_map(
                 self, input_shape=other_map.input_shape, output_shape=self.output_shape
             )
-        composed_einsum = self._compose_einsum_matmul(other_map)
-        if composed_einsum is not None:
-            return composed_einsum.to_linear_map()
-        return self._composed_linear_map(other_map)
+        from kompe.math.einsum import fuse_linear_maps
+
+        fused = fuse_linear_maps(self, other_map)
+        return self._composed_linear_map(other_map) if fused is None else fused
 
     def _composed_linear_map(self, other_map: LinearMap) -> LinearMap:
         """Build the lazy fallback representation of a composition."""
@@ -331,8 +506,16 @@ class LinearMap:
         def rmatmat(y: Any) -> Any:
             return other_map.rmatmat(self.rmatmat(y))
 
-        def dense_array(xp: Any) -> Any:
-            return self._composition_dense_array(other_map, xp)
+        dense_array = None
+        if self_is_diagonal or other_is_diagonal:
+
+            def dense_array(xp: Any) -> Any:
+                # Scale rows or columns without expanding diagonal factors.
+                if self_is_diagonal and other_is_diagonal:
+                    return xp.diag(self._diagonal_array(xp) * other_map._diagonal_array(xp))
+                if self_is_diagonal:
+                    return self._diagonal_array(xp)[:, None] * other_map._dense_array(xp)
+                return self._dense_array(xp) * other_map._diagonal_array(xp)[None, :]
 
         dtype = np.promote_types(self.dtype, other_map.dtype)
 
@@ -342,8 +525,36 @@ class LinearMap:
             def diagonal_array(xp: Any) -> Any:
                 return self._diagonal_array(xp) * other_map._diagonal_array(xp)
 
-        def normal_matrix_diag() -> np.ndarray:
-            return self._composition_normal_matrix_diag(other_map, dtype, matmat)
+        normal_matrix_diag = None
+        if self_is_diagonal:
+
+            def normal_matrix_diag(row_scale=None) -> np.ndarray:
+                diagonal = self.diagonal()
+                if row_scale is not None:
+                    xp = get_array_module(diagonal, row_scale)
+                    diagonal = xp.asarray(diagonal) * xp.asarray(row_scale)
+                return other_map.normal_matrix_diag(row_scale=diagonal)
+
+        elif other_is_diagonal:
+
+            def normal_matrix_diag(row_scale=None) -> np.ndarray:
+                diagonal = np.asarray(other_map.diagonal(backend="numpy"))
+                return np.abs(diagonal) ** 2 * self.normal_matrix_diag(row_scale=row_scale)
+
+        def normal_matrix(xp, row_scale):
+            if self_is_diagonal:
+                scale = self._diagonal_array(xp)
+                if row_scale is not None:
+                    scale = scale * xp.asarray(row_scale)
+                return other_map._normal_matrix(xp, scale)
+            normal = self._normal_matrix(xp, row_scale)
+            if other_is_diagonal:
+                scale = other_map._diagonal_array(xp)
+                return scale.conj()[:, None] * normal * scale[None, :]
+            # Z* N Z applies an arbitrary coordinate restriction without
+            # expanding Z (notably an orthonormal gauge-nullspace map).
+            left = other_map.rmatmat(normal)
+            return other_map.rmatmat(left.T.conj()).T.conj()
 
         return LinearMap(
             shape=(self.shape[0], other_map.shape[1]),
@@ -355,118 +566,15 @@ class LinearMap:
             dense_array=dense_array,
             diagonal=diagonal_array,
             normal_matrix_diag=normal_matrix_diag,
+            normal_matrix=normal_matrix
+            if self_is_diagonal or other_is_diagonal or self._normal_matrix_func is not None
+            else None,
             backend_operands=self._backend_operands + other_map._backend_operands,
+            sparse_matrix=(lambda: self.to_sparse_matrix() @ other_map.to_sparse_matrix())
+            if self.is_sparse and other_map.is_sparse
+            else None,
             output_shape=self.output_shape,
             input_shape=other_map.input_shape,
-        )
-
-    def _composition_dense_array(self, other_map: LinearMap, xp: Any) -> Any:
-        """Materialize a composition, preserving diagonal structure."""
-        self_is_diagonal = self._diagonal_array_func is not None
-        other_is_diagonal = other_map._diagonal_array_func is not None
-        if self_is_diagonal and other_is_diagonal:
-            diagonal = self._diagonal_array(xp) * other_map._diagonal_array(xp)
-            return xp.diag(diagonal)
-        if self_is_diagonal:
-            return self._diagonal_array(xp).reshape(-1, 1) * other_map._dense_array(xp)
-        if other_is_diagonal:
-            return self._dense_array(xp) * other_map._diagonal_array(xp).reshape(1, -1)
-        eye_dtype = np.result_type(self.dtype, other_map.dtype, np.float64)
-        if self.shape[0] < other_map.shape[1]:
-            output_identity = xp.eye(self.shape[0], dtype=eye_dtype)
-            adjoint = other_map.rmatmat(self.rmatmat(output_identity))
-            return xp.swapaxes(xp.conjugate(adjoint), -2, -1)
-        input_identity = xp.eye(other_map.shape[1], dtype=eye_dtype)
-        return xp.asarray(self.matmat(other_map.matmat(input_identity)))
-
-    def _composition_normal_matrix_diag(self, other_map, dtype, matmat):
-        """Return the normal diagonal of a lazy composition."""
-        if other_map._diagonal_array_func is not None:
-            diagonal = np.asarray(other_map.diagonal(backend="numpy"))
-            return np.abs(diagonal) ** 2 * self.normal_matrix_diag()
-        return _normal_matrix_diag_from_matmat((self.shape[0], other_map.shape[1]), dtype, matmat)
-
-    def _compose_einsum_matmul(self, other_map: LinearMap) -> Any:
-        """Return a symbolic einsum composition, when safe."""
-        self_is_diagonal = self._diagonal_array_func is not None
-        other_is_diagonal = other_map._diagonal_array_func is not None
-        if self_is_diagonal and other_is_diagonal:
-            return None
-        if self_is_diagonal:
-            right_einsum = other_map._composition_einsum_map()
-            if (
-                right_einsum is None
-                or self.output_shape != self.input_shape
-                or self.output_shape != other_map.output_shape
-                or self.output_shape != right_einsum.output_shape
-            ):
-                return None
-            try:
-                from kompe.math.einsum import compose_diagonal_einsum_map
-
-                return compose_diagonal_einsum_map(
-                    self._diagonal_array(), self.output_shape, right_einsum, side="left"
-                )
-            except ValueError:
-                return None
-        if other_is_diagonal:
-            left_einsum = self._composition_einsum_map()
-            if (
-                left_einsum is None
-                or other_map.output_shape != other_map.input_shape
-                or other_map.input_shape != self.input_shape
-                or other_map.input_shape != left_einsum.input_shape
-            ):
-                return None
-            try:
-                from kompe.math.einsum import compose_diagonal_einsum_map
-
-                return compose_diagonal_einsum_map(
-                    other_map._diagonal_array(), other_map.input_shape, left_einsum, side="right"
-                )
-            except ValueError:
-                return None
-
-        left_einsum = self._composition_einsum_map()
-        right_einsum = other_map._composition_einsum_map()
-        if left_einsum is None or right_einsum is None:
-            return None
-        if (
-            self.output_shape != left_einsum.output_shape
-            or self.input_shape != left_einsum.input_shape
-            or other_map.output_shape != right_einsum.output_shape
-            or other_map.input_shape != right_einsum.input_shape
-        ):
-            return None
-        try:
-            from kompe.math.einsum import compose_einsum_maps
-
-            return compose_einsum_maps(left_einsum, right_einsum)
-        except ValueError:
-            return None
-
-    def _composition_einsum_map(self) -> Any:
-        """Return an einsum view for composition, when safe."""
-        dense = self._dense_cache.get(self.array_module())
-        if dense is not None:
-            # Reuse a completed contraction instead of expanding its factors.
-            tensor = dense.reshape(self.output_shape + self.input_shape)
-        elif (
-            self._einsum_map is not None
-            and self._einsum_map.output_shape == self.output_shape
-            and self._einsum_map.input_shape == self.input_shape
-        ):
-            return self._einsum_map
-        else:
-            tensor = self._dense_tensor
-        if tensor is None:
-            return None
-        if tuple(tensor.shape) != self.output_shape + self.input_shape:
-            return None
-        from kompe.math.einsum import dense_tensor_einsum_map
-
-        return dense_tensor_einsum_map(
-            tensor, output_shape=self.output_shape, input_shape=self.input_shape
         )
 
     def __add__(self, other: Any) -> LinearMap:
@@ -501,9 +609,6 @@ class LinearMap:
 
         dtype = np.promote_types(self.dtype, other_map.dtype)
 
-        def normal_matrix_diag() -> np.ndarray:
-            return _normal_matrix_diag_from_matmat(self.shape, dtype, matmat)
-
         return LinearMap(
             shape=self.shape,
             dtype=dtype,
@@ -512,8 +617,13 @@ class LinearMap:
             matmat=matmat,
             rmatmat=rmatmat,
             dense_array=dense_array,
-            normal_matrix_diag=normal_matrix_diag,
+            diagonal=(lambda xp: self._diagonal_array(xp) + other_map._diagonal_array(xp))
+            if self.is_diagonal and other_map.is_diagonal
+            else None,
             backend_operands=self._backend_operands + other_map._backend_operands,
+            sparse_matrix=(lambda: self.to_sparse_matrix() + other_map.to_sparse_matrix())
+            if self.is_sparse and other_map.is_sparse
+            else None,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
         )
@@ -554,19 +664,19 @@ class LinearMap:
             return self.matvec(x) * scalar
 
         def rmatvec(y: Any) -> Any:
-            return self.rmatvec(y) * np.conj(scalar)
+            return self.rmatvec(y) * scalar.conjugate()
 
         def matmat(x: Any) -> Any:
             return self.matmat(x) * scalar
 
         def rmatmat(y: Any) -> Any:
-            return self.rmatmat(y) * np.conj(scalar)
+            return self.rmatmat(y) * scalar.conjugate()
 
         def dense_array(xp: Any) -> Any:
             return self._dense_array(xp) * scalar
 
-        def normal_matrix_diag() -> np.ndarray:
-            return np.abs(scalar) ** 2 * self.normal_matrix_diag()
+        def normal_matrix_diag(row_scale=None) -> np.ndarray:
+            return np.abs(scalar) ** 2 * self.normal_matrix_diag(row_scale=row_scale)
 
         def diagonal_array(xp: Any) -> Any:
             return self._diagonal_array(xp) * scalar
@@ -581,7 +691,11 @@ class LinearMap:
             dense_array=dense_array,
             diagonal=(diagonal_array if self._diagonal_array_func is not None else None),
             normal_matrix_diag=normal_matrix_diag,
+            normal_matrix=lambda xp, row_scale: (
+                abs(scalar) ** 2 * self._normal_matrix(xp, row_scale)
+            ),
             backend_operands=self._backend_operands,
+            sparse_matrix=(lambda: self.to_sparse_matrix() * scalar) if self.is_sparse else None,
             output_shape=self.output_shape,
             input_shape=self.input_shape,
         )
@@ -627,7 +741,7 @@ def _runtime_array_module(*values: Any) -> Any:
 
 
 def _normal_matrix_diag_from_matmat(
-    shape: MatrixShape, dtype: Any, matmat: Callable[[Any], Any]
+    shape: MatrixShape, dtype: Any, matmat: Callable[[Any], Any], row_scale=None
 ) -> np.ndarray:
     """Compute ``diag(A* A)`` from bounded identity blocks."""
     n_cols = shape[1]
@@ -641,8 +755,11 @@ def _normal_matrix_diag_from_matmat(
         cols = stop - start
         block[:, :cols] = 0
         block[start:stop, :cols] = np.eye(cols, dtype=work_dtype)
-        res = np.asarray(matmat(block[:, :cols]))
-        diag[start:stop] = np.sum(np.abs(res) ** 2, axis=0).real
+        res = matmat(block[:, :cols])
+        xp = _runtime_array_module(res)
+        if row_scale is not None:
+            res = res * xp.asarray(row_scale)[:, None]
+        diag[start:stop] = to_numpy(xp.sum(xp.abs(res) ** 2, axis=0)).real
     return diag
 
 
@@ -694,7 +811,7 @@ def _linear_map_from_dense(
         xp = _runtime_array_module(mat_array, vec)
         mat_arr = xp.asarray(mat_array)
         vec_arr = xp.asarray(vec).reshape(shape[0])
-        return xp.matmul(xp.swapaxes(xp.conjugate(mat_arr), -2, -1), vec_arr)
+        return mat_arr.T.conj() @ vec_arr
 
     def matmat(block: Any) -> Any:
         xp = _runtime_array_module(mat_array, block)
@@ -706,12 +823,8 @@ def _linear_map_from_dense(
         xp = _runtime_array_module(mat_array, block)
         mat_arr = xp.asarray(mat_array)
         block_arr = xp.asarray(block).reshape(shape[0], -1)
-        adjoint = xp.swapaxes(xp.conjugate(mat_arr), -2, -1)
+        adjoint = mat_arr.T.conj()
         return xp.matmul(adjoint, block_arr)
-
-    def normal_matrix_diag() -> np.ndarray:
-        mat_np = to_numpy(mat_array)
-        return np.sum(np.abs(mat_np) ** 2, axis=0)
 
     def dense_array(xp: Any) -> Any:
         return xp.asarray(mat_array)
@@ -724,7 +837,6 @@ def _linear_map_from_dense(
         matmat=matmat,
         rmatmat=rmatmat,
         dense_array=dense_array,
-        normal_matrix_diag=normal_matrix_diag,
         backend_operands=(mat_array,),
         output_shape=out_shape,
         input_shape=in_shape,
@@ -768,9 +880,6 @@ def diagonal_linear_map(
         block_arr = xp.asarray(block).reshape(size, -1)
         return xp.conjugate(diag_arr) * block_arr
 
-    def normal_matrix_diag() -> np.ndarray:
-        return np.abs(to_numpy(diag_array)) ** 2
-
     def dense_array(xp: Any) -> Any:
         return xp.diag(xp.asarray(diag_array))
 
@@ -786,10 +895,90 @@ def diagonal_linear_map(
         rmatmat=rmatmat,
         dense_array=dense_array,
         diagonal=diagonal_array,
-        normal_matrix_diag=normal_matrix_diag,
         backend_operands=(diag_array,),
         output_shape=out_shape,
         input_shape=in_shape,
+    )
+
+
+def _normalized_constraint_rows(rows):
+    """Remove arbitrary row units from homogeneous constraints on the CPU."""
+    if rows.shape[0] == 0:
+        return rows
+    if scipy.sparse.issparse(rows):
+        rows = rows.astype(np.result_type(rows.dtype, 0.0), copy=True).tocsr()
+        scale = np.asarray(abs(rows).max(axis=1).toarray()).reshape(-1)
+        row_indices = np.repeat(np.arange(rows.shape[0]), np.diff(rows.indptr))
+        rows.data /= np.where(scale > 0, scale, 1)[row_indices]
+        norms = np.sqrt(np.asarray(abs(rows).power(2).sum(axis=1)).reshape(-1))
+        rows.data /= np.where(norms > 0, norms, 1)[row_indices]
+        return rows
+    scale = np.max(np.abs(rows), axis=1, initial=0)
+    scaled = rows / np.where(scale > 0, scale, 1)[:, None]
+    norms = np.linalg.norm(scaled, axis=1)
+    return scaled / np.where(norms > 0, norms, 1)[:, None]
+
+
+def null_space_linear_map(constraint_matrix, *, output_shape=None) -> LinearMap:
+    """Return an orthonormal basis for ``C x = 0`` without a dense nullspace.
+
+    ``C`` must have independent rows and no more rows than columns.
+    A CPU QR factorization retains one Householder vector per constraint;
+    application uses the active array backend and costs O(n k) per RHS,
+    where n is the coefficient count and k is the constraint count.
+    The map takes n-k independent coordinates to the shaped full space.
+    """
+    constraints = np.asarray(constraint_matrix)
+    if constraints.ndim != 2 or not np.all(np.isfinite(constraints)):
+        raise ValueError("constraint_matrix must be a finite two-dimensional matrix.")
+    k, n = constraints.shape
+    if k > n:
+        raise ValueError("constraint_matrix cannot have more rows than columns.")
+    constraints = _normalized_constraint_rows(constraints)
+    (qr, tau), triangular = scipy.linalg.qr(constraints.T.conj(), mode="raw")
+    if k and np.linalg.matrix_rank(triangular) != k:
+        raise ValueError("constraint_matrix must have independent rows.")
+    vectors = np.tril(qr, -1) + np.eye(n, k, dtype=qr.dtype)
+    reflectors = as_linear_map(vectors)
+
+    def reflect(values, *, adjoint=False):
+        xp = get_array_module(values)
+        result = xp.asarray(values)
+        device_vectors = reflectors.to_matrix(backend=get_backend(values))
+        # Q = H_0 ... H_(k-1); its adjoint applies reflectors in reverse.
+        for i in range(k) if adjoint else reversed(range(k)):
+            vector = device_vectors[:, i : i + 1]
+            scale = tau[i].conjugate() if adjoint else tau[i]
+            result = result - scale * vector * (vector.T.conj() @ result)
+        return result
+
+    def matmat(values):
+        xp = get_array_module(values)
+        values = xp.asarray(values)
+        return reflect(
+            xp.concatenate([xp.zeros((k, values.shape[1]), dtype=values.dtype), values])
+        )
+
+    def rmatmat(values):
+        return reflect(values, adjoint=True)[k:]
+
+    def normal_matrix_diag(row_scale=None):
+        # Z* Z = I. Preserve this structure when another coordinate
+        # restriction needs column norms, without probing or materializing Z.
+        if row_scale is None:
+            return np.ones(n - k)
+        return _normal_matrix_diag_from_matmat((n, n - k), vectors.dtype, matmat, row_scale)
+
+    return LinearMap(
+        shape=(n, n - k),
+        dtype=vectors.dtype,
+        matvec=lambda values: matmat(values.reshape(-1, 1)).reshape(-1),
+        rmatvec=lambda values: rmatmat(values.reshape(-1, 1)).reshape(-1),
+        matmat=matmat,
+        rmatmat=rmatmat,
+        normal_matrix_diag=normal_matrix_diag,
+        input_shape=(n - k,),
+        output_shape=output_shape,
     )
 
 
@@ -813,9 +1002,6 @@ def identity_linear_map(shape: int | tuple[int, ...], *, dtype: Any = np.float64
     def diagonal_array(xp: Any) -> Any:
         return xp.ones(size, dtype=dtype)
 
-    def normal_matrix_diag() -> np.ndarray:
-        return np.ones(size, dtype=dtype)
-
     identity = LinearMap(
         shape=(size, size),
         dtype=dtype,
@@ -825,7 +1011,6 @@ def identity_linear_map(shape: int | tuple[int, ...], *, dtype: Any = np.float64
         rmatmat=matmat,
         dense_array=dense_array,
         diagonal=diagonal_array,
-        normal_matrix_diag=normal_matrix_diag,
         output_shape=value_shape,
         input_shape=value_shape,
     )
@@ -884,8 +1069,11 @@ def pointwise_component_map(array: Any) -> LinearMap:
         )
         return result.reshape(input_size, -1)
 
-    def normal_matrix_diag() -> np.ndarray:
-        return np.sum(np.abs(to_numpy(component_array)) ** 2, axis=0).reshape(-1)
+    def normal_matrix_diag(row_scale=None) -> np.ndarray:
+        values = to_numpy(component_array)
+        if row_scale is not None:
+            values = values * to_numpy(row_scale).reshape(output_shape)[:, None, ...]
+        return np.sum(np.abs(values) ** 2, axis=0).reshape(-1)
 
     def dense_array(xp: Any) -> Any:
         point_size = int(math.prod(point_shape))
@@ -1016,12 +1204,15 @@ def take_linear_map(
             np.add.at(result, indexer, values)
         return result.reshape(input_size, -1)
 
-    def normal_matrix_diag() -> np.ndarray:
+    def normal_matrix_diag(row_scale=None) -> np.ndarray:
         diagonal = np.zeros(input_shape, dtype=dtype)
+        values = (
+            1.0 if row_scale is None else np.abs(to_numpy(row_scale).reshape(output_shape)) ** 2
+        )
         if scalar_selection:
-            diagonal[scalar_indexer] = 1.0
+            diagonal[scalar_indexer] = values
         else:
-            np.add.at(diagonal, _indexer(np), 1.0)
+            np.add.at(diagonal, _indexer(np), values)
         return diagonal.reshape(-1)
 
     def dense_array(xp: Any) -> Any:
@@ -1034,6 +1225,13 @@ def take_linear_map(
         dense[rows, selected] = 1
         return dense
 
+    def sparse_matrix():
+        selected = np.arange(input_size).reshape(input_shape)[_indexer(np)].reshape(-1)
+        return scipy.sparse.csr_matrix(
+            (np.ones(output_size, dtype=dtype), (np.arange(output_size), selected)),
+            shape=(output_size, input_size),
+        )
+
     return LinearMap(
         shape=(output_size, input_size),
         dtype=dtype,
@@ -1045,6 +1243,7 @@ def take_linear_map(
         normal_matrix_diag=normal_matrix_diag,
         input_shape=input_shape,
         output_shape=output_shape,
+        sparse_matrix=sparse_matrix,
     )
 
 
@@ -1084,7 +1283,7 @@ def _zero_row_linear_map(input_shape: tuple[int, ...]) -> LinearMap:
         xp = get_array_module(vec)
         return xp.zeros((input_size,), dtype=xp.asarray(vec).dtype)
 
-    def normal_matrix_diag() -> np.ndarray:
+    def normal_matrix_diag(row_scale=None) -> np.ndarray:
         return np.zeros(input_size)
 
     return LinearMap(
@@ -1158,11 +1357,40 @@ def vstack_linear_maps(
     def dense_array(xp: Any) -> Any:
         return xp.vstack([xp.asarray(row_map._dense_array(xp)) for row_map in row_maps])
 
-    def normal_matrix_diag() -> np.ndarray:
+    def normal_matrix_diag(row_scale=None) -> np.ndarray:
         diag = np.zeros(input_size, dtype=np.result_type(dtype, np.float64))
+        row = 0
         for row_map in row_maps:
-            diag += row_map.normal_matrix_diag()
+            scale = None if row_scale is None else row_scale[row : row + row_map.shape[0]]
+            diag += row_map.normal_matrix_diag(row_scale=scale)
+            row += row_map.shape[0]
         return diag
+
+    def normal_matrix(xp, row_scale):
+        normal = None
+        row = 0
+        for row_map in row_maps:
+            scale = None if row_scale is None else row_scale[row : row + row_map.shape[0]]
+            if row_map.is_diagonal:
+                diagonal = row_map._diagonal_array(xp)
+                if scale is not None:
+                    diagonal = diagonal * xp.asarray(scale)
+                increment = xp.abs(diagonal) ** 2
+                if normal is None:
+                    normal = xp.diag(increment).astype(dtype)
+                else:
+                    indices = xp.diag_indices(input_size)
+                    if xp is np:
+                        normal[indices] += increment
+                    else:
+                        normal = normal.at[indices].add(increment)
+            else:
+                matrix = row_map._normal_matrix(xp, scale)
+                normal = (
+                    xp.array(matrix, dtype=dtype, copy=True) if normal is None else normal + matrix
+                )
+            row += row_map.shape[0]
+        return normal
 
     return LinearMap(
         shape=(output_size, input_size),
@@ -1173,9 +1401,15 @@ def vstack_linear_maps(
         rmatmat=rmatmat,
         dense_array=dense_array,
         normal_matrix_diag=normal_matrix_diag,
+        normal_matrix=normal_matrix,
         backend_operands=backend_operands,
         output_shape=(output_size,),
         input_shape=common_input_shape,
+        sparse_matrix=(
+            lambda: scipy.sparse.vstack([row_map.to_sparse_matrix() for row_map in row_maps])
+        )
+        if all(row_map.is_sparse for row_map in row_maps)
+        else None,
     )
 
 
@@ -1228,6 +1462,7 @@ def _linear_map_from_scipy_sparse(
         """Transfer sparse structure to JAX once, without densifying it."""
         nonlocal jax_sparse_operators
         if jax_sparse_operators is None:
+            from jax import ensure_compile_time_eval
             from jax.experimental.sparse import BCOO
 
             def as_bcoo(matrix):
@@ -1240,7 +1475,10 @@ def _linear_map_from_scipy_sparse(
                     unique_indices=True,
                 )
 
-            jax_sparse_operators = as_bcoo(sparse), as_bcoo(adjoint)
+            # SciPy values are static, even when first used under JIT.
+            # Cache concrete device arrays, never temporary tracers.
+            with ensure_compile_time_eval():
+                jax_sparse_operators = as_bcoo(sparse), as_bcoo(adjoint)
         return jax_sparse_operators
 
     def apply(matrix, values, input_size, *, block=False, use_adjoint=False):
@@ -1271,8 +1509,11 @@ def _linear_map_from_scipy_sparse(
     def dense_array(xp: Any) -> Any:
         return xp.asarray(sparse.toarray())
 
-    def normal_matrix_diag() -> np.ndarray:
-        return np.asarray(sparse.multiply(sparse.conjugate()).sum(axis=0)).reshape(-1).real
+    def normal_matrix_diag(row_scale=None) -> np.ndarray:
+        squared = sparse.multiply(sparse.conjugate())
+        if row_scale is not None:
+            squared = squared.multiply(np.abs(to_numpy(row_scale))[:, None] ** 2)
+        return np.asarray(squared.sum(axis=0)).reshape(-1).real
 
     return LinearMap(
         shape=shape,
@@ -1285,6 +1526,7 @@ def _linear_map_from_scipy_sparse(
         normal_matrix_diag=normal_matrix_diag,
         output_shape=out_shape,
         input_shape=in_shape,
+        sparse_matrix=lambda: sparse,
     )
 
 
@@ -1325,15 +1567,25 @@ def _linear_map_from_jax_sparse(
     def dense_array(xp: Any) -> Any:
         return xp.asarray(op.todense())
 
-    def normal_matrix_diag() -> np.ndarray:
-        data = to_numpy(getattr(op, "data", None))
-        indices = to_numpy(getattr(op, "indices", None))
-        if data.ndim != 1 or indices.ndim != 2 or indices.shape[1] != 2:
-            return _normal_matrix_diag_from_matmat(shape, dtype, matmat)
-        sparse = scipy.sparse.coo_matrix(
-            (data, (indices[:, 0], indices[:, 1])), shape=shape
+    scalar_entries = op.data.ndim == 1 and op.indices.ndim == 2 and op.indices.shape[1] == 2
+
+    def sparse_matrix():
+        data, indices = to_numpy(op.data), to_numpy(op.indices)
+        # BCOO pads unused storage with out-of-bounds indices. Coalesce
+        # duplicates before squaring entries for the normal diagonal.
+        valid = np.all((indices >= 0) & (indices < shape), axis=1)
+        return scipy.sparse.coo_matrix(
+            (data[valid], (indices[valid, 0], indices[valid, 1])), shape=shape
         ).tocsr()
-        return np.asarray(sparse.multiply(sparse.conjugate()).sum(axis=0)).reshape(-1).real
+
+    def normal_matrix_diag(row_scale=None) -> np.ndarray:
+        if not scalar_entries:
+            return _normal_matrix_diag_from_matmat(shape, dtype, matmat, row_scale)
+        sparse = sparse_matrix()
+        squared = sparse.multiply(sparse.conjugate())
+        if row_scale is not None:
+            squared = squared.multiply(np.abs(to_numpy(row_scale))[:, None] ** 2)
+        return np.asarray(squared.sum(axis=0)).reshape(-1).real
 
     return LinearMap(
         shape=shape,
@@ -1347,6 +1599,7 @@ def _linear_map_from_jax_sparse(
         backend_operands=backend_operands,
         output_shape=out_shape,
         input_shape=in_shape,
+        sparse_matrix=sparse_matrix if scalar_entries else None,
     )
 
 
@@ -1424,6 +1677,8 @@ def as_linear_map(
             dense_array=op._dense_array_func,
             diagonal=op._diagonal_array_func,
             normal_matrix_diag=op._normal_matrix_diag,
+            normal_matrix=op._normal_matrix_func,
+            sparse_matrix=op._sparse_matrix_func,
             backend_operands=op._backend_operands,
             output_shape=out_shape,
             input_shape=in_shape,
@@ -1434,6 +1689,7 @@ def as_linear_map(
         # The flat matrix is unchanged by shaped metadata. Share any dense
         # materialization already paid for.
         object.__setattr__(relabeled, "_dense_cache", op._dense_cache)
+        object.__setattr__(relabeled, "_sparse_cache", op._sparse_cache)
         return relabeled
 
     op_type = str(type(op))
@@ -1455,3 +1711,22 @@ def as_linear_map(
 
     arr = _dense_array_candidate(op)
     return _linear_map_from_array(arr, input_shape=input_shape, output_shape=output_shape)
+
+
+def _weighted_cross_product(left, right, weights):
+    """Return ``left* diag(weights) right`` in bounded row blocks."""
+    xp = get_array_module(left, right, weights)
+    left = xp.asarray(left)
+    right = xp.asarray(right)
+    weights = xp.asarray(weights)
+    if left.shape[0] != right.shape[0] or weights.shape != (left.shape[0],):
+        raise ValueError("Weighted cross-product operands have incompatible shapes.")
+    dtype = xp.result_type(left.dtype, right.dtype, weights.dtype)
+    result = xp.zeros((left.shape[1], right.shape[1]), dtype=dtype)
+    bytes_per_row = max(1, right.shape[1] * np.dtype(dtype).itemsize)
+    rows_per_block = max(1, _WEIGHTED_PRODUCT_WORK_BYTES // bytes_per_row)
+    for start in range(0, left.shape[0], rows_per_block):
+        stop = min(left.shape[0], start + rows_per_block)
+        weighted_right = weights[start:stop, None] * right[start:stop]
+        result += left[start:stop].T.conj() @ weighted_right
+    return result

@@ -3,29 +3,44 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+import warnings
+from contextlib import nullcontext
 from functools import cached_property
 from typing import Any, TypeAlias
 
 import numpy as np
+import scipy.linalg
 import scipy.sparse
 from scipy.sparse.linalg import LinearOperator
 
 from kompe.cache import BoundedCache
-from kompe.math.backend import get_array_module, synchronize_linalg_result, to_numpy
-from kompe.math.linear_map import LinearMap, as_linear_map, vstack_linear_maps
+from kompe.math.backend import (
+    _is_jax_tracer,
+    get_array_module,
+    immutable_array,
+    readonly_numpy_array,
+    synchronize_linalg_result,
+    to_numpy,
+)
+from kompe.math.fingerprints import array_fingerprint
+from kompe.math.linear_map import (
+    LinearMap,
+    _normalized_constraint_rows,
+    as_linear_map,
+    null_space_linear_map,
+    vstack_linear_maps,
+)
 
 OperatorInput: TypeAlias = np.ndarray | scipy.sparse.spmatrix | LinearOperator | LinearMap
 OperatorInputList: TypeAlias = OperatorInput | list[OperatorInput]
-NumericInputList: TypeAlias = float | list[float]
-_NORMAL_PINV_CACHE_VERSION = 1
+_NORMAL_PINV_CACHE_VERSION = 2
 
 
 def as_rhs_block(values: Any, data_shape: tuple[int, ...]) -> tuple[Any, tuple[int, ...]]:
     """Flatten data axes into rows and batch axes into RHS columns.
 
-    Accept one field, a flat vector, or a batch with ``data_shape`` at
-    either end. Leading data axes take precedence when both ends match.
+    Accept one field, a flat vector, or ``data_shape + batch_shape``.
+    Data axes always lead; batch axes always trail, as with ``LinearMap``.
     Return the column block and the original batch shape; solutions use
     ``solution_shape + batch_shape`` regardless of the input layout.
     """
@@ -39,12 +54,65 @@ def as_rhs_block(values: Any, data_shape: tuple[int, ...]) -> tuple[Any, tuple[i
     if array.ndim > data_ndim and array.shape[:data_ndim] == data_shape:
         batch_shape = array.shape[data_ndim:]
         return array.reshape(data_size, math.prod(batch_shape)), batch_shape
-    if array.ndim > data_ndim and array.shape[-data_ndim:] == data_shape:
-        batch_shape = array.shape[:-data_ndim]
-        return array.reshape(math.prod(batch_shape), data_size).T, batch_shape
     if array.ndim <= 1 and array.size == data_size:
         return array.reshape(data_size, 1), ()
     raise ValueError(f"Shape {array.shape} incompatible with data_shape {data_shape}.")
+
+
+def _weight_operator(w_val: Any, shape: tuple[int, ...]) -> LinearMap | None:
+    """Normalize residual weights to a shaped linear map."""
+    if w_val is None:
+        return None
+    flat_dim = math.prod(shape)
+    if not isinstance(w_val, (LinearMap, LinearOperator)) and not scipy.sparse.issparse(w_val):
+        w_val = immutable_array(w_val)
+        if w_val.shape == shape:
+            w_val = w_val.reshape(flat_dim)
+    return as_linear_map(w_val, output_shape=shape, input_shape=shape)
+
+
+def relative_regularization(A, L, strength, *, sqrt_weights=None):
+    """Return R = s L for a dimensionless relative regularization strength.
+
+    Choose s² = strength * median_positive(diag(A* W* W A)) /
+    median_positive(diag(L* L)). Supply the same data operator and residual
+    weights as the fit. For several data terms, stack their weighted maps
+    first. Zero/None strength disables the penalty and returns None.
+
+    This explicit setup step inspects normal diagonals on the CPU, never
+    constructs a normal matrix, and preserves diagonal or matrix-free L.
+    For a physically specified scale, pass the scaled L straight to
+    LeastSquaresProblem instead. Balance before restricting solution space.
+    """
+    if strength is None:
+        return None
+    try:
+        array = np.asarray(strength)
+        if array.ndim != 0:
+            raise ValueError
+        strength = float(array)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("strength must be a finite non-negative scalar.") from exc
+    if not math.isfinite(strength) or strength < 0:
+        raise ValueError("strength must be a finite non-negative scalar.")
+    if strength == 0:
+        return None
+    if L is None:
+        raise ValueError("A positive relative strength requires a regularization operator.")
+    A = as_linear_map(A)
+    L = as_linear_map(L, input_shape=A.input_shape)
+    weights = _weight_operator(sqrt_weights, A.output_shape)
+    data = A if weights is None else weights @ A
+    data_diagonal = data.normal_matrix_diag()
+    positive_data = data_diagonal[data_diagonal > 0]
+    if positive_data.size == 0:
+        raise ValueError("Relative regularization requires a nonzero weighted data operator.")
+    penalty_diagonal = L.normal_matrix_diag()
+    positive_penalty = penalty_diagonal[penalty_diagonal > 0]
+    if positive_penalty.size == 0:
+        raise ValueError("Relative regularization requires a nonzero regularization operator.")
+    scale = math.sqrt(strength) * math.sqrt(np.median(positive_data) / np.median(positive_penalty))
+    return scale * L
 
 
 class LeastSquaresProblem:
@@ -52,19 +120,29 @@ class LeastSquaresProblem:
 
     With one data term and one regularization term, the solved objective is
 
-    ``||W (A x - b)||² + ||s L x||²``.
+    ``||W (A x - b)||² + ||R x||²``.
 
     ``sqrt_weights`` supplies the diagonal of ``W`` (so its square gives the
-    statistical or area weight). ``regularization_strengths`` supplies the
-    dimensionless relative strength before Kompe balances the median non-zero
-    diagonals of ``A* A`` and ``L* L``. ``s`` is the resulting row scale: the
-    square root of that strength times the balancing factor. The same rule is
-    applied term by term when several data or regularization operators are
-    provided.
+    statistical or area weight). ``regularization`` is one already-scaled
+    operator R or a list of such operators. No scale is inferred or balanced
+    inside the problem. For a dimensionless relative strength, construct R
+    explicitly with ``relative_regularization`` before defining the problem.
 
     Shapes come from the data operators' declared input and output shapes.
     All data operators must share one input shape. Use ``as_linear_map``
     to label the scientific axes of raw arrays before building the problem.
+
+    ``constraints=C`` imposes the exact homogeneous equations ``C x = 0``.
+    Sparse direct solves retain these rows in a KKT system; the other methods
+    use orthonormal null-space coordinates, preserving spectral cutoffs.
+    Use ``restrict_solution(Z)`` for an explicit change of coordinates ``x = Z y``.
+
+    A problem describes a fixed objective: construct a new problem to change
+    its operators or weights. Array-valued weights are owned and read-only;
+    supplied operators must retain their mathematical action while in use.
+
+    Normal products belong to the data and penalty operators. Iterative
+    solvers apply the original system without constructing a normal matrix.
     """
 
     def __init__(
@@ -72,22 +150,133 @@ class LeastSquaresProblem:
         A: OperatorInputList,
         *,
         sqrt_weights: Any | list[Any] | None = None,
-        regularization_strengths: NumericInputList | None = None,
-        regularization_operators: OperatorInputList | None = None,
+        regularization: OperatorInputList | None = None,
+        constraints: Any | None = None,
         operator_cache: Any | None = None,
         cache_identity: Any | None = None,
-        data_normal_matrix_builder: Callable[[], Any] | None = None,
     ):
-        self._dense_normal_equation_cache: dict[Any, tuple[Any, Any]] = {}
         self._dense_normal_pinv_cache = BoundedCache(2)
+        self._dense_normal_lu_cache = BoundedCache(2)
         self._svd_cache = BoundedCache(2)
+        self._preconditioner_cache = BoundedCache(2)
+        self._restricted_preconditioners = BoundedCache(2)
+        self._compiled_iterative_solvers = BoundedCache(2)
+        self._sparse_analysis_operator = None
         self.operator_cache = operator_cache
         self.cache_identity = cache_identity
-        self.data_normal_matrix_builder = data_normal_matrix_builder
-        self._data_normal_matrix_cache = None
 
         self._process_data_terms(A, sqrt_weights)
-        self._process_regularization_terms(regularization_operators, regularization_strengths)
+        if scipy.sparse.issparse(constraints):
+            self.constraints = constraints.tocsr(copy=True)
+            constraint_values = self.constraints.data
+        else:
+            self.constraints = None if constraints is None else readonly_numpy_array(constraints)
+            constraint_values = self.constraints
+        if self.constraints is not None and (
+            self.constraints.ndim != 2
+            or self.constraints.shape[1] != self.solution_size
+            or not np.all(np.isfinite(constraint_values))
+        ):
+            raise ValueError("constraints must be finite rows with one column per solution entry.")
+        self.regularization_operators = [
+            as_linear_map(operator, input_shape=self.solution_shape)
+            for operator in self._prepare_input_list(
+                regularization, "regularization", is_optional=True
+            )
+        ]
+
+    @cached_property
+    def solution_basis(self):
+        """Orthonormal coordinates satisfying the declared constraints."""
+        if self.constraints is None:
+            return None
+        rows = self.constraints
+        if scipy.sparse.issparse(rows):
+            rows = rows.toarray()  # Orthonormal null-space setup is a dense CPU QR.
+        return null_space_linear_map(rows, output_shape=self.solution_shape)
+
+    @cached_property
+    def reduced_problem(self):
+        """The same objective in independent constrained coordinates."""
+        if self.constraints is None:
+            return self
+        identity = None
+        if self.cache_identity is not None:
+            rows = self.constraints
+            signature = (
+                (
+                    rows.shape,
+                    *(array_fingerprint(a) for a in (rows.data, rows.indices, rows.indptr)),
+                )
+                if scipy.sparse.issparse(rows)
+                else array_fingerprint(rows)
+            )
+            identity = {
+                "problem": self.cache_identity,
+                "constraints": signature,
+            }
+        return self.restrict_solution(self.solution_basis, cache_identity=identity)
+
+    def restrict_solution(self, solution_basis, *, cache_identity=None):
+        """Return the same objective in coordinates ``x = solution_basis(y)``.
+
+        Solve the returned problem and apply ``solution_basis`` to recover
+        x. Regularization keeps its scale in the original coefficient space;
+        a constraint must not rebalance the physical objective. An orthonormal
+        basis preserves Euclidean norms and spectral-cutoff conventions.
+        Persistent caching requires an identity that also identifies the basis.
+        Existing constraints become C Z; rows eliminated by this change are
+        removed at floating-point roundoff, independently of the fit tolerance.
+        Coordinate columns are scaled using Z's normal diagonal for this
+        rank test; a matrix-free map can supply it without column probes.
+        """
+        basis = as_linear_map(solution_basis)
+        if basis.output_shape != self.solution_shape:
+            raise ValueError(
+                "solution_basis output_shape must match the problem's solution_shape."
+            )
+
+        # C Z may lose rows when Z already satisfies some or all constraints.
+        # Determine its row space against the multiplication's roundoff scale,
+        # not against its own tiny residual or the user's fit tolerance.
+        constraints = None
+        if self.constraints is not None:
+            # The objective and coordinate map are fixed setup data, even
+            # when the first RHS arrives under JIT. Never cache their tracers.
+            setup = nullcontext()
+            if get_array_module(*basis.backend_operands) is not np:
+                from jax import ensure_compile_time_eval
+
+                setup = ensure_compile_time_eval()
+            with setup:
+                rows = _normalized_constraint_rows(self.constraints)
+                if scipy.sparse.issparse(rows):
+                    rows = rows.toarray()
+                projected = to_numpy(basis.rmatmat(rows.T.conj())).T.conj()
+                column_norms = np.sqrt(basis.normal_matrix_diag())
+                column_scales = np.where(column_norms > 0, column_norms, 1)
+                # Test in unit-column coordinates so a large unrelated
+                # column cannot erase a real constraint on a smaller one.
+                _, singular_values, row_space = scipy.linalg.svd(
+                    projected / column_scales, full_matrices=False
+                )
+                precision = max(
+                    np.finfo(np.empty((), dtype=dtype).real.dtype).eps
+                    for dtype in (rows.dtype, np.result_type(basis.dtype, 0.0))
+                )
+                cutoff = precision * max(*basis.shape, rows.shape[0])
+                retained = singular_values > cutoff
+                if np.any(retained):
+                    constraints = row_space[retained] * column_scales
+
+        return LeastSquaresProblem(
+            [operator @ basis for operator in self.data_operators],
+            sqrt_weights=self.weight_operators,
+            regularization=[operator @ basis for operator in self.regularization_operators],
+            constraints=constraints,
+            operator_cache=self.operator_cache,
+            cache_identity=cache_identity,
+        )
 
     def _process_data_terms(self, A_in, sqrt_weights_in):
         A_list = self._prepare_input_list(A_in, "A")
@@ -106,99 +295,19 @@ class LeastSquaresProblem:
             sqrt_weights_in, "sqrt_weights", count=len(A_list)
         )
         self.weight_operators = [
-            self._create_weight_operator(w, self.data_shapes[i])
-            for i, w in enumerate(sqrt_weights_list)
+            _weight_operator(w, self.data_shapes[i]) for i, w in enumerate(sqrt_weights_list)
         ]
-
-    def _process_regularization_terms(self, regularization_operators, regularization_strengths):
-        operators = self._prepare_input_list(
-            regularization_operators, "regularization_operators", is_optional=True
-        )
-        self.regularization_operators = [
-            as_linear_map(operator, input_shape=self.solution_shape)
-            if operator is not None
-            else None
-            for operator in operators
-        ]
-        self.regularization_strengths = self._validate_regularization_strengths(
-            self._prepare_input_list(
-                regularization_strengths,
-                "regularization_strengths",
-                count=len(operators),
-                default_val=0.0,
-            )
-        )
-        for index, (operator, strength) in enumerate(
-            zip(self.regularization_operators, self.regularization_strengths, strict=True)
-        ):
-            if operator is None and strength > 0.0:
-                raise ValueError(
-                    f"regularization_operators[{index}] is missing but has positive strength."
-                )
-
-    def _create_weight_operator(self, w_val: Any, shape: tuple[int, ...]) -> LinearMap | None:
-        if w_val is None:
-            return None
-        flat_dim = math.prod(shape)
-        if not isinstance(w_val, (LinearMap, LinearOperator)) and not scipy.sparse.issparse(w_val):
-            arr_shape = getattr(w_val, "shape", None)
-            if arr_shape is None:
-                arr_shape = np.shape(w_val)
-            if tuple(arr_shape) == shape:
-                xp = get_array_module(w_val)
-                w_val = xp.asarray(w_val).reshape(flat_dim)
-        return as_linear_map(w_val, output_shape=shape, input_shape=shape)
 
     @cached_property
     def backend_operands(self) -> tuple[Any, ...]:
-        """Return active operands without assembling or balancing operators."""
-        operators = self.data_operators + self.weight_operators
-        operators += [
-            operator
-            for operator, strength in zip(
-                self.regularization_operators, self.regularization_strengths, strict=True
-            )
-            if strength > 0.0
-        ]
+        """Return active operands without assembling the system."""
+        operators = self.data_operators + self.weight_operators + self.regularization_operators
         return tuple(
             operand
             for operator in operators
             if operator is not None
             for operand in operator.backend_operands
         )
-
-    @cached_property
-    def regularization_row_scales(self) -> list[float]:
-        """Return row scales for the balanced regularization operators."""
-        if not any(
-            operator is not None and self.regularization_strengths[index] > 0.0
-            for index, operator in enumerate(self.regularization_operators)
-        ):
-            return [0.0] * len(self.regularization_operators)
-        if self.data_normal_matrix_builder is None:
-            diag_A_T_A = self.data_operator.normal_matrix_diag()
-        else:
-            diag_A_T_A = np.diag(self._custom_data_normal_matrix()).real
-        active_diag_A = diag_A_T_A[diag_A_T_A > 0]
-        if active_diag_A.size == 0:
-            raise ValueError("Relative regularization requires a nonzero weighted data operator.")
-        data_term_scale = np.median(active_diag_A)
-        regularization_row_scales = []
-        for i, L_item in enumerate(self.regularization_operators):
-            strength = self.regularization_strengths[i]
-            if strength == 0 or L_item is None:
-                regularization_row_scales.append(0.0)
-                continue
-            diag_L_T_L = L_item.normal_matrix_diag()
-            active_diag_L = diag_L_T_L[diag_L_T_L > 0]
-            if active_diag_L.size == 0:
-                raise ValueError(
-                    f"regularization_operators[{i}] is zero but has positive strength."
-                )
-            reg_term_scale = np.median(active_diag_L)
-            scale_factor = math.sqrt(data_term_scale / reg_term_scale)
-            regularization_row_scales.append(math.sqrt(strength) * scale_factor)
-        return regularization_row_scales
 
     @cached_property
     def data_operator(self) -> LinearMap:
@@ -213,37 +322,22 @@ class LeastSquaresProblem:
         """Materialize the regularized system on the requested backend."""
         return self.system_operator.to_matrix(backend=backend)
 
-    def dense_normal_equations(self, *, backend=None) -> tuple[Any, Any, Any, Any]:
-        """Return dense system, adjoint, and normal matrix on one backend."""
-        xp = get_array_module(*self.backend_operands, backend=backend)
-        system_matrix = self.system_matrix(backend=backend)
-        if xp not in self._dense_normal_equation_cache:
-            system_adjoint = system_matrix.T.conj()
-            normal_matrix = system_adjoint @ system_matrix
-            self._dense_normal_equation_cache[xp] = (system_adjoint, normal_matrix)
-        else:
-            system_adjoint, normal_matrix = self._dense_normal_equation_cache[xp]
-        return xp, system_matrix, system_adjoint, normal_matrix
-
     def dense_normal_pinv(self, tolerance: float, *, backend=None) -> Any:
         """Return the backend-specific cached normal-matrix pseudo-inverse."""
         xp = get_array_module(*self.backend_operands, backend=backend)
         key = (xp, float(tolerance))
+        cached = self._dense_normal_pinv_cache.get(key)
+        if cached is not None:
+            return cached
 
         def compute():
             normal_matrix = self.dense_normal_matrix(backend=backend)
             normal_pinv = synchronize_linalg_result(
                 xp.linalg.pinv(normal_matrix, rtol=tolerance, hermitian=True)
             )
-            # Repeated solves need the pseudo-inverse and the lazy
-            # data map, not a separate dense regularized system or
-            # normal matrix used to construct it. Keep a materialized
-            # data map because the following adjoint products reuse it.
-            self._dense_normal_equation_cache.clear()
-            regularized_system = self.system_operator
-            if regularized_system is not self.data_operator:
-                regularized_system.clear_dense_cache()
-            self._data_normal_matrix_cache = None
+            if _is_jax_tracer(normal_pinv):
+                return normal_pinv
+            self._clear_normal_matrix_work()
             return normal_pinv
 
         def build():
@@ -263,61 +357,69 @@ class LeastSquaresProblem:
             )
             return xp.asarray(cached)
 
-        return self._dense_normal_pinv_cache.get_or_create(key, build)
+        normal_pinv = build()
+        if not _is_jax_tracer(normal_pinv):
+            self._dense_normal_pinv_cache.store(key, normal_pinv)
+        return normal_pinv
+
+    def _dense_normal_lu(self, rhs_dtype, *, backend=None):
+        """Cache direct-solve factors with the RHS's precision included.
+
+        Like ``linalg.solve``, promote the normal matrix and RHS to
+        their common inexact dtype before factorization. A later
+        higher-precision or complex RHS needs its own factorization.
+        """
+        xp = get_array_module(*self.backend_operands, backend=backend)
+        key = (xp, np.dtype(rhs_dtype))
+        cached = self._dense_normal_lu_cache.get(key)
+        if cached is not None:
+            return cached
+
+        normal = self.dense_normal_matrix(backend=backend)
+        normal = xp.asarray(normal, dtype=xp.result_type(normal.dtype, rhs_dtype, 0.0))
+        if xp is np:
+            # NumPy solve raises on exact singularity. Preserve that
+            # contract instead of retaining SciPy's invalid factor.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", scipy.linalg.LinAlgWarning)
+                try:
+                    factors = scipy.linalg.lu_factor(normal, check_finite=False)
+                except scipy.linalg.LinAlgWarning as exc:
+                    raise np.linalg.LinAlgError("Singular matrix") from exc
+        else:
+            from jax.scipy.linalg import lu_factor
+
+            factors = synchronize_linalg_result(lu_factor(normal))
+        if not _is_jax_tracer(factors[0]):
+            self._dense_normal_lu_cache.store(key, factors)
+            self._clear_normal_matrix_work()
+        return factors
+
+    def _clear_normal_matrix_work(self):
+        """Release construction arrays after retaining a factorization.
+
+        Keep the data map: repeated solves still apply its adjoint.
+        Discard any separately materialized augmented system.
+        """
+        regularized_system = self.system_operator
+        if regularized_system is not self.data_operator:
+            regularized_system.clear_dense_cache()
 
     def dense_normal_matrix(self, *, backend=None) -> Any:
-        """Return the regularized normal matrix on the requested backend.
-
-        A supplied data-normal builder is an explicit CPU construction
-        boundary; the completed matrix is transferred to this backend.
-        """
-        if self.data_normal_matrix_builder is None:
-            return self.dense_normal_equations(backend=backend)[3]
-
-        xp = get_array_module(*self.backend_operands, backend=backend)
-        data_normal = self._custom_data_normal_matrix()
-        regularization_terms = self._active_regularization_terms()
-        self._data_normal_matrix_cache = None
-        if not regularization_terms:
-            return xp.asarray(data_normal)
-
-        # The builder may return a shared or cached matrix. Regularization
-        # belongs to this problem and must not alter the builder's data.
-        normal = np.array(data_normal, copy=True)
-        diagonal_indices = np.diag_indices(self.solution_size)
-        for weight, regularization in regularization_terms:
-            if regularization.is_diagonal:
-                diagonal = np.asarray(regularization.diagonal(backend="numpy"))
-                normal[diagonal_indices] += weight**2 * np.abs(diagonal) ** 2
-                continue
-            matrix = np.asarray(regularization.to_matrix(backend="numpy"))
-            normal += weight**2 * (matrix.T.conj() @ matrix)
-        return xp.asarray(normal)
-
-    def _custom_data_normal_matrix(self) -> np.ndarray:
-        """Build and validate a supplied data-term normal matrix."""
-        if self._data_normal_matrix_cache is None:
-            matrix = np.asarray(self.data_normal_matrix_builder())
-            expected_shape = (self.solution_size, self.solution_size)
-            if matrix.shape != expected_shape:
-                raise ValueError(
-                    "data_normal_matrix_builder returned shape "
-                    f"{matrix.shape}, expected {expected_shape}."
-                )
-            if not np.all(np.isfinite(matrix)):
-                raise ValueError("The data normal matrix must contain only finite values.")
-            self._data_normal_matrix_cache = matrix
-        return self._data_normal_matrix_cache
+        """Materialize A* W* W A + sum(L* L) through operator structure."""
+        return self.system_operator.normal_operator().to_matrix(backend=backend)
 
     def svd(self, *, backend=None) -> tuple[Any, Any, Any]:
         """Return cached reduced SVD factors on the requested backend."""
         xp = get_array_module(*self.backend_operands, backend=backend)
-
-        def factor():
-            matrix = self.system_matrix(backend=backend)
-            return synchronize_linalg_result(xp.linalg.svd(matrix, full_matrices=False))
-
-        return self._svd_cache.get_or_create(xp, factor)
+        cached = self._svd_cache.get(xp)
+        if cached is not None:
+            return cached
+        matrix = self.system_matrix(backend=backend)
+        factors = synchronize_linalg_result(xp.linalg.svd(matrix, full_matrices=False))
+        if not _is_jax_tracer(factors[1]):
+            self._svd_cache.store(xp, factors)
+        return factors
 
     def assemble_rhs_block(
         self, b: Any | list[Any], *, include_regularization: bool = True
@@ -337,7 +439,7 @@ class LeastSquaresProblem:
 
         num_rhs = math.prod(rhs_shape) if rhs_shape else 1
         active_regularization_terms = (
-            self._active_regularization_terms() if include_regularization else ()
+            self.regularization_operators if include_regularization else ()
         )
         system_operator = self.system_operator if include_regularization else self.data_operator
         dtype = system_operator.dtype
@@ -356,50 +458,23 @@ class LeastSquaresProblem:
                 b_col_block = w_item.matmat(b_col_block)
             blocks.append(xp.asarray(b_col_block).reshape(num_a_rows, num_rhs))
 
-        for _, L_item in active_regularization_terms:
+        for L_item in active_regularization_terms:
             blocks.append(xp.zeros((L_item.shape[0], num_rhs), dtype=dtype))
 
-        d_block = xp.vstack(blocks)
+        d_block = xp.asarray(
+            xp.vstack(blocks), dtype=xp.result_type(dtype, *(b.dtype for b in blocks))
+        )
         return d_block, rhs_shape, num_rhs
 
     @cached_property
     def system_operator(self) -> LinearMap:
-        """Stack active regularization below the canonical data operator."""
-        regularization_terms = self._active_regularization_terms()
+        """Stack regularization rows below the data operator."""
+        regularization_terms = self.regularization_operators
         if not regularization_terms:
             return self.data_operator
         row_maps = [self.data_operator]
-        row_maps.extend(weight * matrix for weight, matrix in regularization_terms)
+        row_maps.extend(regularization_terms)
         return vstack_linear_maps(row_maps, input_shape=self.solution_shape)
-
-    def _active_regularization_terms(self) -> tuple[tuple[float, LinearMap], ...]:
-        row_scales = self.regularization_row_scales
-        return tuple(
-            (row_scales[i], L_item)
-            for i, L_item in enumerate(self.regularization_operators)
-            if L_item is not None and row_scales[i] > 0.0
-        )
-
-    @staticmethod
-    def _validate_regularization_strengths(weights: list) -> list[float]:
-        """Return finite, non-negative scalar regularization weights."""
-        validated = []
-        for index, weight in enumerate(weights):
-            try:
-                array = np.asarray(weight)
-                if array.ndim != 0:
-                    raise ValueError
-                value = float(array)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"regularization_strengths[{index}] must be a finite non-negative scalar."
-                ) from exc
-            if not math.isfinite(value) or value < 0.0:
-                raise ValueError(
-                    f"regularization_strengths[{index}] must be a finite non-negative scalar."
-                )
-            validated.append(value)
-        return validated
 
     @staticmethod
     def _prepare_input_list(
@@ -407,14 +482,13 @@ class LeastSquaresProblem:
         name: str,
         count: int | None = None,
         is_optional: bool = False,
-        default_val: Any = None,
     ) -> list:
         if item is None:
             if is_optional:
                 return []
             if count is None:
                 raise ValueError(f"Input '{name}' cannot be None.")
-            return [default_val] * count
+            return [None] * count
         lst = item if isinstance(item, list) else [item]
         if count is not None and len(lst) != count:
             raise ValueError(f"Input '{name}' has {len(lst)} items, but expected {count}.")

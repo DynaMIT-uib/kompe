@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Callable
+from functools import partial
 from typing import Any, Final
 
 import numpy as np
 import scipy.sparse as sp
-from scipy.linalg import cho_solve, cholesky
+from scipy.linalg import cho_solve, cholesky, lu_solve
 from scipy.sparse.linalg import LinearOperator, cg, lsmr, splu
 
+from kompe.cache import BoundedCache
 from kompe.math.backend import (
+    _is_jax_tracer,
     block_until_ready,
     get_array_module,
     get_backend,
@@ -20,8 +23,14 @@ from kompe.math.backend import (
     to_numpy,
 )
 
-from .least_squares_problem import LeastSquaresProblem
-from .linear_map import LinearMap, as_linear_map, diagonal_linear_map
+from .least_squares_problem import LeastSquaresProblem, as_rhs_block
+from .linear_map import (
+    LinearMap,
+    _normalized_constraint_rows,
+    as_linear_map,
+    diagonal_linear_map,
+    vstack_linear_maps,
+)
 
 ITERATION_SAFETY_FACTOR: Final = 10
 LEAST_SQUARES_SOLVER_ENV: Final = "KOMPE_LEAST_SQUARES_SOLVER"
@@ -39,16 +48,16 @@ def _inverse_singular_values(singular_values, tolerance):
     return xp.where(retained, 1.0 / denominator, 0.0)
 
 
-def _squared_objective_weights(sqrt_weights, size):
-    """Return validated diagonal weights for normal equations."""
+def _residual_weights(sqrt_weights, size, *, dtype=float):
+    """Return validated diagonal residual weights."""
     if sqrt_weights is None:
-        return np.ones(size)
-    values = np.asarray(sqrt_weights, dtype=float).reshape(-1)
+        return np.ones(size, dtype=dtype)
+    values = np.asarray(sqrt_weights, dtype=dtype).reshape(-1)
     if values.size != size:
         raise ValueError(f"sqrt_weights must contain {size} values; got {values.size}.")
     if not np.all(np.isfinite(values)) or np.any(values < 0.0):
         raise ValueError("sqrt_weights must be finite and non-negative.")
-    return values**2
+    return values
 
 
 def _reshape_columns(values, size, *, array_module=np):
@@ -63,8 +72,16 @@ def _scale_rows(values, row_weights, *, array_module=np):
     return weights * values if values.ndim == 1 else weights.reshape(-1, 1) * values
 
 
-def dense_full_rank_least_squares_factor(data_matrix, *, sqrt_weights=None) -> np.ndarray:
-    """Return the lower Cholesky factor of a weighted normal matrix."""
+def dense_full_rank_least_squares_map(
+    data_matrix, *, sqrt_weights=None, input_shape=None, output_shape=None
+) -> LinearMap:
+    """Build full-rank analysis from a dense synthesis matrix on the CPU.
+
+    Return the map ``b -> argmin_x ||W (A x - b)||``. Retain the
+    lower Cholesky factor of ``A* W**2 A`` instead of a rectangular
+    analysis matrix. For an existing factor and a structured synthesis
+    operator, use :func:`cholesky_least_squares_map` directly.
+    """
     data = np.asarray(data_matrix)
     if data.ndim != 2:
         raise ValueError(f"data_matrix must be two-dimensional; got shape {data.shape}.")
@@ -74,59 +91,36 @@ def dense_full_rank_least_squares_factor(data_matrix, *, sqrt_weights=None) -> n
     if not np.all(np.isfinite(data)):
         raise ValueError("data_matrix must contain only finite values.")
 
-    objective_weights = _squared_objective_weights(sqrt_weights, data_size)
+    objective_weights = _residual_weights(sqrt_weights, data_size) ** 2
     data_adjoint = data.T if np.isrealobj(data) else data.T.conjugate()
     if np.all(objective_weights == 1.0):
         normal_matrix = data_adjoint @ data
     else:
         normal_matrix = data_adjoint @ (objective_weights.reshape(-1, 1) * data)
     try:
-        return cholesky(normal_matrix, lower=True, check_finite=False)
+        factor = cholesky(normal_matrix, lower=True, check_finite=False)
     except np.linalg.LinAlgError as exc:
         raise ValueError("data_matrix must have full column rank.") from exc
+    return cholesky_least_squares_map(
+        as_linear_map(data, input_shape=output_shape, output_shape=input_shape),
+        factor,
+        sqrt_weights=sqrt_weights,
+    )
 
 
 def _solve_cholesky_factor(factor, rhs, array_module):
     """Solve a positive-definite system from its lower factor."""
-    factor_is_complex = np.issubdtype(factor.dtype, np.complexfloating)
     if array_module is not np:
-        from jax.scipy.linalg import solve_triangular
+        from jax.scipy.linalg import cho_solve as solve
 
-        lower_factor = array_module.asarray(factor)
-        intermediate = solve_triangular(lower_factor, rhs, lower=True)
-        return solve_triangular(
-            array_module.swapaxes(array_module.conjugate(lower_factor), -2, -1),
-            intermediate,
-            lower=False,
-        )
-    if np.iscomplexobj(rhs) and not factor_is_complex:
+        return solve((factor, True), rhs)
+    if np.iscomplexobj(rhs) and not np.iscomplexobj(factor):
+        # Keep the real LAPACK factor: promoting the whole matrix to
+        # complex for every RHS costs more than these two real solves.
         return cho_solve((factor, True), rhs.real, check_finite=False) + 1j * cho_solve(
             (factor, True), rhs.imag, check_finite=False
         )
     return cho_solve((factor, True), rhs, check_finite=False)
-
-
-def dense_full_rank_least_squares_map(
-    data_matrix, *, sqrt_weights=None, input_shape=None, output_shape=None, normal_factor=None
-) -> LinearMap:
-    """Factor a dense full-column-rank least-squares response map.
-
-    The returned operator maps ``b`` to the unique minimizer of
-    ``||W (A x - b)||``. A Cholesky factorization of ``A* W**2 A`` is
-    retained, while the rectangular analysis matrix remains implicit.
-    """
-    data = np.asarray(data_matrix)
-    if data.ndim != 2:
-        raise ValueError(f"data_matrix must be two-dimensional; got shape {data.shape}.")
-    if data.shape[0] < data.shape[1]:
-        raise ValueError("data_matrix must have at least as many rows as columns.")
-    if normal_factor is None:
-        normal_factor = dense_full_rank_least_squares_factor(data, sqrt_weights=sqrt_weights)
-    return cholesky_least_squares_map(
-        as_linear_map(data, input_shape=output_shape, output_shape=input_shape),
-        normal_factor,
-        sqrt_weights=sqrt_weights,
-    )
 
 
 def cholesky_least_squares_map(data_operator, normal_factor, *, sqrt_weights=None) -> LinearMap:
@@ -141,7 +135,7 @@ def cholesky_least_squares_map(data_operator, normal_factor, *, sqrt_weights=Non
     expected_shape = (solution_size, solution_size)
     if factor.shape != expected_shape:
         raise ValueError(f"normal_factor must have shape {expected_shape}; got {factor.shape}.")
-    objective_weights = _squared_objective_weights(sqrt_weights, data_size)
+    objective_weights = _residual_weights(sqrt_weights, data_size) ** 2
 
     def solve_coefficients(grid_values):
         array_module = data.array_module(grid_values, factor)
@@ -169,55 +163,86 @@ def cholesky_least_squares_map(data_operator, normal_factor, *, sqrt_weights=Non
     )
 
 
-def sparse_constrained_least_squares_map(
-    data_matrix, constraint_matrix, *, sqrt_weights=None, input_shape=None, output_shape=None
+def sparse_least_squares_map(
+    data_matrix,
+    constraint_matrix=None,
+    *,
+    regularization=None,
+    sqrt_weights=None,
+    input_shape=None,
+    output_shape=None,
 ) -> LinearMap:
     """Factor a sparse equality-constrained least-squares response map.
 
     The returned operator maps ``b`` to the unique constrained
-    minimizer of ``||W (A x - b)||`` subject to ``C x = 0``. Its
+    minimizer of ``||W (A x - b)||² + ||R x||²`` subject to ``C x = 0``.
+    Both the already-scaled penalty R and the constraints C are optional. Its
     adjoint reuses the sparse KKT factorization, so the map remains
     composable without dense materialization.
+
+    Factorization and solves use SciPy on the CPU. JAX application
+    uses a host callback for each RHS block; it is JIT-compatible,
+    not a GPU-native sparse solve.
     """
     data = sp.csr_matrix(data_matrix)
-    constraints = sp.csr_matrix(constraint_matrix)
     data_size, solution_size = data.shape
+    constraints = (
+        sp.csr_matrix((0, solution_size), dtype=data.dtype)
+        if constraint_matrix is None
+        else sp.csr_matrix(constraint_matrix)
+    )
     if constraints.shape[1] != solution_size:
         raise ValueError("constraint_matrix must have the same number of columns as data_matrix.")
+    constraints = _normalized_constraint_rows(constraints)
+    penalty = (
+        sp.csr_matrix((0, solution_size), dtype=data.dtype)
+        if regularization is None
+        else sp.csr_matrix(regularization)
+    )
+    if penalty.shape[1] != solution_size:
+        raise ValueError("regularization must have the same number of columns as data_matrix.")
 
-    objective_weights = _squared_objective_weights(sqrt_weights, data_size)
+    dtype = np.result_type(
+        data.dtype,
+        constraints.dtype,
+        penalty.dtype,
+        0.0 if sqrt_weights is None else np.asarray(sqrt_weights).dtype,
+        0.0,
+    )
+    real_dtype = np.empty((), dtype=dtype).real.dtype
+    residual_weights = _residual_weights(sqrt_weights, data_size, dtype=real_dtype)
 
-    weighted_data = sp.diags(np.sqrt(objective_weights)) @ data
-    normal_matrix = weighted_data.T.conjugate() @ weighted_data
+    # A common residual scale does not change this constrained minimizer.
+    # Remove it before forming the KKT system, whose constraint rows have
+    # an independent scale. Otherwise units alone can spoil its pivots.
+    weighted_data = sp.diags(residual_weights) @ data
+    residual_scale = max(
+        np.max(np.abs(weighted_data.data), initial=0.0),
+        np.max(np.abs(penalty.data), initial=0.0),
+    )
+    if residual_scale > 0:
+        # Sparse true-division promotes float32 in SciPy. Multiplication
+        # preserves precision, while normalizing W b separately avoids
+        # squaring a potentially very small/large residual scale.
+        weighted_data = weighted_data * np.reciprocal(residual_scale)
+        penalty = penalty * np.reciprocal(residual_scale)
+        residual_weights = residual_weights / residual_scale
+    normal_matrix = weighted_data.T.conjugate() @ weighted_data + penalty.T.conjugate() @ penalty
     kkt_matrix = sp.bmat(
         [[normal_matrix, constraints.T.conjugate()], [constraints, None]], format="csc"
     )
-    factor = splu(kkt_matrix)
-    data_adjoint = data.T.conjugate().tocsr()
-    data_coo = data.tocoo()
-    data_coo_parts = (data_coo.data, np.column_stack([data_coo.row, data_coo.col]), data_coo.shape)
-    data_adjoint_coo = data_adjoint.tocoo()
-    data_adjoint_coo_parts = (
-        data_adjoint_coo.data,
-        np.column_stack([data_adjoint_coo.row, data_adjoint_coo.col]),
-        data_adjoint_coo.shape,
-    )
+    factors = BoundedCache(2)
+    factors.store(kkt_matrix.dtype, splu(kkt_matrix))
+    data_operator = as_linear_map(weighted_data)
     constraint_size = constraints.shape[0]
-    factor_is_complex = np.issubdtype(factor.L.dtype, np.complexfloating)
-
-    def jax_sparse_matmul(matrix_parts, values):
-        from jax.experimental.sparse import BCOO
-
-        array_module = get_array_module(values)
-        matrix_data, matrix_indices, matrix_shape = matrix_parts
-        operator = BCOO(
-            (array_module.asarray(matrix_data), array_module.asarray(matrix_indices)),
-            shape=matrix_shape,
-        )
-        return operator @ values
 
     def solve_factor_numpy(rhs, *, trans="N"):
         values = np.asarray(rhs)
+        # A later higher-precision RHS needs matching factors, just as for
+        # dense normal_solve. Complex RHS can still use two real solves.
+        dtype = np.result_type(kkt_matrix.dtype, values.real.dtype)
+        factor = factors.get_or_create(dtype, lambda: splu(kkt_matrix.astype(dtype)))
+        factor_is_complex = np.issubdtype(dtype, np.complexfloating)
         if np.iscomplexobj(values) and not factor_is_complex:
             return factor.solve(values.real, trans=trans) + 1j * factor.solve(
                 values.imag, trans=trans
@@ -231,13 +256,15 @@ def sparse_constrained_least_squares_map(
 
         import jax
 
-        result_dtype = np.result_type(kkt_matrix.dtype, np.dtype(rhs.dtype))
+        result_dtype = jax.dtypes.canonicalize_dtype(
+            np.result_type(kkt_matrix.dtype, np.dtype(rhs.dtype))
+        )
         result_shape = jax.ShapeDtypeStruct(rhs.shape, result_dtype)
 
         def callback(values):
             return np.asarray(solve_factor_numpy(values, trans=trans), dtype=result_dtype)
 
-        return jax.pure_callback(callback, result_shape, rhs)
+        return jax.pure_callback(callback, result_shape, rhs, vmap_method="sequential")
 
     def append_constraint_zeros(values):
         array_module = get_array_module(values)
@@ -249,12 +276,8 @@ def sparse_constrained_least_squares_map(
     def solve_coefficients(grid_values):
         array_module = get_array_module(grid_values)
         values = _reshape_columns(grid_values, data_size, array_module=array_module)
-        weighted_values = _scale_rows(values, objective_weights, array_module=array_module)
-        normal_rhs = (
-            data_adjoint @ weighted_values
-            if array_module is np
-            else jax_sparse_matmul(data_adjoint_coo_parts, weighted_values)
-        )
+        weighted_values = _scale_rows(values, residual_weights, array_module=array_module)
+        normal_rhs = data_operator.rmatmat(weighted_values)
         rhs = append_constraint_zeros(normal_rhs)
         return solve_factor(rhs)[:solution_size]
 
@@ -263,16 +286,12 @@ def sparse_constrained_least_squares_map(
         values = _reshape_columns(coefficients, solution_size, array_module=array_module)
         rhs = append_constraint_zeros(values)
         normal_solution = solve_factor(rhs, trans="H")[:solution_size]
-        analyzed = (
-            data @ normal_solution
-            if array_module is np
-            else jax_sparse_matmul(data_coo_parts, normal_solution)
-        )
-        return _scale_rows(analyzed, objective_weights, array_module=array_module)
+        analyzed = data_operator.matmat(normal_solution)
+        return _scale_rows(analyzed, residual_weights, array_module=array_module)
 
     return LinearMap(
         shape=(solution_size, data_size),
-        dtype=np.result_type(data.dtype, objective_weights.dtype),
+        dtype=kkt_matrix.dtype,
         matvec=lambda values: solve_coefficients(values).reshape(-1),
         rmatvec=lambda values: solve_adjoint(values).reshape(-1),
         matmat=solve_coefficients,
@@ -283,17 +302,33 @@ def sparse_constrained_least_squares_map(
 
 
 class LeastSquaresSolver:
-    """A collection of algorithms for solving least-squares problems."""
+    """A selected least-squares algorithm with reusable problem factors.
+
+    An omitted ``method`` uses ``KOMPE_LEAST_SQUARES_SOLVER`` (default
+    ``normal_pinv``). The algorithm is fixed when this object is created.
+
+    ``tolerance`` defaults to ``1e-15``. For ``svd``, it is a
+    relative cutoff on singular values of the
+    weighted, regularized system. For ``normal_pinv``, it is a cutoff
+    on the normal matrix's eigenvalues (squared singular values).
+    LSMR and CGLS use it as their iterative convergence tolerance.
+    ``normal_solve`` is a direct LU solve and does not truncate modes.
+    """
 
     VALID_SOLVERS: Final[tuple[str, ...]] = ("normal_solve", "normal_pinv", "lsmr", "cgls", "svd")
     VALID_PRECONDITIONERS: Final[tuple[str, ...]] = ("jacobi", "pinv")
 
     def __init__(
-        self, solver: str = "lsmr", tolerance: float = 1e-15, preconditioner: str | None = None
+        self,
+        method: str | None = None,
+        tolerance: float = 1e-15,
+        preconditioner: str | None = None,
     ):
-        if solver not in self.VALID_SOLVERS:
+        if method is None:
+            method = get_default_least_squares_solver()
+        elif method not in self.VALID_SOLVERS:
             raise ValueError(f"Solver must be one of {self.VALID_SOLVERS}")
-        self.solver = solver
+        self.method = method
         if isinstance(tolerance, (bool, np.bool_)):
             raise TypeError("tolerance must be a finite non-negative scalar.")
         tolerance = float(tolerance)
@@ -317,10 +352,17 @@ class LeastSquaresSolver:
         Nonzero LSMR ``damp`` cannot be combined with a right preconditioner,
         which would change the regularization coordinates. Express that
         regularization in ``problem`` instead.
+        ``x0`` is in the original coefficient space: one field (or flat
+        vector) shared by all RHSs, or ``solution_shape + rhs_batch_shape``.
+        LSMR solves for a correction to x0; penalties in the problem retain
+        their original zero-centred meaning. Its ``damp`` penalizes the correction.
         """
-        preconditioner_map = self._prepare_preconditioner(problem, preconditioner)
+        original_shape = problem.solution_shape
+        problem, solution_basis, preconditioner_map = self._prepare_coordinates(
+            problem, preconditioner
+        )
         if (
-            self.solver == "lsmr"
+            self.method == "lsmr"
             and preconditioner_map is not None
             and kwargs.get("damp", 0.0) != 0.0
         ):
@@ -330,26 +372,52 @@ class LeastSquaresSolver:
                 "Specify regularization in LeastSquaresProblem instead."
             )
         rhs_block, rhs_shape, num_rhs = problem.assemble_rhs_block(
-            rhs, include_regularization=self.solver != "normal_pinv"
+            rhs, include_regularization=self.method not in {"normal_pinv", "normal_solve"}
         )
+        if kwargs.get("x0") is not None:
+            initial, batch_shape = as_rhs_block(kwargs["x0"], original_shape)
+            if batch_shape and batch_shape != rhs_shape:
+                raise ValueError("x0 must be one coefficient field or have the RHS batch shape.")
+            xp = get_array_module(rhs_block, initial)
+            rhs_block = xp.asarray(rhs_block)
+            initial = xp.broadcast_to(xp.asarray(initial), (initial.shape[0], num_rhs))
+            if solution_basis is not None:
+                initial = solution_basis.rmatmat(initial)
+            kwargs = {**kwargs, "x0": initial}
 
-        if self.solver == "svd":
+        if self.method == "svd":
             solver_func = self._solve_svd
-        elif self.solver == "normal_solve":
+        elif self.method == "normal_solve":
             solver_func = self._solve_normal_solve
-        elif self.solver == "normal_pinv":
+        elif self.method == "normal_pinv":
             solver_func = self._solve_normal_pinv
-        elif self.solver == "lsmr":
+        elif self.method == "lsmr":
             solver_func = self._solve_lsmr
         else:
             solver_func = self._solve_cgls
         solution_block = solver_func(problem, rhs_block, num_rhs, preconditioner_map, **kwargs)
-        return solution_block.reshape(problem.solution_shape + rhs_shape)
+        solution = solution_block.reshape(problem.solution_shape + rhs_shape)
+        return solution if solution_basis is None else solution_basis(solution)
+
+    def _prepare_coordinates(self, problem, preconditioner):
+        """Reuse constrained coordinates and preconditioners for solve and prepare."""
+        basis = None
+        if problem.constraints is not None and not (
+            self.method == "normal_solve" and problem.system_operator.is_sparse
+        ):
+            basis = problem.solution_basis
+            if preconditioner is not None:
+                full = self._prepare_preconditioner(problem, preconditioner)
+                preconditioner = problem._restricted_preconditioners.get_or_create(
+                    full, lambda: basis.adjoint() @ full @ basis
+                )
+            problem = problem.reduced_problem
+        return problem, basis, self._prepare_preconditioner(problem, preconditioner)
 
     def build_preconditioner(
         self, problem: LeastSquaresProblem, preconditioner_type: str | None = None
     ) -> LinearMap | None:
-        """Build preconditioner for the specified solver and problem."""
+        """Build and reuse a preconditioner for this algorithm and problem."""
         selected_type = (
             preconditioner_type if preconditioner_type is not None else self.preconditioner_type
         )
@@ -357,24 +425,45 @@ class LeastSquaresSolver:
             return None
         if selected_type not in self.VALID_PRECONDITIONERS:
             raise ValueError(f"Preconditioner must be one of {self.VALID_PRECONDITIONERS}")
-        if self.solver not in {"cgls", "lsmr"}:
-            raise ValueError(f"Solver '{self.solver}' does not accept a preconditioner.")
-        if selected_type == "jacobi":
-            return self._build_jacobi_preconditioner(problem, square_root=self.solver == "lsmr")
-        return self._build_pinv_preconditioner(problem, squared=self.solver == "cgls")
+        if self.method not in {"cgls", "lsmr"}:
+            raise ValueError(f"Solver '{self.method}' does not accept a preconditioner.")
+        key = (
+            self.method,
+            selected_type,
+            self.tolerance if selected_type == "pinv" else None,
+            get_backend(*problem.backend_operands),
+        )
+        if problem.constraints is not None:
+
+            def constrained_preconditioner():
+                reduced = self.build_preconditioner(problem.reduced_problem, selected_type)
+                Z = problem.solution_basis
+                full = Z @ reduced @ Z.adjoint()
+                # Public preconditioners act on full coefficient fields;
+                # the solve can reuse their original independent coordinates.
+                problem._restricted_preconditioners.store(full, reduced)
+                return full
+
+            return problem._preconditioner_cache.get_or_create(key, constrained_preconditioner)
+        return problem._preconditioner_cache.get_or_create(
+            key,
+            lambda: (
+                self._build_jacobi_preconditioner(problem, square_root=self.method == "lsmr")
+                if selected_type == "jacobi"
+                else self._build_pinv_preconditioner(problem, squared=self.method == "cgls")
+            ),
+        )
 
     def prepare(
         self, problem: LeastSquaresProblem, preconditioner: PreconditionerInput = None
     ) -> Callable[[np.ndarray | list[np.ndarray]], Any]:
         """Return a reusable solver for matching RHS response blocks."""
-        preconditioner_map = self._prepare_preconditioner(problem, preconditioner)
-        if self.solver == "normal_pinv":
-            return self._build_normal_pinv_response_solver(problem)
-
-        def solve_response(rhs: np.ndarray | list[np.ndarray]) -> Any:
-            return self.solve(problem, rhs, preconditioner=preconditioner_map)
-
-        return solve_response
+        problem, basis, preconditioner_map = self._prepare_coordinates(problem, preconditioner)
+        if self.method == "normal_pinv":
+            solve = self._build_normal_pinv_response_solver(problem)
+        else:
+            solve = partial(self.solve, problem, preconditioner=preconditioner_map)
+        return solve if basis is None else lambda rhs: basis(solve(rhs))
 
     def _solve_svd(
         self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args
@@ -386,12 +475,57 @@ class LeastSquaresSolver:
     def _solve_normal_solve(
         self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args
     ) -> np.ndarray:
-        """Solve the normal equations with a direct dense solve."""
-        xp, _, system_adjoint, normal_matrix = problem.dense_normal_equations(
-            backend=get_backend(rhs_block)
-        )
-        normal_rhs = system_adjoint @ block_until_ready(rhs_block)
-        return synchronize_linalg_result(xp.linalg.solve(normal_matrix, normal_rhs))
+        """Apply a reusable LU solve to the data term's normal RHS."""
+        xp = get_array_module(rhs_block)
+        data = problem.data_operator
+        if (
+            problem.constraints is None
+            and data.is_diagonal
+            and all(penalty.is_diagonal for penalty in problem.regularization_operators)
+        ):
+            # Independent coefficients need only vector division, on-device.
+            values = data.diagonal()
+            penalties = problem.regularization_operators
+            if not penalties:
+                if xp is np and np.any(values == 0):
+                    raise np.linalg.LinAlgError("Singular normal matrix.")
+                return rhs_block / values[:, None]
+            penalty_values = [penalty.diagonal() for penalty in penalties]
+            scale = xp.abs(values)
+            for penalty in penalty_values:
+                scale = xp.maximum(scale, xp.abs(penalty))
+            if xp is np and np.any(scale == 0):
+                raise np.linalg.LinAlgError("Singular normal matrix.")
+            normalized = values / scale
+            diagonal = xp.abs(normalized) ** 2
+            for penalty in penalty_values:
+                diagonal = diagonal + xp.abs(penalty / scale) ** 2
+            return (normalized.conj() / diagonal)[:, None] * (rhs_block / scale[:, None])
+        if problem.system_operator.is_sparse:
+            if problem._sparse_analysis_operator is None:
+                penalty = (
+                    vstack_linear_maps(problem.regularization_operators).to_sparse_matrix()
+                    if problem.regularization_operators
+                    else None
+                )
+                problem._sparse_analysis_operator = sparse_least_squares_map(
+                    data.to_sparse_matrix(),
+                    problem.constraints,
+                    regularization=penalty,
+                    input_shape=data.output_shape,
+                    output_shape=problem.solution_shape,
+                )
+            return problem._sparse_analysis_operator.matmat(rhs_block)
+        factors = problem._dense_normal_lu(rhs_block.dtype, backend=get_backend(rhs_block))
+        # A higher-precision regularizer also promotes the data adjoint
+        # product, just as it does in the full augmented system.
+        rhs_block = xp.asarray(block_until_ready(rhs_block), dtype=factors[0].dtype)
+        normal_rhs = problem.data_operator.rmatmat(rhs_block)
+        solve = lu_solve
+        if xp is not np:
+            from jax.scipy.linalg import lu_solve as solve
+
+        return synchronize_linalg_result(solve(factors, normal_rhs, check_finite=False))
 
     def _solve_normal_pinv(
         self, problem: LeastSquaresProblem, rhs_block: np.ndarray, *_args
@@ -411,13 +545,12 @@ class LeastSquaresSolver:
         # LinearMap reuses its device copies when later RHS backends differ.
         normal_pinv = as_linear_map(problem.dense_normal_pinv(self.tolerance))
         data_adjoint = problem.data_operator.adjoint()
-        data_adjoint.to_matrix(backend=get_backend(*normal_pinv.backend_operands))
 
         def solve_response(rhs: np.ndarray | list[np.ndarray]) -> Any:
             rhs_block, rhs_shape, _ = problem.assemble_rhs_block(rhs, include_regularization=False)
             backend = get_backend(rhs_block)
             solution_block = normal_pinv.to_matrix(backend=backend) @ (
-                data_adjoint.to_matrix(backend=backend) @ rhs_block
+                data_adjoint.matmat(rhs_block)
             )
             return block_until_ready(solution_block.reshape(problem.solution_shape + rhs_shape))
 
@@ -433,28 +566,77 @@ class LeastSquaresSolver:
     ) -> np.ndarray:
         xp = get_array_module(rhs_block)
         system_map = problem.system_operator
-        solve_map, recover_solution = self._preconditioned_system(system_map, preconditioner)
         lsmr_options = self._lsmr_options(system_map, kwargs)
-        if xp is np:
-            solve = lsmr
-            solve_map = solve_map.as_linear_operator()
-        else:
-            from kompe.math.jax_lsmr import lsmr as solve
+        if xp is not np:
+            import jax
+
+            from kompe.math.jax_iterative import solve_lsmr_columns
+
+            # The problem owns its compiled kernels. A module-global JIT
+            # cache with static map arguments would retain old operators.
+            solve = problem._compiled_iterative_solvers.get_or_create(
+                ("lsmr", preconditioner),
+                lambda: jax.jit(
+                    partial(solve_lsmr_columns, system_map, preconditioner=preconditioner),
+                    static_argnames=("maxiter",),
+                ),
+            )
+            solution, codes = solve(rhs_block, **lsmr_options)
+
+            def warn(codes):
+                for column, code in enumerate(codes):
+                    self._warn_if_lsmr_not_converged(int(code), column)
+
+            if _is_jax_tracer(codes):
+                # Diagnostics cross to Python only on a failed convergence
+                # test, never once per iteration or for successful JIT solves.
+                jax.lax.cond(
+                    xp.any(codes > 2), lambda: jax.debug.callback(warn, codes), lambda: None
+                )
+            else:
+                warn(to_numpy(codes))
+            return solution
+
+        initial = lsmr_options.pop("x0", None)
+        if initial is not None:
+            # Solve A P y = b - A x0, then x = x0 + P y. The initial
+            # guess remains in coefficient space, without inverting P.
+            rhs_block = rhs_block - system_map.matmat(initial)
+        solve_map = system_map if preconditioner is None else system_map @ preconditioner
 
         columns = []
         for column in range(num_rhs):
-            solution_y, stop_code, *_ = solve(solve_map, rhs_block[:, column], **lsmr_options)
+            rhs = rhs_block[:, column]
+            # LSMR's initial condition estimate contains unit-sized terms.
+            # Scale the entire objective (including damping), not its relative
+            # weights, using the first bidiagonalization norm ||A* b||/||b||.
+            # This needs one adjoint action, not a matrix or a norm estimate
+            # assembled by probing every coefficient.
+            norm_rhs = float(xp.linalg.norm(rhs))
+            scale = (
+                float(xp.linalg.norm(solve_map.rmatvec(rhs / norm_rhs))) if norm_rhs > 0 else 0.0
+            )
+            if scale == 0.0:
+                scale = 1.0  # Zero/orthogonal RHS: let LSMR report its usual stop code.
+            # This scale is transient and RHS-specific. Scale the vector
+            # actions, not a dense copy of A for every right-hand side.
+            normalized_map = LinearMap(
+                shape=solve_map.shape,
+                dtype=solve_map.dtype,
+                matvec=lambda x, scale=scale: solve_map.matvec(x) / scale,
+                rmatvec=lambda x, scale=scale: solve_map.rmatvec(x) / scale,
+                backend_operands=solve_map.backend_operands,
+            )
+            options = {**lsmr_options, "damp": lsmr_options.get("damp", 0.0) / scale}
+            solution_y, stop_code, *_ = lsmr(
+                normalized_map.as_linear_operator(), rhs / scale, **options
+            )
             self._warn_if_lsmr_not_converged(stop_code, column)
-            columns.append(recover_solution(solution_y))
-        return xp.stack(columns, axis=1)
-
-    def _preconditioned_system(
-        self, system_map: LinearMap, preconditioner: LinearMap | None
-    ) -> tuple[LinearMap, Callable[[Any], Any]]:
-        """Return the solve operator and solution transform."""
-        if preconditioner is None:
-            return system_map, lambda y_vec: y_vec
-        return system_map @ preconditioner, preconditioner.matvec
+            columns.append(solution_y)
+        solution = xp.stack(columns, axis=1)
+        if preconditioner is not None:
+            solution = preconditioner.matmat(solution)
+        return solution if initial is None else initial + solution
 
     def _lsmr_options(self, system_map: LinearMap, options: dict[str, Any]) -> dict[str, Any]:
         """Return LSMR options with the default iteration cap."""
@@ -511,9 +693,15 @@ class LeastSquaresSolver:
             "maxiter": max_iter,
             **kwargs,
         }
+        initial = cg_kwargs.pop("x0", None)
         columns = []
         for column in range(num_rhs):
-            sol, exit_code = cg(normal_op, cg_rhs[:, column], **cg_kwargs)
+            sol, exit_code = cg(
+                normal_op,
+                cg_rhs[:, column],
+                x0=None if initial is None else initial[:, column],
+                **cg_kwargs,
+            )
             if exit_code != 0:
                 warnings.warn(
                     f"CGLS solver did not converge for RHS column {column} "
@@ -533,33 +721,53 @@ class LeastSquaresSolver:
         **kwargs,
     ) -> Any:
         """Solve normal equations with JAX CG."""
-        from jax.scipy.sparse.linalg import cg as jax_cg
+        import jax
+
+        from kompe.math.jax_iterative import solve_cgls_columns
 
         system_map = problem.system_operator
-        cg_rhs = system_map.rmatmat(rhs_block).reshape(problem.solution_size, num_rhs)
         max_iter = kwargs.pop("maxiter", ITERATION_SAFETY_FACTOR * problem.solution_size)
         tolerance = kwargs.pop("tol", kwargs.pop("rtol", self.tolerance))
         cg_kwargs = {"tol": tolerance, "atol": kwargs.pop("atol", 0.0), "maxiter": max_iter}
         cg_kwargs.update(kwargs)
 
-        def normal_matvec(x_vec):
-            return system_map.rmatvec(system_map.matvec(x_vec))
+        solve = problem._compiled_iterative_solvers.get_or_create(
+            ("cgls", preconditioner),
+            lambda: jax.jit(
+                partial(solve_cgls_columns, system_map, preconditioner=preconditioner),
+                static_argnames=("maxiter",),
+            ),
+        )
+        solution, converged = solve(rhs_block, **cg_kwargs)
 
-        apply_preconditioner = None if preconditioner is None else preconditioner.matvec
-        columns = []
-        for column in range(num_rhs):
-            sol, _ = jax_cg(normal_matvec, cg_rhs[:, column], M=apply_preconditioner, **cg_kwargs)
-            columns.append(sol)
-        return get_array_module(rhs_block).stack(columns, axis=1)
+        def warn(converged):
+            columns = np.flatnonzero(~converged)
+            if columns.size:
+                warnings.warn(
+                    f"CGLS solver did not converge for RHS columns {columns.tolist()}: "
+                    "the true normal residual exceeds the requested tolerance.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+
+        if _is_jax_tracer(converged):
+            jax.lax.cond(
+                get_array_module(converged).all(converged),
+                lambda: None,
+                lambda: jax.debug.callback(warn, converged),
+            )
+        else:
+            warn(to_numpy(converged))
+        return solution
 
     def _prepare_preconditioner(
         self, problem: LeastSquaresProblem, preconditioner: PreconditionerInput
     ) -> LinearMap | None:
         """Return a validated preconditioner for an iterative solver."""
         if preconditioner is None:
-            return None
-        if self.solver not in {"lsmr", "cgls"}:
-            raise ValueError(f"Solver '{self.solver}' does not accept a preconditioner.")
+            return self.build_preconditioner(problem)
+        if self.method not in {"lsmr", "cgls"}:
+            raise ValueError(f"Solver '{self.method}' does not accept a preconditioner.")
         preconditioner_map = as_linear_map(preconditioner)
         expected_shape = (problem.solution_size, problem.solution_size)
         if preconditioner_map.shape != expected_shape:

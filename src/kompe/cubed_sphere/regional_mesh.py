@@ -101,9 +101,9 @@ class RegionalCSMesh(StructuredSurfaceMesh):
         projection : RegionalCSProjection
             Coordinate projection that sets the mesh centre and orientation.
         length : float
-            Physical extent along xi, parallel to ``projection.orientation``.
+            Nominal physical extent along xi, parallel to ``projection.orientation``.
         width : float
-            Physical extent along eta, perpendicular to
+            Nominal physical extent along eta, perpendicular to
             ``projection.orientation``.
         radius : float
             Radius of the sphere, in the same units as the dimensions and any
@@ -115,20 +115,28 @@ class RegionalCSMesh(StructuredSurfaceMesh):
             Persisted ``(eta, xi)`` form of the physical cell sizes. Interactive
             code should prefer the explicitly named cell-size parameters below.
         xi_cell_size, eta_cell_size : float, optional
-            Target physical cell sizes parallel and perpendicular to the projection
-            orientation, respectively. The final uniform spacing is adjusted slightly
-            so the requested extent is exact. Both values must be provided together.
+            Nominal cell sizes parallel and perpendicular to the projection
+            orientation. They determine cell counts; uniform angular spacing
+            is adjusted to span the requested chart. Both values are required.
         xi_edges, eta_edges : array-like, optional
             Exact uniformly spaced computational-coordinate edges in radians. Prefer
             :meth:`from_edges` when constructing a mesh this way.
         xi_shift : float, optional
-            Physical displacement along the xi axis, in the same units as ``radius``.
+            Offset in the same units as ``radius``. Positive values move the
+            mesh toward decreasing xi by ``xi_shift / radius`` radians.
 
         Notes
         -----
         Provide exactly one construction mode: ``shape``, one cell-size form, or
         both explicit edge arrays. Explicit physical-axis names avoid depending on
         NumPy's ``(eta, xi)`` array-axis order when specifying resolution.
+
+        The inherited SECSy dimension convention sets the total angular spans
+        to ``atan(length / radius)`` and ``atan(width / radius)``. These nominal
+        dimensions approximate arc lengths for small patches; they are not
+        exact surface distances. Use ``from_edges`` for exact chart geometry.
+        Cell areas use the metric at each centre times ``dxi * deta`` (midpoint
+        quadrature), not exact spherical polygon areas.
 
         """
         if not isinstance(projection, RegionalCSProjection):

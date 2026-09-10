@@ -15,7 +15,7 @@ authors = [
     {name = "Karl M. Laundal"},
 ]
 dependencies = [
-    "numpy>=1.26",
+    "numpy>=2.0",
     "scipy>=1.15",
 ]
 classifiers = [

@@ -109,6 +109,67 @@ def _remap_einsum_components(
     )
 
 
+def _einsum_representation(operator):
+    """Use completed contractions before considering their old factors."""
+    dense = operator._dense_cache.get(operator.array_module())
+    if dense is not None:
+        tensor = dense.reshape(operator.output_shape + operator.input_shape)
+    elif (
+        operator._einsum_map is not None
+        and operator._einsum_map.output_shape == operator.output_shape
+        and operator._einsum_map.input_shape == operator.input_shape
+    ):
+        return operator._einsum_map
+    else:
+        tensor = operator._dense_tensor
+    if tensor is None or tuple(tensor.shape) != operator.output_shape + operator.input_shape:
+        return None
+    return dense_tensor_einsum_map(
+        tensor, output_shape=operator.output_shape, input_shape=operator.input_shape
+    )
+
+
+def fuse_linear_maps(left, right):
+    """Fuse compatible contractions, or retain ordinary operator composition.
+
+    Fusion is an optimization only. Flat-only shape matches, unsupported
+    einsum labels, and maps with specialized normal products keep their
+    original actions. No operand is materialized to discover structure.
+    """
+    if left._normal_matrix_func is not None or right._normal_matrix_func is not None:
+        return None
+    if left.is_diagonal and right.is_diagonal:
+        return None
+    if left.is_diagonal or right.is_diagonal:
+        diagonal, other = (left, right) if left.is_diagonal else (right, left)
+        side = "left" if left.is_diagonal else "right"
+        if diagonal.input_shape != diagonal.output_shape:
+            return None
+        einsum = _einsum_representation(other)
+        if einsum is None:
+            return None
+        expected_shape = einsum.output_shape if side == "left" else einsum.input_shape
+        if diagonal.input_shape != expected_shape:
+            return None
+        try:
+            fused = compose_diagonal_einsum_map(
+                diagonal.diagonal(), diagonal.input_shape, einsum, side=side
+            )
+        except ValueError:
+            # A valid operator need not have a fusible einsum representation.
+            return None
+    else:
+        left_einsum = _einsum_representation(left)
+        right_einsum = _einsum_representation(right)
+        if left_einsum is None or right_einsum is None:
+            return None
+        try:
+            fused = compose_einsum_maps(left_einsum, right_einsum)
+        except ValueError:
+            return None
+    return fused.to_linear_map()
+
+
 def compose_einsum_maps(left: _EinsumMap, right: _EinsumMap) -> _EinsumMap:
     """Return a fused einsum representation of ``left @ right``.
 
@@ -310,8 +371,12 @@ class _EinsumMap:
         dense_matrix = xp.einsum(self.einsum_string_dense, *component_arrays, optimize=True)
         return dense_matrix.reshape(math.prod(self.output_shape), math.prod(self.input_shape))
 
-    def normal_matrix_diag(self) -> np.ndarray:
+    def normal_matrix_diag(self, row_scale=None) -> np.ndarray:
         """Compute ``diag(A* A)`` without building the dense matrix."""
+        if row_scale is not None:
+            return compose_diagonal_einsum_map(
+                row_scale, self.output_shape, self, side="left"
+            ).normal_matrix_diag()
         try:
             self._normal_diag_string()
         except ValueError:
@@ -350,15 +415,16 @@ class _EinsumMap:
 
     def _normal_matrix_diag_einsum(self) -> np.ndarray:
         """Compute ``diag(A* A)`` as a direct tensor contraction."""
-        component_arrays = self._numpy_component_arrays()
+        xp = get_array_module(*self.component_tensors)
+        component_arrays = [xp.asarray(tensor) for tensor in self.component_tensors]
         conj_arrays = [arr.conj() for arr in component_arrays]
-        diag = np.einsum(
+        diag = xp.einsum(
             self._normal_diag_string(),
             *conj_arrays,
             *component_arrays,
-            optimize=self._normal_diag_path(),
+            optimize=self._normal_diag_path() if xp is np else True,
         )
-        return np.asarray(diag).reshape(-1).real
+        return to_numpy(diag.reshape(-1).real)
 
     def _numpy_component_arrays(self) -> list[np.ndarray]:
         """Return cached NumPy component arrays."""
